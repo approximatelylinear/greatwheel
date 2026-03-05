@@ -1,0 +1,1413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Greatwheel Architecture Explorer</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0f1117;
+  --bg-card: #1a1d27;
+  --bg-hover: #252836;
+  --border: #2a2d3a;
+  --text: #e2e4ea;
+  --text-dim: #8b8fa3;
+  --text-bright: #ffffff;
+  --blue: #4A9EFF;
+  --orange: #FF8C42;
+  --green: #4ADE80;
+  --purple: #A78BFA;
+  --yellow: #FBBF24;
+  --red: #F87171;
+  --cyan: #22D3EE;
+  --accent: #4A9EFF;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  overflow: hidden;
+}
+
+code, .mono { font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace; font-size: 0.85em; }
+
+/* Top bar */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 20px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  height: 52px;
+}
+.topbar h1 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-bright);
+  white-space: nowrap;
+}
+.topbar .sep { width: 1px; height: 24px; background: var(--border); }
+.tab-bar { display: flex; gap: 2px; }
+.tab {
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  transition: all 0.15s;
+}
+.tab:hover { color: var(--text); background: var(--bg-hover); }
+.tab.active { color: var(--text-bright); background: var(--accent); }
+
+/* Main layout */
+.main {
+  display: flex;
+  height: calc(100vh - 52px);
+}
+.sidebar {
+  width: 280px;
+  min-width: 280px;
+  background: var(--bg-card);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.sidebar-header {
+  padding: 14px 16px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-dim);
+}
+.sidebar-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 12px 12px;
+}
+.canvas-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.canvas {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Prompt bar */
+.prompt-bar {
+  background: var(--bg-card);
+  border-top: 1px solid var(--border);
+  padding: 10px 16px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: 60px;
+}
+.prompt-text {
+  flex: 1;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  max-height: 80px;
+  overflow-y: auto;
+}
+.prompt-text em { color: var(--text); font-style: normal; font-weight: 500; }
+.copy-btn {
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  background: var(--accent);
+  color: white;
+  border: none;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.copy-btn:hover { filter: brightness(1.15); }
+.copy-btn.copied { background: var(--green); }
+
+/* Detail panel (right side of sidebar) */
+.detail-panel {
+  padding: 12px;
+  background: rgba(74,158,255,0.06);
+  border: 1px solid rgba(74,158,255,0.15);
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+.detail-panel h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-bright);
+  margin-bottom: 6px;
+}
+.detail-panel p {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.detail-panel .tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  margin: 2px 2px 2px 0;
+}
+
+/* Comment system */
+.comment-input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  resize: vertical;
+  min-height: 60px;
+  margin-top: 6px;
+}
+.comment-input:focus { outline: none; border-color: var(--accent); }
+.comment-actions { display: flex; gap: 6px; margin-top: 6px; }
+.btn-sm {
+  padding: 4px 10px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--bg-hover);
+  color: var(--text);
+  transition: all 0.15s;
+}
+.btn-sm:hover { border-color: var(--accent); }
+.btn-sm.primary { background: var(--accent); border-color: var(--accent); color: white; }
+.comment-item {
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+.comment-item .target { color: var(--accent); font-weight: 500; font-size: 11px; }
+.comment-item .text { color: var(--text-dim); margin-top: 3px; line-height: 1.4; }
+.comment-item .del {
+  float: right;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+}
+.comment-item .del:hover { color: var(--red); }
+
+/* SVG canvas */
+svg.diagram { width: 100%; height: 100%; }
+svg .node-rect {
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+svg .node-rect:hover { filter: brightness(1.3); }
+svg .node-label {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  fill: white;
+  pointer-events: none;
+}
+svg .node-sub {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 9.5px;
+  fill: rgba(255,255,255,0.6);
+  pointer-events: none;
+}
+svg .conn-line {
+  fill: none;
+  stroke-width: 1.5;
+}
+svg .conn-label {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-size: 10px;
+  fill: rgba(255,255,255,0.5);
+}
+
+/* Layer band labels */
+svg .band-label {
+  font-family: -apple-system, system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  fill: rgba(255,255,255,0.2);
+}
+
+/* Flow animation */
+.flow-controls {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.flow-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-hover);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+.flow-btn:hover { border-color: var(--accent); }
+.flow-btn.active { background: var(--accent); border-color: var(--accent); color: white; }
+.step-indicator {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-left: 6px;
+}
+.step-desc {
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+.step-desc .step-title {
+  color: var(--text-bright);
+  font-weight: 600;
+  margin-bottom: 3px;
+}
+.step-desc .step-body { color: var(--text-dim); }
+
+/* Schema table view */
+.schema-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.schema-table th {
+  text-align: left;
+  padding: 5px 8px;
+  color: var(--text-dim);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+}
+.schema-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid rgba(42,45,58,0.5);
+  color: var(--text);
+}
+.schema-table td.col-name { font-family: 'SF Mono', monospace; color: var(--accent); }
+.schema-table td.col-type { font-family: 'SF Mono', monospace; color: var(--purple); }
+.schema-table td.col-note { color: var(--text-dim); }
+
+/* Docker service cards */
+.docker-card {
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+.docker-card:hover { filter: brightness(1.2); }
+
+/* Legend */
+.legend {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  font-size: 11px;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-dim);
+}
+.legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+
+/* Checkbox control */
+.check-group { margin-bottom: 12px; }
+.check-group label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.check-group label:hover { background: var(--bg-hover); }
+.check-group input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 14px;
+  height: 14px;
+}
+
+/* Pulse animation for flow */
+@keyframes pulse-dot {
+  0% { r: 4; opacity: 1; }
+  100% { r: 8; opacity: 0; }
+}
+.pulse-circle {
+  animation: pulse-dot 0.8s ease-out infinite;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #3a3d4a; }
+
+/* Hide views */
+.view { display: none; }
+.view.active { display: flex; flex: 1; }
+
+/* Highlighted node border */
+svg .node-commented {
+  stroke: var(--yellow);
+  stroke-width: 2;
+  stroke-dasharray: 4,3;
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>Greatwheel</h1>
+  <div class="sep"></div>
+  <div class="tab-bar">
+    <button class="tab active" onclick="switchView('layers')">Architecture</button>
+    <button class="tab" onclick="switchView('crates')">Crates</button>
+    <button class="tab" onclick="switchView('flow')">Request Flow</button>
+    <button class="tab" onclick="switchView('schema')">Data Model</button>
+    <button class="tab" onclick="switchView('docker')">Docker</button>
+  </div>
+</div>
+
+<div class="main">
+  <!-- ===== ARCHITECTURE VIEW ===== -->
+  <div class="view active" id="view-layers">
+    <div class="sidebar">
+      <div class="sidebar-header">Layers</div>
+      <div class="sidebar-content" id="layers-sidebar">
+        <div class="check-group" id="layer-toggles"></div>
+        <div id="layers-detail"></div>
+        <div class="sidebar-header" style="padding-left:4px; margin-top:8px;">Comments</div>
+        <div id="layers-comments"></div>
+      </div>
+    </div>
+    <div class="canvas-area">
+      <div class="canvas" id="layers-canvas"></div>
+      <div class="legend" id="layers-legend"></div>
+    </div>
+  </div>
+
+  <!-- ===== CRATES VIEW ===== -->
+  <div class="view" id="view-crates">
+    <div class="sidebar">
+      <div class="sidebar-header">Crates</div>
+      <div class="sidebar-content" id="crates-sidebar"></div>
+    </div>
+    <div class="canvas-area">
+      <div class="canvas" id="crates-canvas"></div>
+    </div>
+  </div>
+
+  <!-- ===== FLOW VIEW ===== -->
+  <div class="view" id="view-flow">
+    <div class="sidebar">
+      <div class="sidebar-header">Request Flow</div>
+      <div class="sidebar-content" id="flow-sidebar"></div>
+    </div>
+    <div class="canvas-area">
+      <div class="canvas" id="flow-canvas"></div>
+    </div>
+  </div>
+
+  <!-- ===== SCHEMA VIEW ===== -->
+  <div class="view" id="view-schema">
+    <div class="sidebar">
+      <div class="sidebar-header">Tables</div>
+      <div class="sidebar-content" id="schema-sidebar"></div>
+    </div>
+    <div class="canvas-area">
+      <div class="canvas" id="schema-canvas"></div>
+    </div>
+  </div>
+
+  <!-- ===== DOCKER VIEW ===== -->
+  <div class="view" id="view-docker">
+    <div class="sidebar">
+      <div class="sidebar-header">Services</div>
+      <div class="sidebar-content" id="docker-sidebar"></div>
+    </div>
+    <div class="canvas-area">
+      <div class="canvas" id="docker-canvas"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Prompt bar -->
+<div class="prompt-bar">
+  <div class="prompt-text" id="prompt-output">Click on any component to explore it. Add comments to generate a prompt.</div>
+  <button class="copy-btn" id="copy-btn" onclick="copyPrompt()">Copy Prompt</button>
+</div>
+
+<script>
+// ============================================================
+// STATE
+// ============================================================
+const state = {
+  view: 'layers',
+  layers: {
+    channel: true, scheduler: true, runtime: true,
+    services: true, rlplay: true, ollama: true, postgres: true
+  },
+  selected: null,
+  comments: [],
+  flowStep: 0,
+  flowPlaying: false,
+  selectedSchema: null,
+  selectedDocker: null,
+  selectedCrate: null,
+};
+
+// ============================================================
+// DATA: ARCHITECTURE LAYERS
+// ============================================================
+const COLORS = {
+  channel: '#4A9EFF', scheduler: '#FF8C42', runtime: '#4ADE80',
+  services: '#A78BFA', rlplay: '#FBBF24', ollama: '#F87171',
+  postgres: '#22D3EE'
+};
+
+const layerNodes = [
+  // Channel layer
+  { id: 'http-api', label: 'HTTP API', sub: ':8080', layer: 'channel', x: 100, y: 40, w: 110, h: 42 },
+  { id: 'websocket', label: 'WebSocket', sub: ':8081', layer: 'channel', x: 230, y: 40, w: 110, h: 42 },
+  { id: 'cli', label: 'CLI', sub: 'stdin/stdout', layer: 'channel', x: 360, y: 40, w: 100, h: 42 },
+  { id: 'webhooks', label: 'Webhooks', sub: 'Slack, etc.', layer: 'channel', x: 480, y: 40, w: 110, h: 42 },
+  // Scheduler
+  { id: 'triage', label: 'Triage Agent', sub: 'classifies tasks', layer: 'scheduler', x: 160, y: 120, w: 140, h: 42 },
+  { id: 'queue', label: 'Task Queue', sub: 'per-org concurrency', layer: 'scheduler', x: 360, y: 120, w: 140, h: 42 },
+  // Runtime
+  { id: 'session-a', label: 'Session A', sub: 'ouros sandbox', layer: 'runtime', x: 80, y: 210, w: 120, h: 42 },
+  { id: 'session-b', label: 'Session B', sub: 'ouros sandbox', layer: 'runtime', x: 220, y: 210, w: 120, h: 42 },
+  { id: 'host-bridge', label: 'Host Bridge', sub: 'function dispatch', layer: 'runtime', x: 400, y: 210, w: 130, h: 42 },
+  // Core services
+  { id: 'llm-gate', label: 'LLM Gate', sub: 'gw-llm', layer: 'services', x: 60, y: 300, w: 110, h: 42 },
+  { id: 'memory', label: 'Memory Store', sub: 'Lance+PG', layer: 'services', x: 190, y: 300, w: 120, h: 42 },
+  { id: 'bus', label: 'Msg Bus', sub: 'gw-bus', layer: 'services', x: 330, y: 300, w: 100, h: 42 },
+  { id: 'registry', label: 'Registry', sub: 'agent defs', layer: 'services', x: 450, y: 300, w: 110, h: 42 },
+  { id: 'tracer', label: 'Trace Recorder', sub: 'OTel GenAI', layer: 'services', x: 580, y: 300, w: 130, h: 42 },
+  // rl-play
+  { id: 'rlplay', label: 'rl-play', sub: 'proxy :8000', layer: 'rlplay', x: 190, y: 390, w: 130, h: 42 },
+  // Ollama
+  { id: 'ollama', label: 'Ollama', sub: 'Qwen :11434', layer: 'ollama', x: 190, y: 465, w: 130, h: 42 },
+  // Postgres
+  { id: 'postgres', label: 'PostgreSQL', sub: ':5432', layer: 'postgres', x: 450, y: 430, w: 140, h: 42 },
+];
+
+const layerConns = [
+  { from: 'http-api', to: 'triage', type: 'data' },
+  { from: 'websocket', to: 'triage', type: 'data' },
+  { from: 'cli', to: 'queue', type: 'data' },
+  { from: 'webhooks', to: 'queue', type: 'data' },
+  { from: 'triage', to: 'queue', type: 'data', label: 'dispatch' },
+  { from: 'queue', to: 'session-a', type: 'data' },
+  { from: 'queue', to: 'session-b', type: 'data' },
+  { from: 'session-a', to: 'host-bridge', type: 'call', label: 'pause' },
+  { from: 'session-b', to: 'host-bridge', type: 'call', label: 'pause' },
+  { from: 'host-bridge', to: 'llm-gate', type: 'call' },
+  { from: 'host-bridge', to: 'memory', type: 'call' },
+  { from: 'host-bridge', to: 'bus', type: 'call' },
+  { from: 'llm-gate', to: 'rlplay', type: 'data', label: 'chat' },
+  { from: 'llm-gate', to: 'ollama', type: 'data', label: 'embed' },
+  { from: 'rlplay', to: 'ollama', type: 'data', label: 'forward' },
+  { from: 'memory', to: 'postgres', type: 'data' },
+  { from: 'registry', to: 'postgres', type: 'data' },
+  { from: 'tracer', to: 'postgres', type: 'data' },
+];
+
+const layerInfo = {
+  'http-api': { title: 'HTTP API', desc: 'REST API on port 8080. Accepts task submissions, agent management, health checks. Auth middleware resolves org + user before task creation.' },
+  'websocket': { title: 'WebSocket', desc: 'Real-time bidirectional channel on port 8081. Streams agent responses as they execute. Supports channel.ask() for interactive prompts.' },
+  'cli': { title: 'CLI', desc: 'Local command-line interface for development. Reads from stdin, writes to stdout. Useful for testing agents without HTTP overhead.' },
+  'webhooks': { title: 'Webhooks', desc: 'Inbound webhook adapters for Slack, Discord, GitHub, etc. Normalizes platform-specific payloads into Task envelopes.' },
+  'triage': { title: 'Triage Agent', desc: 'An rLM-powered agent that classifies incoming tasks and dispatches to specialist workers. Runs as a lightweight ouros session itself.' },
+  'queue': { title: 'Task Queue', desc: 'Per-org work queue with concurrency limits. Handles retries with backoff, dead-letter on failure. Checks rate limits before dispatching.' },
+  'session-a': { title: 'Ouros Session', desc: 'Sandboxed Python runtime. Agent code executes here. Host function calls (llm, memory, bus) pause the sandbox. State persists across turns.' },
+  'session-b': { title: 'Ouros Session', desc: 'Each agent invocation gets its own session. Sessions are snapshotted on idle timeout and can be restored later.' },
+  'host-bridge': { title: 'Host Function Bridge', desc: 'Dispatches paused host calls to the right service. Enforces per-agent + per-user permission intersection. Passes CallContext for auth/tracing.' },
+  'llm-gate': { title: 'LLM Gate', desc: 'Routes chat completions through rl-play proxy (for training capture). Sends embeddings direct to Ollama. Tracks token usage.' },
+  'memory': { title: 'Memory Store', desc: 'Hybrid search: LanceDB for vector + full-text + hybrid ranking. Postgres for structured metadata. Per-org table isolation.' },
+  'bus': { title: 'Message Bus', desc: 'Inter-agent communication. agent.call() is synchronous (caller pauses). agent.notify() is fire-and-forget (queued as new task).' },
+  'registry': { title: 'Agent Registry', desc: 'Agent definitions stored in Postgres. File watcher for hot-reload. Version history with rollback support.' },
+  'tracer': { title: 'Trace Recorder', desc: 'OTel GenAI instrumentation. Records spans to Postgres with gen_ai.* attributes. Optional OTLP export for external observability.' },
+  'rlplay': { title: 'rl-play', desc: 'Transparent Ollama proxy. Captures all LLM conversations grouped by session ID. Enables SFT/DPO/PPO fine-tuning pipelines.' },
+  'ollama': { title: 'Ollama', desc: 'Local LLM inference server. Runs Qwen 2.5 models. Handles both chat completions and embeddings (nomic-embed-text).' },
+  'postgres': { title: 'PostgreSQL', desc: 'Relational backbone. Stores orgs, users, sessions, tasks, agent definitions, version history, traces, secrets, rate limit counters.' },
+};
+
+// ============================================================
+// DATA: CRATES
+// ============================================================
+const crateNodes = [
+  { id: 'gw-core', label: 'gw-core', sub: 'shared types', x: 350, y: 260, w: 130, h: 44, color: '#A78BFA',
+    types: ['OrgId', 'UserId', 'AgentId', 'SessionId', 'TaskId', 'SessionKey', 'Task', 'AgentDef', 'AgentSource', 'ToolPermissions', 'CallContext', 'RateLimitConfig'],
+    deps: ['serde', 'serde_json', 'uuid', 'chrono'] },
+  { id: 'gw-runtime', label: 'gw-runtime', sub: 'ouros integration', x: 80, y: 140, w: 140, h: 44, color: '#4ADE80',
+    types: ['SessionManager', 'HostFunctionBridge (trait)'],
+    deps: ['gw-core', 'ouros', 'tokio', 'serde', 'notify'] },
+  { id: 'gw-llm', label: 'gw-llm', sub: 'LLM provider', x: 250, y: 140, w: 120, h: 44, color: '#F87171',
+    types: ['LlmGate (trait)', 'OllamaClient', 'CompletionRequest', 'CompletionResponse'],
+    deps: ['gw-core', 'reqwest', 'serde', 'tokio'] },
+  { id: 'gw-memory', label: 'gw-memory', sub: 'hybrid memory', x: 400, y: 140, w: 130, h: 44, color: '#22D3EE',
+    types: ['MemoryStore (trait)', 'HybridStore', 'RecallOpts', 'SearchMode', 'MemoryScope'],
+    deps: ['gw-core', 'lancedb', 'sqlx', 'serde', 'tokio'] },
+  { id: 'gw-bus', label: 'gw-bus', sub: 'message bus', x: 560, y: 140, w: 110, h: 44, color: '#FF8C42',
+    types: ['AgentBus (trait)'],
+    deps: ['gw-core', 'serde_json', 'tokio'] },
+  { id: 'gw-channels', label: 'gw-channels', sub: 'channel adapters', x: 80, y: 50, w: 140, h: 44, color: '#4A9EFF',
+    types: ['ChannelAdapter (trait)'],
+    deps: ['gw-core', 'axum', 'tokio', 'serde'] },
+  { id: 'gw-scheduler', label: 'gw-scheduler', sub: 'task queue', x: 280, y: 50, w: 140, h: 44, color: '#FF8C42',
+    types: ['Scheduler', 'RateLimiter', 'RateLimitResult'],
+    deps: ['gw-core', 'tokio', 'sqlx'] },
+  { id: 'gw-trace', label: 'gw-trace', sub: 'OTel tracing', x: 480, y: 50, w: 120, h: 44, color: '#FBBF24',
+    types: ['TraceRecorder', 'TraceRecord'],
+    deps: ['gw-core', 'opentelemetry', 'opentelemetry-otlp', 'tracing-opentelemetry', 'sqlx'] },
+  { id: 'gw-server', label: 'gw-server', sub: 'binary', x: 300, y: 380, w: 130, h: 44, color: '#ffffff',
+    types: ['main()', 'Config', 'ServerConfig', 'LlmConfig'],
+    deps: ['all gw-* crates', 'axum', 'tokio', 'clap', 'toml', 'sqlx', 'tracing-subscriber'] },
+];
+
+const crateConns = [
+  { from: 'gw-runtime', to: 'gw-core' },
+  { from: 'gw-llm', to: 'gw-core' },
+  { from: 'gw-memory', to: 'gw-core' },
+  { from: 'gw-bus', to: 'gw-core' },
+  { from: 'gw-channels', to: 'gw-core' },
+  { from: 'gw-scheduler', to: 'gw-core' },
+  { from: 'gw-trace', to: 'gw-core' },
+  { from: 'gw-server', to: 'gw-core' },
+  { from: 'gw-server', to: 'gw-runtime' },
+  { from: 'gw-server', to: 'gw-llm' },
+  { from: 'gw-server', to: 'gw-memory' },
+  { from: 'gw-server', to: 'gw-bus' },
+  { from: 'gw-server', to: 'gw-channels' },
+  { from: 'gw-server', to: 'gw-scheduler' },
+  { from: 'gw-server', to: 'gw-trace' },
+];
+
+// ============================================================
+// DATA: REQUEST FLOW
+// ============================================================
+const flowSteps = [
+  { title: 'User sends message', body: 'An HTTP POST arrives at the Channel Layer with a user message. Auth middleware resolves the org and user identity.',
+    highlight: ['http-api'], active: ['http-api'] },
+  { title: 'Task created', body: 'The channel adapter normalizes the request into a Task envelope: org_id, user_id, channel, payload, optional context.',
+    highlight: ['http-api', 'triage'], active: ['http-api'] },
+  { title: 'Triage classifies', body: 'The triage agent (itself an rLM) classifies the task. It uses llm.complete() to decide which specialist should handle it.',
+    highlight: ['triage', 'queue'], active: ['triage'] },
+  { title: 'Scheduler dispatches', body: 'The task enters the per-org queue. Rate limits are checked (soft → warn, hard → reject). When a slot opens, the task is dispatched to the agent\'s ouros session.',
+    highlight: ['queue', 'session-a'], active: ['queue'] },
+  { title: 'Ouros executes Python', body: 'The agent\'s Python code runs in the ouros sandbox. Context is injected as _task variable. The rLM writes code to process the request.',
+    highlight: ['session-a'], active: ['session-a'] },
+  { title: 'Host function pauses', body: 'The agent calls llm.complete() — ouros pauses the sandbox. The host bridge receives the call with full CallContext (org, user, session, permissions).',
+    highlight: ['session-a', 'host-bridge', 'llm-gate'], active: ['host-bridge'] },
+  { title: 'rl-play → Ollama', body: 'The LLM Gate forwards the completion request to rl-play (which logs it for fine-tuning), then rl-play forwards to Ollama. The x-session-id header groups conversations.',
+    highlight: ['llm-gate', 'rlplay', 'ollama'], active: ['rlplay', 'ollama'] },
+  { title: 'Response returns', body: 'Ollama generates a response. rl-play captures it and forwards back. Token counts are tracked. The host bridge resumes the ouros session with the result.',
+    highlight: ['ollama', 'rlplay', 'llm-gate', 'host-bridge', 'session-a'], active: ['session-a'] },
+  { title: 'Agent replies', body: 'The agent calls channel.send(result) — the response flows back through the channel layer to the user. OTel traces are recorded to Postgres.',
+    highlight: ['session-a', 'http-api', 'tracer', 'postgres'], active: ['http-api'] },
+];
+
+// ============================================================
+// DATA: SCHEMA
+// ============================================================
+const tables = [
+  { id: 'orgs', label: 'orgs', color: '#4A9EFF', x: 100, y: 40, w: 150, h: 38,
+    columns: [
+      { name: 'id', type: 'UUID', note: 'PK, gen_random_uuid()' },
+      { name: 'name', type: 'TEXT', note: 'NOT NULL UNIQUE' },
+      { name: 'settings', type: 'JSONB', note: 'default model, timeouts, limits' },
+      { name: 'created_at', type: 'TIMESTAMPTZ', note: '' },
+    ]},
+  { id: 'users', label: 'users', color: '#4A9EFF', x: 320, y: 40, w: 150, h: 38,
+    columns: [
+      { name: 'id', type: 'UUID', note: 'PK' },
+      { name: 'org_id', type: 'UUID', note: 'FK → orgs' },
+      { name: 'name', type: 'TEXT', note: '' },
+      { name: 'email', type: 'TEXT', note: 'UNIQUE per org' },
+      { name: 'default_permissions', type: 'JSONB', note: 'tool allowlist' },
+      { name: 'rate_limits', type: 'JSONB', note: 'nullable = use org defaults' },
+      { name: 'created_at', type: 'TIMESTAMPTZ', note: '' },
+    ]},
+  { id: 'agent_defs', label: 'agent_defs', color: '#4ADE80', x: 540, y: 40, w: 150, h: 38,
+    columns: [
+      { name: 'id', type: 'UUID', note: 'PK' },
+      { name: 'org_id', type: 'UUID', note: 'FK → orgs' },
+      { name: 'name', type: 'TEXT', note: 'UNIQUE per org' },
+      { name: 'description', type: 'TEXT', note: '' },
+      { name: 'system_prompt', type: 'TEXT', note: '' },
+      { name: 'source_type', type: 'TEXT', note: 'bare|file|inline|git' },
+      { name: 'source_ref', type: 'TEXT', note: 'path, code, or git ref' },
+      { name: 'tool_permissions', type: 'JSONB', note: '' },
+      { name: 'model_config', type: 'JSONB', note: '' },
+      { name: 'resource_limits', type: 'JSONB', note: '' },
+      { name: 'current_version', type: 'INTEGER', note: 'DEFAULT 1' },
+      { name: 'created_at', type: 'TIMESTAMPTZ', note: '' },
+      { name: 'updated_at', type: 'TIMESTAMPTZ', note: '' },
+    ]},
+  { id: 'agent_versions', label: 'agent_versions', color: '#4ADE80', x: 540, y: 130, w: 160, h: 38,
+    columns: [
+      { name: 'id', type: 'BIGSERIAL', note: 'PK' },
+      { name: 'agent_id', type: 'UUID', note: 'FK → agent_defs' },
+      { name: 'version', type: 'INTEGER', note: 'UNIQUE per agent' },
+      { name: 'source_snapshot', type: 'TEXT', note: 'full Python source' },
+      { name: 'trigger', type: 'TEXT', note: 'file_watch|api_update|git_sync|rollback' },
+      { name: 'created_at', type: 'TIMESTAMPTZ', note: '' },
+    ]},
+  { id: 'sessions', label: 'sessions', color: '#A78BFA', x: 100, y: 160, w: 150, h: 38,
+    columns: [
+      { name: 'id', type: 'UUID', note: 'PK' },
+      { name: 'org_id', type: 'UUID', note: 'FK → orgs' },
+      { name: 'user_id', type: 'UUID', note: 'FK → users' },
+      { name: 'agent_id', type: 'UUID', note: 'FK → agent_defs' },
+      { name: 'session_key', type: 'TEXT', note: 'UNIQUE, opaque token' },
+      { name: 'snapshot', type: 'BYTEA', note: 'ouros state' },
+      { name: 'status', type: 'TEXT', note: 'active|suspended|evicted' },
+      { name: 'created_at', type: 'TIMESTAMPTZ', note: '' },
+      { name: 'last_active_at', type: 'TIMESTAMPTZ', note: '' },
+    ]},
+  { id: 'tasks', label: 'tasks', color: '#A78BFA', x: 320, y: 160, w: 150, h: 38,
+    columns: [
+      { name: 'id', type: 'UUID', note: 'PK' },
+      { name: 'org_id', type: 'UUID', note: 'FK → orgs' },
+      { name: 'user_id', type: 'UUID', note: 'FK → users' },
+      { name: 'session_id', type: 'UUID', note: 'FK → sessions' },
+      { name: 'parent_task_id', type: 'UUID', note: 'FK → tasks (self)' },
+      { name: 'channel', type: 'TEXT', note: '' },
+      { name: 'payload', type: 'TEXT', note: '' },
+      { name: 'status', type: 'TEXT', note: 'pending|running|done|failed' },
+      { name: 'result', type: 'JSONB', note: '' },
+      { name: 'created_at', type: 'TIMESTAMPTZ', note: '' },
+      { name: 'completed_at', type: 'TIMESTAMPTZ', note: '' },
+    ]},
+  { id: 'traces', label: 'traces', color: '#FBBF24', x: 100, y: 280, w: 150, h: 38,
+    columns: [
+      { name: 'id', type: 'BIGSERIAL', note: 'PK' },
+      { name: 'trace_id', type: 'TEXT', note: '' },
+      { name: 'span_id', type: 'TEXT', note: 'UNIQUE' },
+      { name: 'parent_span_id', type: 'TEXT', note: '' },
+      { name: 'operation_name', type: 'TEXT', note: '' },
+      { name: 'org_id', type: 'UUID', note: 'FK → orgs' },
+      { name: 'agent_id', type: 'UUID', note: 'FK → agent_defs' },
+      { name: 'session_id', type: 'UUID', note: 'FK → sessions' },
+      { name: 'model', type: 'TEXT', note: '' },
+      { name: 'input_tokens', type: 'INTEGER', note: '' },
+      { name: 'output_tokens', type: 'INTEGER', note: '' },
+      { name: 'duration_ms', type: 'BIGINT', note: '' },
+      { name: 'status', type: 'TEXT', note: '' },
+      { name: 'attributes', type: 'JSONB', note: 'OTel GenAI attrs' },
+      { name: 'created_at', type: 'TIMESTAMPTZ', note: '' },
+    ]},
+  { id: 'org_secrets', label: 'org_secrets', color: '#F87171', x: 320, y: 280, w: 160, h: 38,
+    columns: [
+      { name: 'id', type: 'UUID', note: 'PK' },
+      { name: 'org_id', type: 'UUID', note: 'FK → orgs' },
+      { name: 'name', type: 'TEXT', note: 'UNIQUE per org' },
+      { name: 'encrypted_value', type: 'BYTEA', note: '' },
+      { name: 'created_at', type: 'TIMESTAMPTZ', note: '' },
+    ]},
+  { id: 'rate_limit_counters', label: 'rate_limit_counters', color: '#FF8C42', x: 530, y: 280, w: 180, h: 38,
+    columns: [
+      { name: 'org_id', type: 'UUID', note: 'FK → orgs' },
+      { name: 'user_id', type: 'UUID', note: 'FK → users, nullable' },
+      { name: 'period_start', type: 'TIMESTAMPTZ', note: '' },
+      { name: 'tokens_used', type: 'BIGINT', note: 'DEFAULT 0' },
+    ]},
+];
+
+const schemaConns = [
+  { from: 'orgs', to: 'users', label: '1:N' },
+  { from: 'orgs', to: 'agent_defs', label: '1:N' },
+  { from: 'agent_defs', to: 'agent_versions', label: '1:N' },
+  { from: 'users', to: 'sessions', label: '1:N' },
+  { from: 'agent_defs', to: 'sessions', label: '1:N' },
+  { from: 'users', to: 'tasks', label: '1:N' },
+  { from: 'sessions', to: 'tasks', label: '1:N' },
+  { from: 'orgs', to: 'org_secrets', label: '1:N' },
+  { from: 'orgs', to: 'rate_limit_counters', label: '1:N' },
+  { from: 'orgs', to: 'traces', label: '1:N' },
+];
+
+// ============================================================
+// DATA: DOCKER
+// ============================================================
+const dockerServices = [
+  { id: 'svc-greatwheel', label: 'greatwheel', sub: 'Rust binary', color: '#4ADE80',
+    x: 200, y: 30, w: 200, h: 80,
+    ports: ['8080:8080', '8081:8081'],
+    env: ['DATABASE_URL=postgres://gw:gw@postgres:5432/greatwheel', 'RLPLAY_URL=http://rl-play:8000', 'OLLAMA_URL=http://ollama:11434', 'LANCE_DATA_DIR=/data/lance'],
+    volumes: ['lance-data:/data/lance', './agents:/agents'],
+    depends: ['svc-postgres', 'svc-rlplay', 'svc-ollama'] },
+  { id: 'svc-rlplay', label: 'rl-play', sub: 'Python proxy', color: '#FBBF24',
+    x: 80, y: 180, w: 180, h: 70,
+    ports: ['8000:8000'],
+    env: ['OLLAMA_BASE_URL=http://ollama:11434'],
+    volumes: ['rl-play-data:/data'],
+    depends: ['svc-ollama'] },
+  { id: 'svc-postgres', label: 'PostgreSQL 17', sub: 'postgres:17', color: '#22D3EE',
+    x: 360, y: 180, w: 180, h: 70,
+    ports: ['5432:5432'],
+    env: ['POSTGRES_DB=greatwheel', 'POSTGRES_USER=gw', 'POSTGRES_PASSWORD=gw'],
+    volumes: ['pg-data:/var/lib/postgresql/data'],
+    depends: [] },
+  { id: 'svc-ollama', label: 'Ollama', sub: 'ollama/ollama', color: '#F87171',
+    x: 200, y: 320, w: 200, h: 70,
+    ports: ['11434:11434'],
+    env: [],
+    volumes: ['ollama-models:/root/.ollama'],
+    depends: [] },
+];
+
+// ============================================================
+// SVG HELPERS
+// ============================================================
+function svgEl(tag, attrs = {}) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  return el;
+}
+
+function createSVG(container, vw = 760, vh = 520) {
+  container.innerHTML = '';
+  const svg = svgEl('svg', { viewBox: `0 0 ${vw} ${vh}`, preserveAspectRatio: 'xMidYMid meet' });
+  svg.classList.add('diagram');
+  // Arrowhead markers
+  const defs = svgEl('defs');
+  for (const [name, color] of [['data','#fff'],['call','#4ADE80'],['dep','#6b7280']]) {
+    const m = svgEl('marker', { id: `arrow-${name}`, markerWidth: '8', markerHeight: '6', refX: '7', refY: '3', orient: 'auto' });
+    m.appendChild(svgEl('polygon', { points: '0 0, 8 3, 0 6', fill: color, opacity: '0.6' }));
+    defs.appendChild(m);
+  }
+  svg.appendChild(defs);
+  container.appendChild(svg);
+  return svg;
+}
+
+function drawNode(svg, n, opts = {}) {
+  const g = svgEl('g');
+  const color = opts.color || n.color || COLORS[n.layer] || '#666';
+  const opacity = opts.dim ? 0.2 : (opts.glow ? 1 : 0.8);
+  const commented = state.comments.some(c => c.target === n.id);
+
+  const rect = svgEl('rect', {
+    x: n.x, y: n.y, width: n.w, height: n.h, rx: 8,
+    fill: color, opacity: opacity * 0.18,
+    stroke: commented ? '#FBBF24' : color,
+    'stroke-width': opts.glow ? 2.5 : (commented ? 2 : 1),
+    'stroke-opacity': opts.glow ? 1 : (commented ? 0.9 : opacity * 0.5),
+  });
+  if (commented) rect.classList.add('node-commented');
+  rect.classList.add('node-rect');
+  rect.dataset.id = n.id;
+
+  const label = svgEl('text', { x: n.x + n.w/2, y: n.y + (n.sub ? n.h/2 - 3 : n.h/2 + 4), 'text-anchor': 'middle', opacity });
+  label.classList.add('node-label');
+  label.textContent = n.label;
+
+  g.appendChild(rect);
+  g.appendChild(label);
+
+  if (n.sub) {
+    const sub = svgEl('text', { x: n.x + n.w/2, y: n.y + n.h/2 + 11, 'text-anchor': 'middle', opacity });
+    sub.classList.add('node-sub');
+    sub.textContent = n.sub;
+    g.appendChild(sub);
+  }
+
+  if (opts.glow) {
+    const glow = svgEl('rect', {
+      x: n.x - 3, y: n.y - 3, width: n.w + 6, height: n.h + 6, rx: 11,
+      fill: 'none', stroke: color, 'stroke-width': 1.5, opacity: 0.4,
+    });
+    svg.appendChild(glow);
+  }
+
+  svg.appendChild(g);
+  return rect;
+}
+
+function drawConn(svg, fromN, toN, opts = {}) {
+  const type = opts.type || 'data';
+  const x1 = fromN.x + fromN.w / 2, y1 = fromN.y + fromN.h;
+  const x2 = toN.x + toN.w / 2, y2 = toN.y;
+  const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+  const cp1y = y1 + (y2 - y1) * 0.3;
+  const cp2y = y1 + (y2 - y1) * 0.7;
+
+  const color = type === 'call' ? '#4ADE80' : (type === 'dep' ? '#6b7280' : 'rgba(255,255,255,0.25)');
+  const dash = type === 'call' ? '6,3' : (type === 'dep' ? '3,3' : 'none');
+  const opacity = opts.dim ? 0.08 : (opts.glow ? 0.7 : 0.3);
+
+  const path = svgEl('path', {
+    d: `M${x1},${y1} C${x1},${cp1y} ${x2},${cp2y} ${x2},${y2}`,
+    stroke: opts.glow ? color : color,
+    'stroke-width': opts.glow ? 2 : 1.5,
+    'stroke-dasharray': dash,
+    opacity,
+    fill: 'none',
+    'marker-end': `url(#arrow-${type})`,
+  });
+  path.classList.add('conn-line');
+  svg.appendChild(path);
+
+  if (opts.label) {
+    const lbl = svgEl('text', { x: mx + 8, y: my, 'text-anchor': 'start' });
+    lbl.classList.add('conn-label');
+    lbl.setAttribute('opacity', opacity);
+    lbl.textContent = opts.label;
+    svg.appendChild(lbl);
+  }
+}
+
+function nodeById(nodes, id) { return nodes.find(n => n.id === id); }
+
+// ============================================================
+// VIEW: ARCHITECTURE LAYERS
+// ============================================================
+function renderLayers() {
+  const container = document.getElementById('layers-canvas');
+  const svg = createSVG(container, 760, 520);
+
+  // Draw layer bands
+  const bands = [
+    { label: 'Channel', y: 20, h: 72, layer: 'channel' },
+    { label: 'Scheduler', y: 100, h: 72, layer: 'scheduler' },
+    { label: 'Runtime', y: 190, h: 72, layer: 'runtime' },
+    { label: 'Services', y: 280, h: 72, layer: 'services' },
+    { label: 'rl-play', y: 370, h: 72, layer: 'rlplay' },
+    { label: 'Ollama', y: 445, h: 72, layer: 'ollama' },
+    { label: 'Postgres', y: 410, h: 72, layer: 'postgres' },
+  ];
+  for (const b of bands) {
+    if (!state.layers[b.layer]) continue;
+    const band = svgEl('rect', { x: 0, y: b.y, width: 760, height: b.h, fill: COLORS[b.layer], opacity: 0.03, rx: 0 });
+    svg.appendChild(band);
+    const lbl = svgEl('text', { x: 725, y: b.y + 16 });
+    lbl.classList.add('band-label');
+    lbl.setAttribute('fill', COLORS[b.layer]);
+    lbl.setAttribute('opacity', 0.3);
+    lbl.setAttribute('text-anchor', 'end');
+    lbl.textContent = b.label;
+    svg.appendChild(lbl);
+  }
+
+  // Connections
+  for (const c of layerConns) {
+    const fn = nodeById(layerNodes, c.from);
+    const tn = nodeById(layerNodes, c.to);
+    if (!fn || !tn) continue;
+    if (!state.layers[fn.layer] || !state.layers[tn.layer]) continue;
+    const dim = state.selected && state.selected !== c.from && state.selected !== c.to;
+    drawConn(svg, fn, tn, { type: c.type || 'data', label: c.label, dim });
+  }
+
+  // Nodes
+  for (const n of layerNodes) {
+    if (!state.layers[n.layer]) continue;
+    const dim = state.selected && state.selected !== n.id;
+    const glow = state.selected === n.id;
+    const rect = drawNode(svg, n, { dim, glow });
+    rect.onclick = () => selectNode(n.id, 'layers');
+  }
+
+  // Legend
+  const legend = document.getElementById('layers-legend');
+  legend.innerHTML = Object.entries(COLORS).map(([k,v]) =>
+    `<div class="legend-item"><div class="legend-dot" style="background:${v}"></div>${k}</div>`
+  ).join('');
+
+  // Layer toggles
+  const toggles = document.getElementById('layer-toggles');
+  toggles.innerHTML = Object.entries(COLORS).map(([k,v]) =>
+    `<label><input type="checkbox" ${state.layers[k]?'checked':''} onchange="toggleLayer('${k}', this.checked)">
+     <div class="legend-dot" style="background:${v}"></div>${k}</label>`
+  ).join('');
+
+  renderLayerDetail();
+  renderComments();
+}
+
+function toggleLayer(layer, on) {
+  state.layers[layer] = on;
+  renderLayers();
+  updatePrompt();
+}
+
+function selectNode(id, view) {
+  state.selected = state.selected === id ? null : id;
+  if (view === 'layers') renderLayers();
+  else if (view === 'crates') renderCrates();
+  else if (view === 'schema') renderSchema();
+  else if (view === 'docker') renderDocker();
+  updatePrompt();
+}
+
+function renderLayerDetail() {
+  const el = document.getElementById('layers-detail');
+  if (!state.selected || !layerInfo[state.selected]) {
+    el.innerHTML = '<p style="font-size:12px;color:var(--text-dim);padding:4px 0;">Click a component to see details.</p>';
+    return;
+  }
+  const info = layerInfo[state.selected];
+  const n = nodeById(layerNodes, state.selected);
+  const color = COLORS[n.layer];
+  el.innerHTML = `
+    <div class="detail-panel" style="border-color:${color}33; background:${color}0a;">
+      <h3 style="color:${color}">${info.title}</h3>
+      <p>${info.desc}</p>
+      <div style="margin-top:8px;">
+        <span class="tag mono" style="background:${color}22; color:${color};">${n.layer}</span>
+      </div>
+      <textarea class="comment-input" id="comment-text" placeholder="Add a note about this component..."></textarea>
+      <div class="comment-actions">
+        <button class="btn-sm primary" onclick="addComment()">Add Comment</button>
+      </div>
+    </div>`;
+}
+
+function addComment() {
+  const text = document.getElementById('comment-text')?.value?.trim();
+  if (!text || !state.selected) return;
+  const info = layerInfo[state.selected] || { title: state.selected };
+  state.comments.push({ id: Date.now(), target: state.selected, targetLabel: info.title, text });
+  renderLayers();
+  updatePrompt();
+}
+
+function deleteComment(id) {
+  state.comments = state.comments.filter(c => c.id !== id);
+  renderLayers();
+  updatePrompt();
+}
+
+function renderComments() {
+  const el = document.getElementById('layers-comments');
+  if (!state.comments.length) {
+    el.innerHTML = '<p style="font-size:11px;color:var(--text-dim);">No comments yet.</p>';
+    return;
+  }
+  el.innerHTML = state.comments.map(c => `
+    <div class="comment-item">
+      <span class="del" onclick="deleteComment(${c.id})">&times;</span>
+      <div class="target">${c.targetLabel}</div>
+      <div class="text">${c.text}</div>
+    </div>`).join('');
+}
+
+// ============================================================
+// VIEW: CRATES
+// ============================================================
+function renderCrates() {
+  const container = document.getElementById('crates-canvas');
+  const svg = createSVG(container, 740, 460);
+
+  // Connections first
+  for (const c of crateConns) {
+    const fn = nodeById(crateNodes, c.from);
+    const tn = nodeById(crateNodes, c.to);
+    if (!fn || !tn) continue;
+    const dim = state.selectedCrate && state.selectedCrate !== c.from && state.selectedCrate !== c.to;
+    const glow = state.selectedCrate === c.from || state.selectedCrate === c.to;
+    drawConn(svg, fn, tn, { type: 'dep', dim: dim && !glow, glow });
+  }
+
+  // Nodes
+  for (const n of crateNodes) {
+    const dim = state.selectedCrate && state.selectedCrate !== n.id;
+    const glow = state.selectedCrate === n.id;
+    const rect = drawNode(svg, n, { color: n.color, dim, glow });
+    rect.onclick = () => { state.selectedCrate = state.selectedCrate === n.id ? null : n.id; renderCrates(); updatePrompt(); };
+  }
+
+  // Sidebar
+  const sb = document.getElementById('crates-sidebar');
+  if (state.selectedCrate) {
+    const c = crateNodes.find(n => n.id === state.selectedCrate);
+    sb.innerHTML = `
+      <div class="detail-panel" style="border-color:${c.color}33; background:${c.color}0a;">
+        <h3 style="color:${c.color}">${c.id}</h3>
+        <p>${c.sub}</p>
+        <p style="margin-top:8px; color:var(--text);"><strong>Types & Traits:</strong></p>
+        ${c.types.map(t => `<span class="tag mono" style="background:${c.color}22; color:${c.color};">${t}</span>`).join('')}
+        <p style="margin-top:8px; color:var(--text);"><strong>Dependencies:</strong></p>
+        ${c.deps.map(d => `<span class="tag mono" style="background:var(--bg); color:var(--text-dim);">${d}</span>`).join('')}
+      </div>`;
+  } else {
+    sb.innerHTML = crateNodes.map(c => `
+      <div style="padding:6px 8px; cursor:pointer; border-radius:5px; margin-bottom:2px; font-size:12px; display:flex; align-items:center; gap:8px;"
+           onmouseover="this.style.background='var(--bg-hover)'" onmouseout="this.style.background=''"
+           onclick="state.selectedCrate='${c.id}'; renderCrates(); updatePrompt();">
+        <div class="legend-dot" style="background:${c.color}"></div>
+        <span class="mono" style="color:${c.color}">${c.id}</span>
+        <span style="color:var(--text-dim);margin-left:auto;">${c.sub}</span>
+      </div>`).join('');
+  }
+}
+
+// ============================================================
+// VIEW: REQUEST FLOW
+// ============================================================
+let flowTimer = null;
+
+function renderFlow() {
+  const container = document.getElementById('flow-canvas');
+  const svg = createSVG(container, 760, 520);
+  const step = flowSteps[state.flowStep];
+
+  // Draw all layer nodes, dimming non-highlighted
+  const bands = [
+    { label: 'Channel', y: 20, h: 72, layer: 'channel' },
+    { label: 'Scheduler', y: 100, h: 72, layer: 'scheduler' },
+    { label: 'Runtime', y: 190, h: 72, layer: 'runtime' },
+    { label: 'Services', y: 280, h: 72, layer: 'services' },
+    { label: 'rl-play', y: 370, h: 72, layer: 'rlplay' },
+    { label: 'Ollama', y: 445, h: 72, layer: 'ollama' },
+    { label: 'Postgres', y: 410, h: 72, layer: 'postgres' },
+  ];
+  for (const b of bands) {
+    const band = svgEl('rect', { x: 0, y: b.y, width: 760, height: b.h, fill: COLORS[b.layer], opacity: 0.02 });
+    svg.appendChild(band);
+  }
+
+  // Connections
+  for (const c of layerConns) {
+    const fn = nodeById(layerNodes, c.from);
+    const tn = nodeById(layerNodes, c.to);
+    if (!fn || !tn) continue;
+    const active = step.highlight.includes(c.from) && step.highlight.includes(c.to);
+    drawConn(svg, fn, tn, { type: c.type || 'data', label: c.label, dim: !active, glow: active });
+  }
+
+  // Nodes
+  for (const n of layerNodes) {
+    const hl = step.highlight.includes(n.id);
+    const active = step.active && step.active.includes(n.id);
+    drawNode(svg, n, { dim: !hl, glow: active });
+
+    // Pulse on active nodes
+    if (active) {
+      const cx = n.x + n.w/2, cy = n.y + n.h/2;
+      const color = COLORS[n.layer];
+      const pulse = svgEl('circle', { cx, cy, r: '4', fill: color, opacity: '0.8' });
+      pulse.classList.add('pulse-circle');
+      svg.appendChild(pulse);
+    }
+  }
+
+  // Sidebar
+  const sb = document.getElementById('flow-sidebar');
+  sb.innerHTML = `
+    <div class="flow-controls">
+      <button class="flow-btn" onclick="flowPrev()">&#9664;</button>
+      <button class="flow-btn ${state.flowPlaying?'active':''}" onclick="flowToggle()">${state.flowPlaying?'&#9646;&#9646;':'&#9654;'}</button>
+      <button class="flow-btn" onclick="flowNext()">&#9654;</button>
+      <span class="step-indicator">${state.flowStep + 1} / ${flowSteps.length}</span>
+    </div>
+    <div class="step-desc">
+      <div class="step-title">${step.title}</div>
+      <div class="step-body">${step.body}</div>
+    </div>
+    <div style="margin-top:12px;">
+      ${flowSteps.map((s, i) => `
+        <div style="padding:5px 8px; border-radius:5px; font-size:11px; cursor:pointer; margin-bottom:2px;
+             color:${i === state.flowStep ? 'var(--text-bright)' : 'var(--text-dim)'};
+             background:${i === state.flowStep ? 'var(--bg-hover)' : 'transparent'};"
+             onclick="state.flowStep=${i}; renderFlow(); updatePrompt();">
+          <span style="color:var(--accent);margin-right:6px;">${i+1}.</span>${s.title}
+        </div>`).join('')}
+    </div>`;
+}
+
+function flowNext() {
+  state.flowStep = (state.flowStep + 1) % flowSteps.length;
+  renderFlow(); updatePrompt();
+}
+function flowPrev() {
+  state.flowStep = (state.flowStep - 1 + flowSteps.length) % flowSteps.length;
+  renderFlow(); updatePrompt();
+}
+function flowToggle() {
+  state.flowPlaying = !state.flowPlaying;
+  if (state.flowPlaying) {
+    flowTimer = setInterval(() => {
+      state.flowStep = (state.flowStep + 1) % flowSteps.length;
+      renderFlow(); updatePrompt();
+      if (state.flowStep === 0) { state.flowPlaying = false; clearInterval(flowTimer); renderFlow(); }
+    }, 2200);
+  } else {
+    clearInterval(flowTimer);
+  }
+  renderFlow();
+}
+
+// ============================================================
+// VIEW: SCHEMA
+// ============================================================
+function renderSchema() {
+  const container = document.getElementById('schema-canvas');
+  const svg = createSVG(container, 760, 360);
+
+  // Connections
+  for (const c of schemaConns) {
+    const fn = nodeById(tables, c.from);
+    const tn = nodeById(tables, c.to);
+    if (!fn || !tn) continue;
+    drawConn(svg, fn, tn, { type: 'dep', label: c.label });
+  }
+
+  // Table nodes
+  for (const t of tables) {
+    const dim = state.selectedSchema && state.selectedSchema !== t.id;
+    const glow = state.selectedSchema === t.id;
+    const rect = drawNode(svg, t, { color: t.color, dim, glow });
+    rect.onclick = () => { state.selectedSchema = state.selectedSchema === t.id ? null : t.id; renderSchema(); updatePrompt(); };
+  }
+
+  // Sidebar
+  const sb = document.getElementById('schema-sidebar');
+  if (state.selectedSchema) {
+    const t = tables.find(x => x.id === state.selectedSchema);
+    sb.innerHTML = `
+      <div class="detail-panel" style="border-color:${t.color}33; background:${t.color}0a;">
+        <h3 style="color:${t.color}">${t.label}</h3>
+      </div>
+      <table class="schema-table">
+        <thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead>
+        <tbody>
+          ${t.columns.map(c => `<tr><td class="col-name">${c.name}</td><td class="col-type">${c.type}</td><td class="col-note">${c.note}</td></tr>`).join('')}
+        </tbody>
+      </table>`;
+  } else {
+    sb.innerHTML = tables.map(t => `
+      <div style="padding:6px 8px; cursor:pointer; border-radius:5px; margin-bottom:2px; font-size:12px; display:flex; align-items:center; gap:8px;"
+           onmouseover="this.style.background='var(--bg-hover)'" onmouseout="this.style.background=''"
+           onclick="state.selectedSchema='${t.id}'; renderSchema(); updatePrompt();">
+        <div class="legend-dot" style="background:${t.color}"></div>
+        <span class="mono">${t.label}</span>
+        <span style="color:var(--text-dim);margin-left:auto;">${t.columns.length} cols</span>
+      </div>`).join('');
+  }
+}
+
+// ============================================================
+// VIEW: DOCKER
+// ============================================================
+function renderDocker() {
+  const container = document.getElementById('docker-canvas');
+  const svg = createSVG(container, 600, 430);
+
+  // Network box
+  const net = svgEl('rect', { x: 20, y: 10, width: 560, height: 400, rx: 12, fill: 'none', stroke: '#2a2d3a', 'stroke-width': 1, 'stroke-dasharray': '8,4' });
+  svg.appendChild(net);
+  const netLabel = svgEl('text', { x: 40, y: 398 });
+  netLabel.classList.add('band-label');
+  netLabel.textContent = 'docker network (default)';
+  svg.appendChild(netLabel);
+
+  // depends_on arrows
+  for (const svc of dockerServices) {
+    for (const dep of svc.depends) {
+      const fn = dockerServices.find(s => s.id === svc.id);
+      const tn = dockerServices.find(s => s.id === dep);
+      if (fn && tn) drawConn(svg, fn, tn, { type: 'dep' });
+    }
+  }
+
+  // Service boxes
+  for (const svc of dockerServices) {
+    const dim = state.selectedDocker && state.selectedDocker !== svc.id;
+    const glow = state.selectedDocker === svc.id;
+    const rect = drawNode(svg, svc, { color: svc.color, dim, glow });
+    rect.onclick = () => { state.selectedDocker = state.selectedDocker === svc.id ? null : svc.id; renderDocker(); updatePrompt(); };
+
+    // Port labels
+    if (!dim) {
+      for (let i = 0; i < svc.ports.length; i++) {
+        const portLabel = svgEl('text', { x: svc.x + svc.w + 8, y: svc.y + 18 + i * 14 });
+        portLabel.classList.add('node-sub');
+        portLabel.setAttribute('text-anchor', 'start');
+        portLabel.textContent = svc.ports[i];
+        svg.appendChild(portLabel);
+      }
+    }
+  }
+
+  // Volumes at bottom
+  const volumes = ['pg-data', 'lance-data', 'ollama-models', 'rl-play-data'];
+  const vx = 80;
+  for (let i = 0; i < volumes.length; i++) {
+    const x = vx + i * 125;
+    const vol = svgEl('rect', { x, y: 370, width: 100, height: 24, rx: 4, fill: '#A78BFA', opacity: 0.12, stroke: '#A78BFA', 'stroke-width': 0.5, 'stroke-opacity': 0.3 });
+    svg.appendChild(vol);
+    const vlbl = svgEl('text', { x: x + 50, y: 386, 'text-anchor': 'middle' });
+    vlbl.classList.add('node-sub');
+    vlbl.textContent = volumes[i];
+    svg.appendChild(vlbl);
+  }
+
+  // Sidebar
+  const sb = document.getElementById('docker-sidebar');
+  if (state.selectedDocker) {
+    const svc = dockerServices.find(s => s.id === state.selectedDocker);
+    sb.innerHTML = `
+      <div class="detail-panel" style="border-color:${svc.color}33; background:${svc.color}0a;">
+        <h3 style="color:${svc.color}">${svc.label}</h3>
+        <p>${svc.sub}</p>
+      </div>
+      <div style="font-size:12px; margin-bottom:10px;">
+        <strong style="color:var(--text);">Ports:</strong><br>
+        ${svc.ports.map(p => `<span class="tag mono" style="background:var(--bg); color:var(--green);">${p}</span>`).join('')}
+      </div>
+      ${svc.env.length ? `<div style="font-size:12px; margin-bottom:10px;">
+        <strong style="color:var(--text);">Environment:</strong><br>
+        ${svc.env.map(e => `<div class="mono" style="font-size:10px; color:var(--text-dim); padding:2px 0; word-break:break-all;">${e}</div>`).join('')}
+      </div>` : ''}
+      <div style="font-size:12px; margin-bottom:10px;">
+        <strong style="color:var(--text);">Volumes:</strong><br>
+        ${svc.volumes.map(v => `<span class="tag mono" style="background:var(--bg); color:var(--purple);">${v}</span>`).join('')}
+      </div>
+      ${svc.depends.length ? `<div style="font-size:12px;">
+        <strong style="color:var(--text);">Depends on:</strong><br>
+        ${svc.depends.map(d => { const ds = dockerServices.find(s=>s.id===d); return `<span class="tag" style="background:${ds.color}22; color:${ds.color};">${ds.label}</span>`; }).join('')}
+      </div>` : ''}`;
+  } else {
+    sb.innerHTML = dockerServices.map(svc => `
+      <div style="padding:8px; cursor:pointer; border-radius:5px; margin-bottom:4px; font-size:12px;"
+           onmouseover="this.style.background='var(--bg-hover)'" onmouseout="this.style.background=''"
+           onclick="state.selectedDocker='${svc.id}'; renderDocker(); updatePrompt();">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <div class="legend-dot" style="background:${svc.color}"></div>
+          <strong style="color:${svc.color}">${svc.label}</strong>
+        </div>
+        <div style="color:var(--text-dim);font-size:11px;margin-top:2px;margin-left:18px;">${svc.sub} &middot; ${svc.ports.join(', ')}</div>
+      </div>`).join('');
+  }
+}
+
+// ============================================================
+// VIEW SWITCHING
+// ============================================================
+function switchView(view) {
+  state.view = view;
+  state.selected = null;
+  state.selectedCrate = null;
+  state.selectedSchema = null;
+  state.selectedDocker = null;
+  if (state.flowPlaying) { state.flowPlaying = false; clearInterval(flowTimer); }
+
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.getElementById(`view-${view}`).classList.add('active');
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => {
+    const viewMap = { 'Architecture': 'layers', 'Crates': 'crates', 'Request Flow': 'flow', 'Data Model': 'schema', 'Docker': 'docker' };
+    if (viewMap[t.textContent] === view) t.classList.add('active');
+  });
+
+  if (view === 'layers') renderLayers();
+  else if (view === 'crates') renderCrates();
+  else if (view === 'flow') renderFlow();
+  else if (view === 'schema') renderSchema();
+  else if (view === 'docker') renderDocker();
+  updatePrompt();
+}
+
+// ============================================================
+// PROMPT OUTPUT
+// ============================================================
+function updatePrompt() {
+  const el = document.getElementById('prompt-output');
+  const parts = [];
+
+  if (state.view === 'layers') {
+    const hidden = Object.entries(state.layers).filter(([,v]) => !v).map(([k]) => k);
+    if (hidden.length > 0 && hidden.length < 7) {
+      parts.push(`Focusing on the Greatwheel architecture with <em>${Object.entries(state.layers).filter(([,v])=>v).map(([k])=>k).join(', ')}</em> layers visible.`);
+    }
+    if (state.selected && layerInfo[state.selected]) {
+      parts.push(`Selected component: <em>${layerInfo[state.selected].title}</em>.`);
+    }
+  } else if (state.view === 'crates' && state.selectedCrate) {
+    const c = crateNodes.find(n => n.id === state.selectedCrate);
+    parts.push(`Looking at crate <em>${c.id}</em> (${c.sub}). Types: ${c.types.join(', ')}. External deps: ${c.deps.join(', ')}.`);
+  } else if (state.view === 'flow') {
+    const step = flowSteps[state.flowStep];
+    parts.push(`Request flow step ${state.flowStep + 1}/${flowSteps.length}: <em>${step.title}</em>.`);
+  } else if (state.view === 'schema' && state.selectedSchema) {
+    const t = tables.find(x => x.id === state.selectedSchema);
+    parts.push(`Viewing table <em>${t.label}</em> with ${t.columns.length} columns.`);
+  } else if (state.view === 'docker' && state.selectedDocker) {
+    const svc = dockerServices.find(s => s.id === state.selectedDocker);
+    parts.push(`Docker service <em>${svc.label}</em> (${svc.sub}), ports: ${svc.ports.join(', ')}.`);
+  }
+
+  if (state.comments.length > 0) {
+    parts.push('<br><br><strong>Comments on the Greatwheel architecture:</strong>');
+    for (const c of state.comments) {
+      parts.push(`<br><em>${c.targetLabel}</em>: ${c.text}`);
+    }
+  }
+
+  el.innerHTML = parts.length ? parts.join(' ') : 'Click on any component to explore it. Add comments to generate a prompt.';
+}
+
+function copyPrompt() {
+  const el = document.getElementById('prompt-output');
+  const text = el.innerText;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.getElementById('copy-btn');
+    btn.classList.add('copied');
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.classList.remove('copied'); btn.textContent = 'Copy Prompt'; }, 1500);
+  });
+}
+
+// ============================================================
+// INIT
+// ============================================================
+renderLayers();
+updatePrompt();
+</script>
+</body>
+</html>

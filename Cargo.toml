@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gw-core",
+    "crates/gw-runtime",
+    "crates/gw-llm",
+    "crates/gw-memory",
+    "crates/gw-bus",
+    "crates/gw-channels",
+    "crates/gw-scheduler",
+    "crates/gw-trace",
+    "crates/gw-server",
+]
+
+[workspace.dependencies]
+# Internal crates
+gw-core = { path = "crates/gw-core" }
+gw-runtime = { path = "crates/gw-runtime" }
+gw-llm = { path = "crates/gw-llm" }
+gw-memory = { path = "crates/gw-memory" }
+gw-bus = { path = "crates/gw-bus" }
+gw-channels = { path = "crates/gw-channels" }
+gw-scheduler = { path = "crates/gw-scheduler" }
+gw-trace = { path = "crates/gw-trace" }
+gw-server = { path = "crates/gw-server" }
+
+# External dependencies
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+lancedb = "0.26"
+notify = "6"
+opentelemetry = "0.28"
+opentelemetry-otlp = "0.28"
+ouros = "0.2"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio-stream = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono", "json"] }
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-opentelemetry = "0.28"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }

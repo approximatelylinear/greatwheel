@@ -1,0 +1,13 @@
+[package]
+name = "gw-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gw-core = { workspace = true }
+ouros = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+notify = { workspace = true }

@@ -1,0 +1,20 @@
+[server]
+host = "0.0.0.0"
+port = 8090
+
+[database]
+url = "postgres://gw:gw@localhost:5432/greatwheel"
+
+[llm]
+# Point at rl-play when running, fall back to Ollama direct for dev
+proxy_url = "http://localhost:11434"
+ollama_url = "http://localhost:11434"
+default_model = "qwen2.5:7b"
+embedding_model = "nomic-embed-text"
+
+[agents]
+directory = "agents"
+hot_reload = true
+
+[session]
+idle_timeout_secs = 1800

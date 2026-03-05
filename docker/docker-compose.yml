@@ -1,0 +1,63 @@
+services:
+  greatwheel:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    environment:
+      DATABASE_URL: postgres://gw:gw@postgres:5432/greatwheel
+      RLPLAY_URL: http://rl-play:8000
+      OLLAMA_URL: http://ollama:11434
+      LANCE_DATA_DIR: /data/lance
+    volumes:
+      - lance-data:/data/lance
+      - ../agents:/agents
+    depends_on:
+      - postgres
+      - rl-play
+      - ollama
+
+  rl-play:
+    build:
+      context: ../../rl-play
+      dockerfile: ../greatwheel/docker/Dockerfile.rl-play
+    ports:
+      - "8000:8000"
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+    volumes:
+      - rl-play-data:/data
+    depends_on:
+      - ollama
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: greatwheel
+      POSTGRES_USER: gw
+      POSTGRES_PASSWORD: gw
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    # Uncomment for GPU support:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - capabilities: [gpu]
+
+volumes:
+  pg-data:
+  lance-data:
+  ollama-models:
+  rl-play-data:

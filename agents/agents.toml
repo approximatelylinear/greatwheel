@@ -1,0 +1,14 @@
+[[agent]]
+name = "triage"
+description = "Classifies incoming tasks and dispatches to specialist agents"
+source = "triage.py"
+system_prompt = "You are a triage agent. Classify tasks and dispatch them to the right specialist."
+model = "qwen2.5:7b"
+
+[agent.tools]
+allowed = ["llm.complete", "agent.call", "channel.send"]
+denied = []
+
+[agent.limits]
+max_llm_calls = 10
+max_execution_seconds = 30

@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Greatwheel</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0f1117;
+  --bg-card: #1a1d27;
+  --bg-hover: #252836;
+  --border: #2a2d3a;
+  --text: #e2e4ea;
+  --text-dim: #6b7280;
+  --text-bright: #ffffff;
+  --accent: #4A9EFF;
+  --green: #4ADE80;
+  --orange: #FF8C42;
+  --purple: #A78BFA;
+  --user-bg: #1e3a5f;
+  --assistant-bg: #1a1d27;
+}
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+code, pre {
+  font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+  font-size: 0.9em;
+}
+
+/* Header */
+header {
+  display: flex;
+  align-items: center;
+  padding: 12px 20px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  gap: 12px;
+  flex-shrink: 0;
+}
+header h1 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+header .sep {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+}
+header .status {
+  font-size: 12px;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+header .status .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+header .status .dot.connected { background: var(--green); }
+header .status .dot.error { background: #F87171; }
+.model-select {
+  margin-left: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: 'SF Mono', monospace;
+  cursor: pointer;
+}
+.model-select:focus { outline: none; border-color: var(--accent); }
+.sys-prompt-btn {
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.sys-prompt-btn:hover { border-color: var(--accent); color: var(--text); }
+
+/* Messages area */
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 0;
+}
+.messages::-webkit-scrollbar { width: 6px; }
+.messages::-webkit-scrollbar-track { background: transparent; }
+.messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+.msg {
+  display: flex;
+  padding: 4px 20px;
+  gap: 12px;
+  max-width: 860px;
+  margin: 0 auto;
+  width: 100%;
+}
+.msg + .msg { margin-top: 8px; }
+
+.msg .avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.msg.user .avatar { background: var(--accent); color: white; }
+.msg.assistant .avatar { background: var(--green); color: #0f1117; }
+.msg.system .avatar { background: var(--purple); color: white; }
+
+.msg .body {
+  flex: 1;
+  min-width: 0;
+}
+.msg .role-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-bottom: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.msg .content {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.msg .content code {
+  background: rgba(255,255,255,0.08);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.msg .content pre {
+  background: rgba(0,0,0,0.3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin: 8px 0;
+  overflow-x: auto;
+  white-space: pre;
+}
+.msg .meta {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 6px;
+  font-family: 'SF Mono', monospace;
+}
+
+.cursor-blink {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background: var(--accent);
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  animation: blink 0.8s step-end infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+/* Welcome */
+.welcome {
+  text-align: center;
+  padding: 80px 20px;
+  max-width: 500px;
+  margin: 0 auto;
+}
+.welcome h2 {
+  font-size: 22px;
+  color: var(--text-bright);
+  margin-bottom: 8px;
+}
+.welcome p {
+  font-size: 14px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+.welcome .tag {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  background: var(--bg-hover);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  margin: 12px 4px 0;
+  font-family: 'SF Mono', monospace;
+}
+
+/* Input area */
+.input-area {
+  padding: 12px 20px 16px;
+  background: var(--bg-card);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.input-row {
+  display: flex;
+  gap: 8px;
+  max-width: 860px;
+  margin: 0 auto;
+}
+textarea#chat-input {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 10px 14px;
+  font-size: 14px;
+  font-family: inherit;
+  line-height: 1.5;
+  resize: none;
+  min-height: 44px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+textarea#chat-input:focus { outline: none; border-color: var(--accent); }
+textarea#chat-input::placeholder { color: var(--text-dim); }
+.send-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  border: none;
+  background: var(--accent);
+  color: white;
+  font-size: 18px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  align-self: flex-end;
+  transition: all 0.15s;
+}
+.send-btn:hover { filter: brightness(1.15); }
+.send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* System prompt modal */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  z-index: 100;
+  align-items: center;
+  justify-content: center;
+}
+.modal-overlay.open { display: flex; }
+.modal {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  width: 500px;
+  max-width: 90vw;
+}
+.modal h3 {
+  font-size: 15px;
+  color: var(--text-bright);
+  margin-bottom: 10px;
+}
+.modal textarea {
+  width: 100%;
+  min-height: 120px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 10px;
+  font-size: 13px;
+  font-family: inherit;
+  resize: vertical;
+}
+.modal textarea:focus { outline: none; border-color: var(--accent); }
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+.modal-actions button {
+  padding: 6px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.modal-actions button:hover { border-color: var(--accent); }
+.modal-actions button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Greatwheel</h1>
+  <div class="sep"></div>
+  <div class="status">
+    <div class="dot" id="status-dot"></div>
+    <span id="status-text">Connecting...</span>
+  </div>
+  <button class="sys-prompt-btn" onclick="openSystemPrompt()">System Prompt</button>
+  <select class="model-select" id="model-select">
+    <option value="">Loading models...</option>
+  </select>
+</header>
+
+<div class="messages" id="messages">
+  <div class="welcome" id="welcome">
+    <h2>Greatwheel</h2>
+    <p>An rLM-coordinated agentic runtime. Chat with the connected Ollama model below.</p>
+    <div>
+      <span class="tag" id="tag-model">...</span>
+      <span class="tag" id="tag-endpoint">...</span>
+    </div>
+  </div>
+</div>
+
+<div class="input-area">
+  <div class="input-row">
+    <textarea id="chat-input" rows="1" placeholder="Send a message..." autofocus></textarea>
+    <button class="send-btn" id="send-btn" onclick="sendMessage()">&#8593;</button>
+  </div>
+</div>
+
+<!-- System prompt modal -->
+<div class="modal-overlay" id="sys-modal">
+  <div class="modal">
+    <h3>System Prompt</h3>
+    <textarea id="sys-prompt">You are a helpful assistant powered by the Greatwheel runtime.</textarea>
+    <div class="modal-actions">
+      <button onclick="closeSystemPrompt()">Cancel</button>
+      <button class="primary" onclick="saveSystemPrompt()">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const messagesEl = document.getElementById('messages');
+const inputEl = document.getElementById('chat-input');
+const sendBtn = document.getElementById('send-btn');
+const statusDot = document.getElementById('status-dot');
+const statusText = document.getElementById('status-text');
+const modelSelect = document.getElementById('model-select');
+const welcomeEl = document.getElementById('welcome');
+
+let conversation = [];
+let streaming = false;
+let systemPrompt = 'You are a helpful assistant powered by the Greatwheel runtime.';
+let serverConfig = {};
+
+// Auto-resize textarea
+inputEl.addEventListener('input', () => {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
+});
+
+// Enter to send (Shift+Enter for newline)
+inputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+// Init
+async function init() {
+  try {
+    const resp = await fetch('/api/config');
+    serverConfig = await resp.json();
+    document.getElementById('tag-model').textContent = serverConfig.default_model;
+    document.getElementById('tag-endpoint').textContent = serverConfig.proxy_url;
+    statusDot.className = 'dot connected';
+    statusText.textContent = serverConfig.proxy_url;
+  } catch (e) {
+    statusDot.className = 'dot error';
+    statusText.textContent = 'Server unreachable';
+  }
+
+  // Load models
+  try {
+    const resp = await fetch('/api/models');
+    const data = await resp.json();
+    modelSelect.innerHTML = '';
+    if (data.models && data.models.length > 0) {
+      for (const m of data.models) {
+        const opt = document.createElement('option');
+        opt.value = m.name;
+        opt.textContent = m.name;
+        if (m.name === serverConfig.default_model) opt.selected = true;
+        modelSelect.appendChild(opt);
+      }
+    } else {
+      modelSelect.innerHTML = `<option value="${serverConfig.default_model || ''}">${serverConfig.default_model || 'default'}</option>`;
+    }
+  } catch (e) {
+    modelSelect.innerHTML = `<option value="">unavailable</option>`;
+  }
+}
+
+function addMessage(role, content, meta) {
+  if (welcomeEl) welcomeEl.style.display = 'none';
+
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+
+  const avatarText = role === 'user' ? 'U' : role === 'assistant' ? 'G' : 'S';
+  div.innerHTML = `
+    <div class="avatar">${avatarText}</div>
+    <div class="body">
+      <div class="role-label">${role}</div>
+      <div class="content"></div>
+      ${meta ? `<div class="meta">${meta}</div>` : ''}
+    </div>`;
+
+  const contentEl = div.querySelector('.content');
+  contentEl.textContent = content;
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return div;
+}
+
+function getStreamingContent(msgDiv) {
+  return msgDiv.querySelector('.content');
+}
+
+function setMeta(msgDiv, meta) {
+  let metaEl = msgDiv.querySelector('.meta');
+  if (!metaEl) {
+    metaEl = document.createElement('div');
+    metaEl.className = 'meta';
+    msgDiv.querySelector('.body').appendChild(metaEl);
+  }
+  metaEl.textContent = meta;
+}
+
+async function sendMessage() {
+  const text = inputEl.value.trim();
+  if (!text || streaming) return;
+
+  // Add user message
+  addMessage('user', text);
+  conversation.push({ role: 'user', content: text });
+
+  inputEl.value = '';
+  inputEl.style.height = 'auto';
+  sendBtn.disabled = true;
+  streaming = true;
+
+  // Build messages array with system prompt
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    ...conversation,
+  ];
+
+  // Create assistant message placeholder
+  const assistantDiv = addMessage('assistant', '');
+  const contentEl = getStreamingContent(assistantDiv);
+
+  // Add cursor
+  const cursor = document.createElement('span');
+  cursor.className = 'cursor-blink';
+  contentEl.appendChild(cursor);
+
+  let fullContent = '';
+
+  try {
+    const model = modelSelect.value || undefined;
+    const resp = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages, model }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.text();
+      contentEl.textContent = `Error: ${err}`;
+      contentEl.style.color = '#F87171';
+      streaming = false;
+      sendBtn.disabled = false;
+      return;
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      // Parse SSE events
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          var eventType = line.slice(7).trim();
+        } else if (line.startsWith('data: ') && eventType) {
+          const data = line.slice(6);
+
+          if (eventType === 'token') {
+            fullContent += data;
+            // Remove cursor, update text, re-add cursor
+            cursor.remove();
+            contentEl.textContent = fullContent;
+            contentEl.appendChild(cursor);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+          } else if (eventType === 'done') {
+            cursor.remove();
+            try {
+              const stats = JSON.parse(data);
+              const parts = [];
+              if (stats.model) parts.push(stats.model);
+              if (stats.input_tokens) parts.push(`${stats.input_tokens} in`);
+              if (stats.output_tokens) parts.push(`${stats.output_tokens} out`);
+              if (stats.total_duration_ms) parts.push(`${(stats.total_duration_ms/1000).toFixed(1)}s`);
+              if (parts.length) setMeta(assistantDiv, parts.join(' · '));
+            } catch (e) {}
+          } else if (eventType === 'error') {
+            cursor.remove();
+            contentEl.textContent = `Error: ${data}`;
+            contentEl.style.color = '#F87171';
+          }
+          eventType = null;
+        }
+      }
+    }
+
+    // Store assistant response
+    if (fullContent) {
+      conversation.push({ role: 'assistant', content: fullContent });
+    }
+  } catch (e) {
+    cursor.remove();
+    contentEl.textContent = `Connection error: ${e.message}`;
+    contentEl.style.color = '#F87171';
+  }
+
+  streaming = false;
+  sendBtn.disabled = false;
+  inputEl.focus();
+}
+
+function openSystemPrompt() {
+  document.getElementById('sys-prompt').value = systemPrompt;
+  document.getElementById('sys-modal').classList.add('open');
+}
+function closeSystemPrompt() {
+  document.getElementById('sys-modal').classList.remove('open');
+}
+function saveSystemPrompt() {
+  systemPrompt = document.getElementById('sys-prompt').value;
+  closeSystemPrompt();
+}
+
+init();
+</script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+[package]
+name = "gw-trace"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gw-core = { workspace = true }
+chrono = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
