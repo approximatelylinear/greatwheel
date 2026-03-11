@@ -90,9 +90,16 @@ SYSTEM_PROMPT = (
 
 QUERY_TEMPLATE = """Question: {question}
 
-Identify the most distinctive/unusual clues in this question, then search for them.
-Chain your findings: use what you learn to search for more specific information.
-Read full documents when snippets aren't enough.
+STEP-BY-STEP:
+1. List the key clues in this question (dates, places, events, descriptions)
+2. Pick the 2-3 most distinctive/unique clues — things that would appear in few documents
+3. Search for those clues using 2-4 keyword queries
+4. Read the top documents fully with get_document()
+5. Extract names, dates, facts from those documents
+6. Search again using the NEW names/facts you discovered
+7. Keep chaining until you can answer the question
+
+IMPORTANT: Read full documents (get_document) — the answer is often in details that don't appear in snippets.
 
 Your final answer must be: Exact Answer: <answer>"""
 
