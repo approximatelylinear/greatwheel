@@ -56,52 +56,50 @@ def _get_vendor_searcher_class(name: str):
 # Prompt templates (same as BrowseComp-Plus search_agent/prompts.py)
 # --------------------------------------------------------------------------- #
 
-SYSTEM_PROMPT = (
-    "You are a research agent. You answer questions by writing Python code that searches a corpus "
-    "of ~100K web documents.\n\n"
-    "YOUR ONLY TOOL is `python`. Inside your code you can call:\n"
-    "  search(query) -> list of dicts with keys: docid, score, snippet\n"
-    "  get_document(docid) -> full document text as string\n\n"
-    "CRITICAL: BM25 search matches KEYWORDS only. Use 2-4 specific nouns/names/dates per query.\n\n"
-    "STRATEGY FOR HARD MULTI-HOP QUESTIONS:\n"
-    "These questions describe things indirectly. You must:\n"
-    "1. Identify clues in the question (dates, places, events, descriptions)\n"
-    "2. Search for the most distinctive clues first\n"
-    "3. Read promising documents fully with get_document()\n"
-    "4. Use what you learn to identify entities, then search for THOSE entities\n"
-    "5. Keep chaining: each search should use NEW information from previous results\n\n"
-    "KEY INSIGHT: The question often describes Person A or Thing X without naming them. "
-    "Your job is to figure out WHO or WHAT is being described by searching for the unique "
-    "details mentioned (specific years, places, events, organizations).\n\n"
-    "Example:\n"
-    "Q: 'A person born in 1932 in Michigan who attended a convent...'\n"
-    "```python\n"
-    "# Search for the most unique/specific details\n"
-    "for r in search('convent Michigan 1932 education'):\n"
-    "    print(r['docid'], r['snippet'][:300])\n"
-    "# Also try related terms\n"
-    "for r in search('Michigan 1950s convent school religious order'):\n"
-    "    print(r['docid'], r['snippet'][:300])\n"
-    "```\n"
-    "Then read full documents and search for the names you discover.\n\n"
-    "ALWAYS use print() to see results. Use get_document() to read full text.\n"
-    "When done, respond with: Exact Answer: <answer>"
-)
+SYSTEM_PROMPT = """You are a research agent answering questions by searching a corpus of ~100K web documents using a REPL environment.
+
+Your REPL has these built-in functions:
+- search(query) -> list of {docid, score, snippet} dicts. BM25 keyword search — use 2-4 specific terms.
+- get_document(docid) -> full document text as string
+- llm_query(prompt) -> ask a sub-LLM to analyze text (useful for long documents)
+
+STRATEGY FOR MULTI-HOP QUESTIONS:
+1. Identify the most distinctive clues (specific dates, places, events, organizations)
+2. Search for those clues with SHORT keyword queries (2-4 terms)
+3. Read promising documents with get_document()
+4. Use llm_query() to analyze long documents: e.g. llm_query(f"Who is mentioned in this document? {doc[:5000]}")
+5. Use discovered names/facts to search again
+6. Chain your findings until you can answer
+
+Example:
+```python
+# Step 1: Search for distinctive clues
+results = search("convent Michigan 1932")
+for r in results:
+    print(r['docid'], r['snippet'][:200])
+```
+Then:
+```python
+# Step 2: Read a promising document
+doc = get_document("12345")
+answer = llm_query(f"What person is described in this article? {doc[:5000]}")
+print(answer)
+```
+Then:
+```python
+# Step 3: Search for the discovered person
+results = search("Jane Smith Michigan convent")
+for r in results:
+    print(r['docid'], r['snippet'][:200])
+```
+
+When you have enough evidence, provide your answer as:
+Exact Answer: <precise answer>"""
 
 QUERY_TEMPLATE = """Question: {question}
 
-STEP-BY-STEP:
-1. List the key clues in this question (dates, places, events, descriptions)
-2. Pick the 2-3 most distinctive/unique clues — things that would appear in few documents
-3. Search for those clues using 2-4 keyword queries
-4. Read the top documents fully with get_document()
-5. Extract names, dates, facts from those documents
-6. Search again using the NEW names/facts you discovered
-7. Keep chaining until you can answer the question
-
-IMPORTANT: Read full documents (get_document) — the answer is often in details that don't appear in snippets.
-
-Your final answer must be: Exact Answer: <answer>"""
+Search the corpus step by step. Use short keyword queries. Read full documents. Use llm_query() to analyze long text.
+When done: Exact Answer: <answer>"""
 
 # --------------------------------------------------------------------------- #
 # Ollama tool-calling interface
@@ -210,7 +208,7 @@ class OllamaAgent:
         resp.raise_for_status()
         return resp.json()
 
-    def _execute_tool(self, name: str, arguments: dict, context: dict | None = None, tool_counts: dict | None = None) -> str:
+    def _execute_tool(self, name: str, arguments: dict, repl_namespace: dict | None = None, context: dict | None = None, tool_counts: dict | None = None) -> str:
         """Execute a tool call against the searcher and return JSON string result."""
         if name == "search":
             query = arguments.get("query", "")
@@ -232,19 +230,16 @@ class OllamaAgent:
 
         elif name == "python":
             code = arguments.get("code", "")
-            return self._execute_python(code, context or {}, tool_counts=tool_counts)
+            return self._execute_python(code, repl_namespace or {})
 
         return json.dumps({"error": f"Unknown tool: {name}"})
 
-    def _execute_python(self, code: str, context: dict, tool_counts: dict | None = None) -> str:
-        """Execute Python code with access to search/get_document functions and accumulated context."""
-        import io
-        import contextlib
+    def _build_repl_namespace(self, context: dict, tool_counts: dict) -> dict:
+        """Build the persistent REPL namespace with search/get_document/llm_query functions."""
 
         def search(query: str, k: int | None = None) -> list[dict]:
-            """Search the corpus from Python code."""
-            if tool_counts is not None:
-                tool_counts["search"] = tool_counts.get("search", 0) + 1
+            """Search the corpus. BM25 keyword matching — use 2-4 specific terms."""
+            tool_counts["search"] = tool_counts.get("search", 0) + 1
             results = self.searcher.search(query, k or self.k)
             truncated = []
             for r in results:
@@ -267,14 +262,37 @@ class OllamaAgent:
             context["documents"][docid] = text
             return text
 
-        namespace = {
+        def llm_query(prompt: str) -> str:
+            """Query a sub-LLM to analyze text. Useful for extracting info from long documents."""
+            try:
+                resp = requests.post(
+                    f"{self.ollama_url}/api/chat",
+                    json={
+                        "model": self.model,
+                        "messages": [{"role": "user", "content": prompt[:8000]}],
+                        "stream": False,
+                    },
+                    timeout=60,
+                )
+                resp.raise_for_status()
+                return resp.json().get("message", {}).get("content", "")
+            except Exception as e:
+                return f"Error: {e}"
+
+        return {
             "search": search,
             "get_document": get_document,
-            "search_results": context.get("search_results", []),
-            "documents": context.get("documents", {}),
+            "llm_query": llm_query,
+            "search_results": context["search_results"],
+            "documents": context["documents"],
             "re": re,
             "json": json,
         }
+
+    def _execute_python(self, code: str, namespace: dict) -> str:
+        """Execute Python code in the persistent REPL namespace."""
+        import io
+        import contextlib
 
         stdout = io.StringIO()
         try:
@@ -307,6 +325,8 @@ class OllamaAgent:
 
         # Context for python tool — accumulate search results and documents
         python_context: dict = {"search_results": [], "documents": {}}
+        # Persistent REPL namespace — variables survive across python calls
+        repl_namespace = self._build_repl_namespace(python_context, tool_counts)
 
         for turn in range(self.max_turns):
             try:
@@ -333,8 +353,31 @@ class OllamaAgent:
                     "output": content,
                 })
 
-            # If no tool calls, we're done
+            # If no tool calls, check if model has given an answer or needs steering
             if not tool_calls:
+                # Check if model gave a final answer
+                if content and "exact answer:" in content.lower():
+                    break
+                # If first turn and no tool call, steer the model to use tools
+                if turn == 0:
+                    messages.append(msg)
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "You haven't searched yet. Write Python code to search the corpus. "
+                            "Use search() with 2-4 keyword terms extracted from the question."
+                        ),
+                    })
+                    continue
+                # If we've searched but no answer yet, ask for final answer
+                search_count = tool_counts.get("search", 0)
+                if search_count > 0:
+                    messages.append(msg)
+                    messages.append({
+                        "role": "user",
+                        "content": "Based on what you've found, provide your final answer as: Exact Answer: <answer>",
+                    })
+                    continue
                 break
 
             # Add assistant message to conversation
@@ -347,7 +390,7 @@ class OllamaAgent:
                 arguments = func.get("arguments", {})
 
                 # Execute the tool
-                tool_output = self._execute_tool(tool_name, arguments, context=python_context, tool_counts=tool_counts)
+                tool_output = self._execute_tool(tool_name, arguments, repl_namespace=repl_namespace, context=python_context, tool_counts=tool_counts)
 
                 # Accumulate context for python tool
                 if tool_name == "search":
