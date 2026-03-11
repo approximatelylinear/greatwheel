@@ -1,2 +1,6 @@
 commit	accuracy	avg_searches	avg_tokens	status	description
 baseline	0.0181	1.0	2810	keep	Original prompt, single search, k=5
+490d200	0.0333	1.3	2972	keep	Stronger answer format + multi-search prompt
+3de3c41	0.0333	2.0	5789	discard	Force min 2 searches + nudge (no improvement)
+490d200	0.0000	1.5	2999	discard	k=10 (worse, confused model)
+48b7fe4	0.0333	1.1	2847	discard	BM25-aware keyword prompt + 500 char snippets

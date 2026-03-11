@@ -57,30 +57,28 @@ def _get_vendor_searcher_class(name: str):
 # --------------------------------------------------------------------------- #
 
 SYSTEM_PROMPT = (
-    "You are a deep research agent with access to a search tool over ~100K web documents. "
-    "Your job is to answer factual questions accurately.\n\n"
-    "IMPORTANT RULES:\n"
-    "1. ALWAYS search at least 2-3 times with different query formulations before answering.\n"
-    "2. After each search, analyze the results and decide if you need more information.\n"
-    "3. Try different keywords, synonyms, and phrasings to find relevant documents.\n"
-    "4. When you have enough evidence, give your final answer in EXACTLY this format:\n\n"
-    "Explanation: <your reasoning citing [docid] references>\n"
-    "Exact Answer: <the precise, concise answer>\n\n"
-    "The 'Exact Answer' line MUST contain only the answer itself — a name, number, date, or short phrase. "
-    "Do NOT include qualifiers, hedging, or extra text on the Exact Answer line."
+    "You are a research agent that answers questions by searching a corpus of ~100K web documents "
+    "and writing Python code to analyze the results.\n\n"
+    "You have three tools:\n"
+    "- search(query): Search the corpus. Returns top results with docid, score, and snippet.\n"
+    "- get_document(docid): Retrieve full document text by docid.\n"
+    "- python(code): Execute Python code. Use this to parse, filter, extract, and analyze data "
+    "from search results. The variable `search_results` contains all search results so far as a list of dicts.\n\n"
+    "WORKFLOW:\n"
+    "1. Search for relevant documents using keyword queries (BM25 — use specific nouns/names, not full sentences)\n"
+    "2. Read promising documents with get_document\n"
+    "3. Write Python code to extract and analyze specific information\n"
+    "4. Search again with refined queries if needed\n"
+    "5. Give your final answer\n\n"
+    "Your final answer MUST use this exact format:\n"
+    "Exact Answer: <the precise answer — a name, number, date, or short phrase>"
 )
 
-QUERY_TEMPLATE = """Find the answer to this question by searching the document corpus. You MUST search multiple times with different queries before answering.
+QUERY_TEMPLATE = """Question: {question}
 
-Question: {question}
+Search the document corpus and use Python code to analyze results. Give a precise answer.
 
-Search strategy:
-1. Start with a broad search using key terms from the question
-2. Refine your search based on what you find
-3. Try alternative phrasings or related terms
-4. Only answer when you have strong evidence
-
-Your final response MUST end with exactly:
+Your final response MUST end with:
 Exact Answer: <your answer>"""
 
 # --------------------------------------------------------------------------- #
@@ -126,6 +124,30 @@ GET_DOCUMENT_TOOL = {
     },
 }
 
+PYTHON_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "python",
+        "description": (
+            "Execute Python code to analyze search results. "
+            "The variable `search_results` is a list of dicts with keys: docid, score, snippet. "
+            "The variable `documents` is a dict mapping docid to full document text. "
+            "Use print() to output results. Common uses: regex extraction, filtering, counting, "
+            "string matching, data parsing."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "Python code to execute.",
+                }
+            },
+            "required": ["code"],
+        },
+    },
+}
+
 
 class OllamaAgent:
     """Agent that uses Ollama for reasoning and a BrowseComp-Plus searcher for retrieval."""
@@ -166,7 +188,7 @@ class OllamaAgent:
         resp.raise_for_status()
         return resp.json()
 
-    def _execute_tool(self, name: str, arguments: dict) -> str:
+    def _execute_tool(self, name: str, arguments: dict, context: dict | None = None) -> str:
         """Execute a tool call against the searcher and return JSON string result."""
         if name == "search":
             query = arguments.get("query", "")
@@ -186,13 +208,42 @@ class OllamaAgent:
                 return json.dumps({"error": f"Document {docid} not found"})
             return json.dumps(doc, ensure_ascii=False)
 
+        elif name == "python":
+            code = arguments.get("code", "")
+            return self._execute_python(code, context or {})
+
         return json.dumps({"error": f"Unknown tool: {name}"})
+
+    def _execute_python(self, code: str, context: dict) -> str:
+        """Execute Python code in a sandboxed environment with search context."""
+        import io
+        import contextlib
+
+        # Build execution namespace with search results context
+        namespace = {
+            "search_results": context.get("search_results", []),
+            "documents": context.get("documents", {}),
+            "re": re,
+            "json": json,
+        }
+
+        stdout = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(stdout):
+                exec(code, namespace)  # noqa: S102
+            output = stdout.getvalue()
+            if not output:
+                output = "(no output)"
+            # Truncate long output
+            if len(output) > 4000:
+                output = output[:4000] + "\n... (truncated)"
+            return output
+        except Exception as e:
+            return f"Error: {type(e).__name__}: {e}"
 
     def run(self, query: str, query_id: str | None = None) -> dict:
         """Run the full agent loop for a single query. Returns BrowseComp-Plus format result."""
-        tools = [SEARCH_TOOL]
-        if self.include_get_document:
-            tools.append(GET_DOCUMENT_TOOL)
+        tools = [SEARCH_TOOL, GET_DOCUMENT_TOOL, PYTHON_TOOL]
 
         formatted_query = QUERY_TEMPLATE.format(question=query)
         messages = [
@@ -205,6 +256,9 @@ class OllamaAgent:
         total_input_tokens = 0
         total_output_tokens = 0
         status = "completed"
+
+        # Context for python tool — accumulate search results and documents
+        python_context: dict = {"search_results": [], "documents": {}}
 
         for turn in range(self.max_turns):
             try:
@@ -245,7 +299,23 @@ class OllamaAgent:
                 arguments = func.get("arguments", {})
 
                 # Execute the tool
-                tool_output = self._execute_tool(tool_name, arguments)
+                tool_output = self._execute_tool(tool_name, arguments, context=python_context)
+
+                # Accumulate context for python tool
+                if tool_name == "search":
+                    try:
+                        search_hits = json.loads(tool_output)
+                        if isinstance(search_hits, list):
+                            python_context["search_results"].extend(search_hits)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                elif tool_name == "get_document":
+                    try:
+                        doc = json.loads(tool_output)
+                        if isinstance(doc, dict) and "docid" in doc:
+                            python_context["documents"][doc["docid"]] = doc.get("text", "")
+                    except (json.JSONDecodeError, TypeError):
+                        pass
 
                 # Record the tool call
                 results.append({
