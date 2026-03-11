@@ -4,3 +4,6 @@ baseline	0.0181	1.0	2810	keep	Original prompt, single search, k=5
 3de3c41	0.0333	2.0	5789	discard	Force min 2 searches + nudge (no improvement)
 490d200	0.0000	1.5	2999	discard	k=10 (worse, confused model)
 48b7fe4	0.0333	1.1	2847	discard	BM25-aware keyword prompt + 500 char snippets
+627bbf1	0.0667	1.2	3130	keep	Python tool added (search+get_doc+python)
+c860723	0.0333	1.8	3258	discard	Python-only tool (model not using search well)
+64ddf5c	0.0000	4.0	4273	discard	Auto pre-search with keywords (noise hurt)

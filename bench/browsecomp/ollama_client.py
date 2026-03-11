@@ -57,30 +57,28 @@ def _get_vendor_searcher_class(name: str):
 # --------------------------------------------------------------------------- #
 
 SYSTEM_PROMPT = (
-    "You are a research agent. You answer questions by writing Python code.\n\n"
-    "You have ONE tool: `python` — it executes Python code with these built-in functions:\n"
-    "- search(query) → list of {{docid, score, snippet}} dicts. Uses BM25 keyword matching.\n"
-    "- get_document(docid) → full document text as string.\n\n"
-    "IMPORTANT: BM25 search matches KEYWORDS, not semantic meaning. Use short queries with "
-    "2-4 specific terms (names, dates, technical terms). NOT full sentences.\n\n"
-    "Example:\n"
-    "```python\n"
-    "# Search with multiple keyword queries\n"
-    "results1 = search('Nobel Prize Physics 2024')\n"
-    "results2 = search('physics Nobel laureate 2024')\n"
-    "# Print snippets to find the answer\n"
-    "for r in results1 + results2:\n"
-    "    print(r['docid'], r['score'], r['snippet'][:200])\n"
-    "```\n\n"
-    "Always print() your findings so you can see the output and reason about it.\n\n"
-    "After analyzing results, give your final answer as:\n"
-    "Exact Answer: <precise answer>"
+    "You are a research agent that answers complex multi-hop questions. You have tools to search "
+    "a corpus of ~100K web documents and execute Python code.\n\n"
+    "APPROACH FOR COMPLEX QUESTIONS:\n"
+    "1. Break the question into sub-facts that need to be identified\n"
+    "2. Search for each sub-fact separately using 2-4 keyword terms\n"
+    "3. Use get_document to read full documents when snippets aren't enough\n"
+    "4. Use the python tool to analyze and cross-reference results\n"
+    "5. Chain your findings together to reach the final answer\n\n"
+    "SEARCH TIPS (BM25 keyword matching):\n"
+    "- Use specific nouns, names, dates, and technical terms\n"
+    "- Do NOT paste the full question as a search query\n"
+    "- Try multiple short queries with different keyword combinations\n\n"
+    "Your final answer MUST be on a line by itself:\n"
+    "Exact Answer: <precise answer — name, number, date, or short phrase>"
 )
 
 QUERY_TEMPLATE = """Question: {question}
 
-Write Python code to search for and analyze documents. Use short keyword queries (2-4 terms).
-After you see the results, give your final answer as: Exact Answer: <answer>"""
+First, identify the key sub-facts in this question. Then search for each one.
+Remember: use short keyword queries (2-4 terms), NOT full sentences.
+
+Your final answer MUST be: Exact Answer: <answer>"""
 
 # --------------------------------------------------------------------------- #
 # Ollama tool-calling interface
@@ -270,7 +268,7 @@ class OllamaAgent:
 
     def run(self, query: str, query_id: str | None = None) -> dict:
         """Run the full agent loop for a single query. Returns BrowseComp-Plus format result."""
-        tools = [PYTHON_TOOL]
+        tools = [SEARCH_TOOL, GET_DOCUMENT_TOOL, PYTHON_TOOL]
 
         formatted_query = QUERY_TEMPLATE.format(question=query)
         messages = [
