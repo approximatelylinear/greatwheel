@@ -57,32 +57,30 @@ def _get_vendor_searcher_class(name: str):
 # --------------------------------------------------------------------------- #
 
 SYSTEM_PROMPT = (
-    "You are a research agent that answers questions by writing Python code to search and analyze "
-    "a corpus of ~100K web documents.\n\n"
-    "Your primary tool is `python` — write code that calls:\n"
-    "- search(query) → list of dicts with keys: docid, score, snippet\n"
-    "- get_document(docid) → full document text as string\n\n"
-    "WORKFLOW:\n"
-    "1. Write Python code that searches with multiple query variations\n"
-    "2. In the same code block, parse the results to extract specific facts\n"
-    "3. Use get_document() to read full documents when snippets aren't enough\n"
-    "4. Print your findings\n"
-    "5. Based on the output, either write more code or give your final answer\n\n"
-    "TIPS:\n"
-    "- BM25 search matches keywords. Use specific nouns, names, and terms — NOT full questions.\n"
-    "- Run multiple searches in one python call with different query formulations.\n"
-    "- Use re module for regex extraction from document text.\n"
-    "- Print intermediate results so you can reason about them.\n\n"
-    "Your final answer MUST use this exact format:\n"
-    "Exact Answer: <the precise answer — a name, number, date, or short phrase>"
+    "You are a research agent. You answer questions by writing Python code.\n\n"
+    "You have ONE tool: `python` — it executes Python code with these built-in functions:\n"
+    "- search(query) → list of {{docid, score, snippet}} dicts. Uses BM25 keyword matching.\n"
+    "- get_document(docid) → full document text as string.\n\n"
+    "IMPORTANT: BM25 search matches KEYWORDS, not semantic meaning. Use short queries with "
+    "2-4 specific terms (names, dates, technical terms). NOT full sentences.\n\n"
+    "Example:\n"
+    "```python\n"
+    "# Search with multiple keyword queries\n"
+    "results1 = search('Nobel Prize Physics 2024')\n"
+    "results2 = search('physics Nobel laureate 2024')\n"
+    "# Print snippets to find the answer\n"
+    "for r in results1 + results2:\n"
+    "    print(r['docid'], r['score'], r['snippet'][:200])\n"
+    "```\n\n"
+    "Always print() your findings so you can see the output and reason about it.\n\n"
+    "After analyzing results, give your final answer as:\n"
+    "Exact Answer: <precise answer>"
 )
 
 QUERY_TEMPLATE = """Question: {question}
 
-Search the document corpus and use Python code to analyze results. Give a precise answer.
-
-Your final response MUST end with:
-Exact Answer: <your answer>"""
+Write Python code to search for and analyze documents. Use short keyword queries (2-4 terms).
+After you see the results, give your final answer as: Exact Answer: <answer>"""
 
 # --------------------------------------------------------------------------- #
 # Ollama tool-calling interface
@@ -270,7 +268,7 @@ class OllamaAgent:
 
     def run(self, query: str, query_id: str | None = None) -> dict:
         """Run the full agent loop for a single query. Returns BrowseComp-Plus format result."""
-        tools = [SEARCH_TOOL, GET_DOCUMENT_TOOL, PYTHON_TOOL]
+        tools = [PYTHON_TOOL]
 
         formatted_query = QUERY_TEMPLATE.format(question=query)
         messages = [
