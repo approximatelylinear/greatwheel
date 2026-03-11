@@ -60,41 +60,41 @@ SYSTEM_PROMPT = (
     "You are a research agent. You answer questions by writing Python code that searches a corpus "
     "of ~100K web documents.\n\n"
     "YOUR ONLY TOOL is `python`. Inside your code you can call:\n"
-    "  search(query) -> list of dicts: [{{'docid': str, 'score': float, 'snippet': str}}, ...]\n"
+    "  search(query) -> list of dicts with keys: docid, score, snippet\n"
     "  get_document(docid) -> full document text as string\n\n"
-    "CRITICAL RULES FOR BM25 SEARCH:\n"
-    "- BM25 matches KEYWORDS, not meaning. Use 2-4 specific terms per query.\n"
-    "- NEVER paste the full question as a query. Extract key nouns/names/dates.\n"
-    "- Run MULTIPLE searches with DIFFERENT keyword combinations.\n\n"
-    "HOW TO SOLVE MULTI-HOP QUESTIONS:\n"
-    "These questions describe a chain of facts. You must identify each fact, search for it, "
-    "then use what you find to search for the next fact.\n\n"
-    "Example approach for: 'What year was the university founded where Person A got their PhD?'\n"
+    "CRITICAL: BM25 search matches KEYWORDS only. Use 2-4 specific nouns/names/dates per query.\n\n"
+    "STRATEGY FOR HARD MULTI-HOP QUESTIONS:\n"
+    "These questions describe things indirectly. You must:\n"
+    "1. Identify clues in the question (dates, places, events, descriptions)\n"
+    "2. Search for the most distinctive clues first\n"
+    "3. Read promising documents fully with get_document()\n"
+    "4. Use what you learn to identify entities, then search for THOSE entities\n"
+    "5. Keep chaining: each search should use NEW information from previous results\n\n"
+    "KEY INSIGHT: The question often describes Person A or Thing X without naming them. "
+    "Your job is to figure out WHO or WHAT is being described by searching for the unique "
+    "details mentioned (specific years, places, events, organizations).\n\n"
+    "Example:\n"
+    "Q: 'A person born in 1932 in Michigan who attended a convent...'\n"
     "```python\n"
-    "# Step 1: Find Person A's PhD\n"
-    "for r in search('Person A PhD university'):\n"
-    "    print(r['docid'], r['snippet'][:200])\n"
+    "# Search for the most unique/specific details\n"
+    "for r in search('convent Michigan 1932 education'):\n"
+    "    print(r['docid'], r['snippet'][:300])\n"
+    "# Also try related terms\n"
+    "for r in search('Michigan 1950s convent school religious order'):\n"
+    "    print(r['docid'], r['snippet'][:300])\n"
     "```\n"
-    "Then in the next code block:\n"
-    "```python\n"
-    "# Step 2: Found that Person A got PhD at MIT. Now find founding year.\n"
-    "for r in search('MIT founded year'):\n"
-    "    print(r['docid'], r['snippet'][:200])\n"
-    "```\n\n"
-    "IMPORTANT:\n"
-    "- Use print() so you can see results and reason about them.\n"
-    "- Read full documents with get_document(docid) when snippets aren't enough.\n"
-    "- Use re (regex) to extract specific facts from document text.\n"
-    "- Each python call should focus on ONE step of your reasoning chain.\n\n"
-    "When you have the answer, respond with ONLY:\n"
-    "Exact Answer: <precise answer — name, number, date, or short phrase>"
+    "Then read full documents and search for the names you discover.\n\n"
+    "ALWAYS use print() to see results. Use get_document() to read full text.\n"
+    "When done, respond with: Exact Answer: <answer>"
 )
 
 QUERY_TEMPLATE = """Question: {question}
 
-Break this into sub-facts, then search for each one step by step using the python tool.
-Use short keyword queries (2-4 terms each). Your final answer must be:
-Exact Answer: <answer>"""
+Identify the most distinctive/unusual clues in this question, then search for them.
+Chain your findings: use what you learn to search for more specific information.
+Read full documents when snippets aren't enough.
+
+Your final answer must be: Exact Answer: <answer>"""
 
 # --------------------------------------------------------------------------- #
 # Ollama tool-calling interface
