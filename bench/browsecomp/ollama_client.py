@@ -57,19 +57,22 @@ def _get_vendor_searcher_class(name: str):
 # --------------------------------------------------------------------------- #
 
 SYSTEM_PROMPT = (
-    "You are a research agent that answers questions by searching a corpus of ~100K web documents "
-    "and writing Python code to analyze the results.\n\n"
-    "You have three tools:\n"
-    "- search(query): Search the corpus. Returns top results with docid, score, and snippet.\n"
-    "- get_document(docid): Retrieve full document text by docid.\n"
-    "- python(code): Execute Python code. Use this to parse, filter, extract, and analyze data "
-    "from search results. The variable `search_results` contains all search results so far as a list of dicts.\n\n"
+    "You are a research agent that answers questions by writing Python code to search and analyze "
+    "a corpus of ~100K web documents.\n\n"
+    "Your primary tool is `python` — write code that calls:\n"
+    "- search(query) → list of dicts with keys: docid, score, snippet\n"
+    "- get_document(docid) → full document text as string\n\n"
     "WORKFLOW:\n"
-    "1. Search for relevant documents using keyword queries (BM25 — use specific nouns/names, not full sentences)\n"
-    "2. Read promising documents with get_document\n"
-    "3. Write Python code to extract and analyze specific information\n"
-    "4. Search again with refined queries if needed\n"
-    "5. Give your final answer\n\n"
+    "1. Write Python code that searches with multiple query variations\n"
+    "2. In the same code block, parse the results to extract specific facts\n"
+    "3. Use get_document() to read full documents when snippets aren't enough\n"
+    "4. Print your findings\n"
+    "5. Based on the output, either write more code or give your final answer\n\n"
+    "TIPS:\n"
+    "- BM25 search matches keywords. Use specific nouns, names, and terms — NOT full questions.\n"
+    "- Run multiple searches in one python call with different query formulations.\n"
+    "- Use re module for regex extraction from document text.\n"
+    "- Print intermediate results so you can reason about them.\n\n"
     "Your final answer MUST use this exact format:\n"
     "Exact Answer: <the precise answer — a name, number, date, or short phrase>"
 )
@@ -129,18 +132,18 @@ PYTHON_TOOL = {
     "function": {
         "name": "python",
         "description": (
-            "Execute Python code to analyze search results. "
-            "The variable `search_results` is a list of dicts with keys: docid, score, snippet. "
-            "The variable `documents` is a dict mapping docid to full document text. "
-            "Use print() to output results. Common uses: regex extraction, filtering, counting, "
-            "string matching, data parsing."
+            "Execute Python code. You can call search(query) and get_document(docid) directly in the code. "
+            "search(query) returns a list of dicts with keys: docid, score, snippet. "
+            "get_document(docid) returns the full document text as a string. "
+            "Use print() to output results. You can run multiple searches, filter results, "
+            "extract patterns with regex, parse data, and combine information from multiple documents."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "code": {
                     "type": "string",
-                    "description": "Python code to execute.",
+                    "description": "Python code to execute. Use search() and get_document() to access the corpus.",
                 }
             },
             "required": ["code"],
@@ -215,12 +218,37 @@ class OllamaAgent:
         return json.dumps({"error": f"Unknown tool: {name}"})
 
     def _execute_python(self, code: str, context: dict) -> str:
-        """Execute Python code in a sandboxed environment with search context."""
+        """Execute Python code with access to search/get_document functions and accumulated context."""
         import io
         import contextlib
 
-        # Build execution namespace with search results context
+        def search(query: str, k: int | None = None) -> list[dict]:
+            """Search the corpus from Python code."""
+            results = self.searcher.search(query, k or self.k)
+            truncated = []
+            for r in results:
+                text = r.get("text", "")
+                entry = {
+                    "docid": r.get("docid", ""),
+                    "score": r.get("score", 0.0),
+                    "snippet": text[: self.snippet_max_chars],
+                }
+                truncated.append(entry)
+                context["search_results"].append(entry)
+            return truncated
+
+        def get_document(docid: str) -> str | None:
+            """Retrieve full document text by docid."""
+            doc = self.searcher.get_document(str(docid))
+            if doc is None:
+                return None
+            text = doc.get("text", "")
+            context["documents"][docid] = text
+            return text
+
         namespace = {
+            "search": search,
+            "get_document": get_document,
             "search_results": context.get("search_results", []),
             "documents": context.get("documents", {}),
             "re": re,
@@ -234,7 +262,6 @@ class OllamaAgent:
             output = stdout.getvalue()
             if not output:
                 output = "(no output)"
-            # Truncate long output
             if len(output) > 4000:
                 output = output[:4000] + "\n... (truncated)"
             return output
