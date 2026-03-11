@@ -115,7 +115,7 @@ impl BrowseCompBridge {
             max_llm_calls: 8,
             max_search_calls: 15,
             start_time: std::time::Instant::now(),
-            timeout_secs: 90,
+            timeout_secs: 60,
         }
     }
 
@@ -377,63 +377,45 @@ impl HostBridge for BrowseCompBridge {
 // rLM System Prompt & Iteration Prompts
 // -------------------------------------------------------------------------- //
 
-const SYSTEM_PROMPT: &str = r#"You are a deep research agent tasked with answering difficult questions by searching a corpus of ~100K web documents. You have access to a REPL environment with these functions:
+const SYSTEM_PROMPT: &str = r#"You are a research agent answering questions by searching ~100K web documents. You have a REPL with these functions:
 
-- `search(query)` — BM25 keyword search over the corpus. Returns a list of {docid, snippet} dicts.
-- `get_document(docid)` — Retrieve the full text of a document by its docid.
-- `llm_query(prompt)` — Query a sub-LLM to analyze text or reason about evidence.
-- `batch_llm_query([prompt1, prompt2, ...])` — Run multiple LLM queries IN PARALLEL. Returns a list of responses.
-- `print()` — Print output to see results and continue reasoning.
+- `search(query)` — BM25 keyword search. Returns [{docid, snippet}]. Use 2-5 keyword queries.
+- `get_document(docid)` — Get full document text. ALWAYS read full docs for promising hits.
+- `llm_query(prompt)` — Ask a sub-LLM to analyze text.
+- `batch_llm_query([p1, p2, ...])` — Multiple LLM queries in parallel. Use for analyzing multiple docs.
+- `FINAL(answer)` — Submit your final answer.
+- `print()` — Print to see results.
 
-When you want to execute code, wrap it in ```repl``` tags:
+Write code in ```repl``` blocks:
 ```repl
-results = search("Tim Ellis Relativity Space")
+results = search("keyword query")
 for r in results:
     print(r["docid"], r["snippet"][:200])
 ```
 
-SEARCH STRATEGY — this is critical for finding answers:
-1. BM25 is keyword-based, NOT semantic. Use exact terms, names, and phrases from the question.
-2. Run AT LEAST 3-5 searches per question with DIVERSE query formulations:
-   - First: key entities and names from the question
-   - Then: synonyms, alternative spellings, related terms
-   - Then: broader or narrower slices (e.g., just a person's last name, or a specific date)
-   - Try quoting distinctive multi-word phrases
-3. When a search returns 0 useful results, DO NOT repeat similar keywords. Try completely different angles.
-4. After finding a promising document, use get_document(docid) to read the FULL text — snippets often miss the answer.
-5. Use batch_llm_query() to analyze multiple documents in parallel.
+STRATEGY:
+1. Search with keywords from the question.
+2. ALWAYS get_document() on the top 2-3 hits — snippets are only 1000 chars, answers are often deeper.
+3. Search again with different keywords if needed.
+4. Use batch_llm_query() to analyze multiple full docs in parallel.
+5. When confident, call FINAL("your answer").
 
-When you have found the answer, call FINAL(your_answer) — either in code or as plain text:
-```repl
-FINAL("Tim Ellis")
-```
-Or simply write: FINAL(Tim Ellis)
-
-IMPORTANT RULES:
-- The answer must be precise — a specific name, number, date, or short phrase.
-- NEVER answer "Unable to determine", "None", "Not found", or similar. Always give your best guess based on ANY evidence.
-- Include articles ("The"), full names, and exact formatting when relevant.
-- Do not explain or hedge in your FINAL answer — just the answer itself.
-- If your searches find nothing, reason from what you know and give your best guess anyway."#;
+RULES:
+- Answer must be precise: a specific name, number, date, or short phrase.
+- NEVER say "Unable to determine" or "None". Always give your BEST GUESS.
+- Include articles ("The"), full names, exact formatting.
+- Search at least 2-3 times with different queries before answering."#;
 
 fn iteration_prompt(query: &str, iteration: usize) -> String {
     if iteration == 0 {
         format!(
             "Question: {query}\n\n\
-             Start by identifying the key entities, names, and distinctive terms in this question. \
-             Then run 2-3 searches with different keyword combinations. Show your reasoning."
-        )
-    } else if iteration == 1 {
-        format!(
-            "Question: {query}\n\n\
-             Review what you found. If you haven't found the answer yet, try COMPLETELY DIFFERENT search queries — \
-             different keywords, alternative phrasings, partial names, related terms. \
-             If you found a promising document, use get_document() to read the full text."
+             Search for key terms from the question. Read the full text of promising documents with get_document()."
         )
     } else {
         format!(
             "Question: {query}\n\n\
-             Keep searching with new angles. If you have enough evidence, provide your answer with FINAL()."
+             Search with different keywords. Read full documents. If you have enough evidence, call FINAL(answer)."
         )
     }
 }
@@ -451,7 +433,7 @@ fn final_prompt(query: &str) -> String {
 // rLM Loop
 // -------------------------------------------------------------------------- //
 
-const QUERY_TIMEOUT_SECS: u64 = 120; // 2 minutes max per query
+const QUERY_TIMEOUT_SECS: u64 = 90; // 90 seconds max per query
 
 fn run_rlm_loop(
     llm: &OllamaClient,
@@ -503,7 +485,7 @@ fn run_rlm_loop(
         total_output += resp.output_tokens.unwrap_or(0);
 
         let content = resp.content.trim().to_string();
-        debug!(iteration, len = content.len(), "LLM response");
+        info!(iteration, len = content.len(), elapsed_s = start_time.elapsed().as_secs(), "LLM response");
 
         // Add assistant response to conversation
         messages.push(Message {
