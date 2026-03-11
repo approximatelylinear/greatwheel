@@ -57,28 +57,44 @@ def _get_vendor_searcher_class(name: str):
 # --------------------------------------------------------------------------- #
 
 SYSTEM_PROMPT = (
-    "You are a research agent that answers complex multi-hop questions. You have tools to search "
-    "a corpus of ~100K web documents and execute Python code.\n\n"
-    "APPROACH FOR COMPLEX QUESTIONS:\n"
-    "1. Break the question into sub-facts that need to be identified\n"
-    "2. Search for each sub-fact separately using 2-4 keyword terms\n"
-    "3. Use get_document to read full documents when snippets aren't enough\n"
-    "4. Use the python tool to analyze and cross-reference results\n"
-    "5. Chain your findings together to reach the final answer\n\n"
-    "SEARCH TIPS (BM25 keyword matching):\n"
-    "- Use specific nouns, names, dates, and technical terms\n"
-    "- Do NOT paste the full question as a search query\n"
-    "- Try multiple short queries with different keyword combinations\n\n"
-    "Your final answer MUST be on a line by itself:\n"
+    "You are a research agent. You answer questions by writing Python code that searches a corpus "
+    "of ~100K web documents.\n\n"
+    "YOUR ONLY TOOL is `python`. Inside your code you can call:\n"
+    "  search(query) -> list of dicts: [{{'docid': str, 'score': float, 'snippet': str}}, ...]\n"
+    "  get_document(docid) -> full document text as string\n\n"
+    "CRITICAL RULES FOR BM25 SEARCH:\n"
+    "- BM25 matches KEYWORDS, not meaning. Use 2-4 specific terms per query.\n"
+    "- NEVER paste the full question as a query. Extract key nouns/names/dates.\n"
+    "- Run MULTIPLE searches with DIFFERENT keyword combinations.\n\n"
+    "HOW TO SOLVE MULTI-HOP QUESTIONS:\n"
+    "These questions describe a chain of facts. You must identify each fact, search for it, "
+    "then use what you find to search for the next fact.\n\n"
+    "Example approach for: 'What year was the university founded where Person A got their PhD?'\n"
+    "```python\n"
+    "# Step 1: Find Person A's PhD\n"
+    "for r in search('Person A PhD university'):\n"
+    "    print(r['docid'], r['snippet'][:200])\n"
+    "```\n"
+    "Then in the next code block:\n"
+    "```python\n"
+    "# Step 2: Found that Person A got PhD at MIT. Now find founding year.\n"
+    "for r in search('MIT founded year'):\n"
+    "    print(r['docid'], r['snippet'][:200])\n"
+    "```\n\n"
+    "IMPORTANT:\n"
+    "- Use print() so you can see results and reason about them.\n"
+    "- Read full documents with get_document(docid) when snippets aren't enough.\n"
+    "- Use re (regex) to extract specific facts from document text.\n"
+    "- Each python call should focus on ONE step of your reasoning chain.\n\n"
+    "When you have the answer, respond with ONLY:\n"
     "Exact Answer: <precise answer — name, number, date, or short phrase>"
 )
 
 QUERY_TEMPLATE = """Question: {question}
 
-First, identify the key sub-facts in this question. Then search for each one.
-Remember: use short keyword queries (2-4 terms), NOT full sentences.
-
-Your final answer MUST be: Exact Answer: <answer>"""
+Break this into sub-facts, then search for each one step by step using the python tool.
+Use short keyword queries (2-4 terms each). Your final answer must be:
+Exact Answer: <answer>"""
 
 # --------------------------------------------------------------------------- #
 # Ollama tool-calling interface
@@ -268,7 +284,7 @@ class OllamaAgent:
 
     def run(self, query: str, query_id: str | None = None) -> dict:
         """Run the full agent loop for a single query. Returns BrowseComp-Plus format result."""
-        tools = [SEARCH_TOOL, GET_DOCUMENT_TOOL, PYTHON_TOOL]
+        tools = [PYTHON_TOOL]
 
         formatted_query = QUERY_TEMPLATE.format(question=query)
         messages = [
