@@ -189,7 +189,7 @@ class OllamaAgent:
         resp.raise_for_status()
         return resp.json()
 
-    def _execute_tool(self, name: str, arguments: dict, context: dict | None = None) -> str:
+    def _execute_tool(self, name: str, arguments: dict, context: dict | None = None, tool_counts: dict | None = None) -> str:
         """Execute a tool call against the searcher and return JSON string result."""
         if name == "search":
             query = arguments.get("query", "")
@@ -211,17 +211,19 @@ class OllamaAgent:
 
         elif name == "python":
             code = arguments.get("code", "")
-            return self._execute_python(code, context or {})
+            return self._execute_python(code, context or {}, tool_counts=tool_counts)
 
         return json.dumps({"error": f"Unknown tool: {name}"})
 
-    def _execute_python(self, code: str, context: dict) -> str:
+    def _execute_python(self, code: str, context: dict, tool_counts: dict | None = None) -> str:
         """Execute Python code with access to search/get_document functions and accumulated context."""
         import io
         import contextlib
 
         def search(query: str, k: int | None = None) -> list[dict]:
             """Search the corpus from Python code."""
+            if tool_counts is not None:
+                tool_counts["search"] = tool_counts.get("search", 0) + 1
             results = self.searcher.search(query, k or self.k)
             truncated = []
             for r in results:
@@ -324,7 +326,7 @@ class OllamaAgent:
                 arguments = func.get("arguments", {})
 
                 # Execute the tool
-                tool_output = self._execute_tool(tool_name, arguments, context=python_context)
+                tool_output = self._execute_tool(tool_name, arguments, context=python_context, tool_counts=tool_counts)
 
                 # Accumulate context for python tool
                 if tool_name == "search":
