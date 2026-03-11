@@ -379,10 +379,10 @@ impl HostBridge for BrowseCompBridge {
 
 const SYSTEM_PROMPT: &str = r#"You are a research agent answering questions by searching ~100K web documents. You have a REPL with these functions:
 
-- `search(query)` — BM25 keyword search. Returns [{docid, snippet}]. Use 2-5 keyword queries.
-- `get_document(docid)` — Get full document text. ALWAYS read full docs for promising hits.
-- `llm_query(prompt)` — Ask a sub-LLM to analyze text.
-- `batch_llm_query([p1, p2, ...])` — Multiple LLM queries in parallel. Use for analyzing multiple docs.
+- `search(query)` — BM25 keyword search. Returns [{docid, snippet}]. Use short keyword queries (2-5 words).
+- `get_document(docid)` — Get full document text. Use on promising search hits.
+- `llm_query(prompt)` — Ask a sub-LLM to analyze text or reason about evidence.
+- `batch_llm_query([p1, p2, ...])` — Multiple LLM queries in parallel.
 - `FINAL(answer)` — Submit your final answer.
 - `print()` — Print to see results.
 
@@ -393,29 +393,44 @@ for r in results:
     print(r["docid"], r["snippet"][:200])
 ```
 
-STRATEGY:
-1. Search with keywords from the question.
-2. ALWAYS get_document() on the top 2-3 hits — snippets are only 1000 chars, answers are often deeper.
-3. Search again with different keywords if needed.
-4. Use batch_llm_query() to analyze multiple full docs in parallel.
-5. When confident, call FINAL("your answer").
+STRATEGY — follow this carefully:
+1. Break the question into parts. Identify specific names, dates, places, and entities.
+2. For each part, search with 2-3 word keyword queries. BM25 works best with specific terms.
+3. When you find a promising hit, read the full document with get_document(docid).
+4. Look for connections between documents to answer multi-hop questions.
+5. When you have evidence, call FINAL("your answer").
+
+IMPORTANT — BM25 SEARCH TIPS:
+- Use SPECIFIC names and terms, not generic descriptions.
+- If the question mentions "a person who did X", search for X directly.
+- Try searching for distinctive phrases or proper nouns from the question.
+- If one search doesn't work, try completely DIFFERENT keywords.
 
 RULES:
 - Answer must be precise: a specific name, number, date, or short phrase.
 - NEVER say "Unable to determine" or "None". Always give your BEST GUESS.
-- Include articles ("The"), full names, exact formatting.
-- Search at least 2-3 times with different queries before answering."#;
+- Include articles ("The"), full names, exact formatting."#;
 
 fn iteration_prompt(query: &str, iteration: usize) -> String {
     if iteration == 0 {
         format!(
             "Question: {query}\n\n\
-             Search for key terms from the question. Read the full text of promising documents with get_document()."
+             Search for key terms, then use get_document() to read the full text of the top hits. Example:\n\
+             ```repl\n\
+             results = search(\"key terms here\")\n\
+             for r in results[:3]:\n\
+                 print(r[\"docid\"], r[\"snippet\"][:200])\n\
+             ```\n\
+             Then:\n\
+             ```repl\n\
+             doc = get_document(\"promising_docid\")\n\
+             print(doc[:2000])\n\
+             ```"
         )
     } else {
         format!(
             "Question: {query}\n\n\
-             Search with different keywords. Read full documents. If you have enough evidence, call FINAL(answer)."
+             Try different search keywords. Read full documents with get_document(). When ready, call FINAL(answer)."
         )
     }
 }
@@ -435,6 +450,78 @@ fn final_prompt(query: &str) -> String {
 
 const QUERY_TIMEOUT_SECS: u64 = 90; // 90 seconds max per query
 
+/// Use the LLM to extract search queries from the question, then pre-search.
+fn pre_search(
+    llm: &OllamaClient,
+    model: &str,
+    query: &str,
+    bridge_search_url: &str,
+    k: u32,
+    rt: &tokio::runtime::Handle,
+) -> (String, u32, u32) {
+    // Ask LLM to extract 3 short keyword queries
+    let extract_prompt = format!(
+        "Given this question, output exactly 3 short BM25 keyword search queries (2-5 words each) to find the answer. \
+         Focus on specific names, places, dates, and distinctive terms. Output ONLY the queries, one per line.\n\n\
+         Question: {query}\n\nSearch queries:"
+    );
+
+    let messages = vec![Message {
+        role: "user".into(),
+        content: extract_prompt,
+    }];
+
+    let resp = match rt.block_on(async { llm.chat(&messages, Some(model)).await }) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "Pre-search LLM call failed");
+            return (String::new(), 0, 0);
+        }
+    };
+
+    let input_tokens = resp.input_tokens.unwrap_or(0);
+    let output_tokens = resp.output_tokens.unwrap_or(0);
+    let client = reqwest::Client::new();
+
+    let mut context = String::new();
+    let queries: Vec<&str> = resp.content.lines()
+        .map(|l| l.trim().trim_start_matches(|c: char| c.is_numeric() || c == '.' || c == '-' || c == ')'))
+        .map(|l| l.trim().trim_matches('"'))
+        .filter(|l| !l.is_empty() && l.len() < 100)
+        .take(3)
+        .collect();
+
+    info!(queries = ?queries, "Pre-search queries");
+
+    for search_query in &queries {
+        let url = format!("{}/call/search", bridge_search_url);
+        let resp = rt.block_on(async {
+            client
+                .post(&url)
+                .json(&serde_json::json!({ "query": search_query, "k": k }))
+                .send()
+                .await
+        });
+
+        if let Ok(resp) = resp {
+            if let Ok(hits) = rt.block_on(async { resp.json::<Vec<SearchHit>>().await }) {
+                if !hits.is_empty() {
+                    context.push_str(&format!("\n--- Search: \"{}\" ---\n", search_query));
+                    for hit in hits.iter().take(3) {
+                        context.push_str(&format!(
+                            "docid={}: {}\n",
+                            hit.docid,
+                            hit.snippet.as_deref().unwrap_or("").chars().take(500).collect::<String>()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    (context, input_tokens, output_tokens)
+}
+
 fn run_rlm_loop(
     llm: &OllamaClient,
     model: &str,
@@ -442,6 +529,7 @@ fn run_rlm_loop(
     query: &str,
     max_iterations: u32,
     rt: &tokio::runtime::Handle,
+    pre_search_context: &str,
 ) -> (String, Vec<ResultEntry>, u32, u32) {
     let start_time = std::time::Instant::now();
     let mut messages: Vec<Message> = vec![Message {
@@ -462,6 +550,13 @@ fn run_rlm_loop(
         // Build iteration prompt
         let user_prompt = if iteration == max_iterations - 1 {
             final_prompt(query)
+        } else if iteration == 0 && !pre_search_context.is_empty() {
+            format!(
+                "Question: {query}\n\n\
+                 I already ran some initial searches. Here are the results:\n{pre_search_context}\n\n\
+                 Based on these results, search for more specific information and read promising documents with get_document(). \
+                 Use the docids above to retrieve full documents."
+            )
         } else {
             iteration_prompt(query, iteration as usize)
         };
@@ -748,8 +843,14 @@ fn run_single_query(
         .set_variable("question", Object::String(query_text.to_string()))
         .ok();
 
+    // Pre-search: extract keywords and run initial searches
+    let (pre_search_ctx, pre_input, pre_output) =
+        pre_search(llm, &cli.model, query_text, &cli.search_url, cli.k, rt);
+
     let (status, result_entries, input_tokens, output_tokens) =
-        run_rlm_loop(llm, &cli.model, &mut agent, query_text, cli.max_turns, rt);
+        run_rlm_loop(llm, &cli.model, &mut agent, query_text, cli.max_turns, rt, &pre_search_ctx);
+    let input_tokens = input_tokens + pre_input;
+    let output_tokens = output_tokens + pre_output;
 
     // Extract tracking data from the bridge (it was moved into the agent)
     // We need to get it back — for now, count from result entries
