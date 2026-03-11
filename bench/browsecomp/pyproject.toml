@@ -1,0 +1,22 @@
+[project]
+name = "gw-bench-browsecomp"
+version = "0.1.0"
+description = "Greatwheel BrowseComp-Plus benchmark harness"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31.0",
+    "tqdm>=4.67.0",
+    "datasets>=4.0.0",
+    "rich>=14.0.0",
+    "python-dotenv>=1.1.0",
+]
+
+[project.optional-dependencies]
+# BM25s retrieval (pure Python, no Java)
+bm25s = ["bm25s[full]>=0.2.0"]
+# BM25 retrieval via Pyserini (needs Java 21)
+bm25 = ["pyserini>=1.2.0"]
+# LanceDB retrieval
+lancedb = ["lancedb>=0.26", "pyarrow>=17.0.0"]
+# Full BrowseComp-Plus eval (needs vLLM + Qwen3-32B)
+eval = ["vllm>=0.9.0", "numpy>=1.26.0"]

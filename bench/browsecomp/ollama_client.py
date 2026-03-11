@@ -307,10 +307,18 @@ class OllamaAgent:
         except Exception as e:
             return f"Error: {type(e).__name__}: {e}"
 
-    def run(self, query: str, query_id: str | None = None) -> dict:
-        """Run the full agent loop for a single query. Returns BrowseComp-Plus format result."""
-        tools = [SEARCH_TOOL, GET_DOCUMENT_TOOL, PYTHON_TOOL]
+    @staticmethod
+    def _extract_code_blocks(text: str) -> list[str]:
+        """Extract code from ```python or ```repl fenced blocks."""
+        blocks = []
+        for m in re.finditer(r'```(?:python|repl|py)?\s*\n(.*?)```', text, re.DOTALL):
+            code = m.group(1).strip()
+            if code:
+                blocks.append(code)
+        return blocks
 
+    def run(self, query: str, query_id: str | None = None) -> dict:
+        """Run the full agent loop using text-based REPL (no tool calling)."""
         formatted_query = QUERY_TEMPLATE.format(question=query)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -323,14 +331,14 @@ class OllamaAgent:
         total_output_tokens = 0
         status = "completed"
 
-        # Context for python tool — accumulate search results and documents
+        # Persistent REPL namespace
         python_context: dict = {"search_results": [], "documents": {}}
-        # Persistent REPL namespace — variables survive across python calls
         repl_namespace = self._build_repl_namespace(python_context, tool_counts)
 
         for turn in range(self.max_turns):
             try:
-                response = self._chat(messages, tools=tools)
+                # No tools — just text generation
+                response = self._chat(messages)
             except Exception as e:
                 print(f"  [Error] Ollama call failed on turn {turn}: {e}")
                 status = "error"
@@ -338,13 +346,11 @@ class OllamaAgent:
 
             msg = response.get("message", {})
             content = msg.get("content", "")
-            tool_calls = msg.get("tool_calls", [])
 
             # Track tokens
             total_input_tokens += response.get("prompt_eval_count", 0)
             total_output_tokens += response.get("eval_count", 0)
 
-            # If the model produced text, record it
             if content:
                 results.append({
                     "type": "output_text",
@@ -353,77 +359,56 @@ class OllamaAgent:
                     "output": content,
                 })
 
-            # If no tool calls, check if model has given an answer or needs steering
-            if not tool_calls:
-                # Check if model gave a final answer
-                if content and "exact answer:" in content.lower():
+            # Extract and execute code blocks from the response
+            code_blocks = self._extract_code_blocks(content)
+
+            if not code_blocks:
+                # No code blocks — check if model gave a final answer
+                if "exact answer:" in content.lower():
                     break
-                # If first turn and no tool call, steer the model to use tools
+                # Steer the model
                 if turn == 0:
                     messages.append(msg)
                     messages.append({
                         "role": "user",
                         "content": (
-                            "You haven't searched yet. Write Python code to search the corpus. "
-                            "Use search() with 2-4 keyword terms extracted from the question."
+                            "Write Python code in a ```python block to search the corpus. "
+                            "Use search('keyword1 keyword2') with 2-4 terms from the question."
                         ),
                     })
                     continue
-                # If we've searched but no answer yet, ask for final answer
-                search_count = tool_counts.get("search", 0)
-                if search_count > 0:
-                    messages.append(msg)
-                    messages.append({
-                        "role": "user",
-                        "content": "Based on what you've found, provide your final answer as: Exact Answer: <answer>",
-                    })
-                    continue
-                break
+                # Ask for final answer
+                messages.append(msg)
+                messages.append({
+                    "role": "user",
+                    "content": "Based on what you've found, provide your final answer as: Exact Answer: <answer>",
+                })
+                continue
 
-            # Add assistant message to conversation
+            # Execute each code block and collect output
             messages.append(msg)
-
-            # Process each tool call
-            for tc in tool_calls:
-                func = tc.get("function", {})
-                tool_name = func.get("name", "")
-                arguments = func.get("arguments", {})
-
-                # Execute the tool
-                tool_output = self._execute_tool(tool_name, arguments, repl_namespace=repl_namespace, context=python_context, tool_counts=tool_counts)
-
-                # Accumulate context for python tool
-                if tool_name == "search":
-                    try:
-                        search_hits = json.loads(tool_output)
-                        if isinstance(search_hits, list):
-                            python_context["search_results"].extend(search_hits)
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                elif tool_name == "get_document":
-                    try:
-                        doc = json.loads(tool_output)
-                        if isinstance(doc, dict) and "docid" in doc:
-                            python_context["documents"][doc["docid"]] = doc.get("text", "")
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-
-                # Record the tool call
+            all_outputs = []
+            for code in code_blocks:
+                output = self._execute_python(code, repl_namespace)
                 results.append({
                     "type": "tool_call",
-                    "tool_name": tool_name,
-                    "arguments": arguments,
-                    "output": tool_output,
+                    "tool_name": "python",
+                    "arguments": {"code": code},
+                    "output": output,
                 })
-                tool_counts[tool_name] = tool_counts.get(tool_name, 0) + 1
+                tool_counts["python"] = tool_counts.get("python", 0) + 1
+                all_outputs.append(output)
 
-                # Feed result back to Ollama
-                messages.append({
-                    "role": "tool",
-                    "content": tool_output,
-                })
+            # Feed REPL output back as a user message
+            repl_output = "\n".join(f"[REPL output]\n{o}" for o in all_outputs)
+            # Truncate to prevent context explosion
+            if len(repl_output) > 6000:
+                repl_output = repl_output[:6000] + "\n... (truncated)"
+            messages.append({
+                "role": "user",
+                "content": repl_output + "\n\nContinue your analysis. Write more code or provide your answer as: Exact Answer: <answer>",
+            })
         else:
-            # Hit max turns without a final text response
             status = "max_turns"
 
         record = {

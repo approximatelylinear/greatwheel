@@ -10,6 +10,7 @@ members = [
     "crates/gw-scheduler",
     "crates/gw-trace",
     "crates/gw-server",
+    "crates/gw-bench",
 ]
 
 [workspace.dependencies]
@@ -32,8 +33,9 @@ lancedb = "0.26"
 notify = "6"
 opentelemetry = "0.28"
 opentelemetry-otlp = "0.28"
-ouros = "0.2"
+ouros = { git = "https://github.com/parcadei/ouros", version = "0.0.4" }
 reqwest = { version = "0.12", features = ["json", "stream"] }
+thiserror = "2"
 tokio-stream = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
