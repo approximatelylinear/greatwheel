@@ -309,7 +309,7 @@ class OllamaAgent:
 
     def run(self, query: str, query_id: str | None = None) -> dict:
         """Run the full agent loop for a single query. Returns BrowseComp-Plus format result."""
-        tools = [PYTHON_TOOL]
+        tools = [SEARCH_TOOL, GET_DOCUMENT_TOOL, PYTHON_TOOL]
 
         formatted_query = QUERY_TEMPLATE.format(question=query)
         messages = [
