@@ -1,0 +1,2 @@
+commit	accuracy	avg_searches	avg_tokens	status	description
+baseline	0.0181	1.0	2810	keep	Original prompt, single search, k=5
