@@ -31,6 +31,21 @@ struct RunRecord {
     status: String,
     retrieved_docids: Vec<String>,
     result: Vec<ResultEntry>,
+    /// Full conversation trajectory (system + user + assistant messages)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    trajectory: Vec<TrajectoryMessage>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TrajectoryMessage {
+    role: String,
+    content: String,
+    /// For assistant messages: code blocks extracted
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    code_blocks: Vec<String>,
+    /// For assistant messages: REPL execution output
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repl_output: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -377,70 +392,69 @@ impl HostBridge for BrowseCompBridge {
 // rLM System Prompt & Iteration Prompts
 // -------------------------------------------------------------------------- //
 
-const SYSTEM_PROMPT: &str = r#"You are a research agent answering questions by searching ~100K web documents. You have a REPL with these functions:
+const SYSTEM_PROMPT: &str = r#"You are tasked with answering a query by searching and analyzing a corpus of ~100K web documents. You work interactively in a REPL environment that persists state across code blocks.
 
-- `search(query)` — BM25 keyword search. Returns [{docid, snippet}]. Use short keyword queries (2-5 words).
-- `get_document(docid)` — Get full document text. Use on promising search hits.
-- `llm_query(prompt)` — Ask a sub-LLM to analyze text or reason about evidence.
-- `batch_llm_query([p1, p2, ...])` — Multiple LLM queries in parallel.
-- `FINAL(answer)` — Submit your final answer.
-- `print()` — Print to see results.
+The REPL environment provides:
+1. A `context` variable containing initial search results (snippets from relevant documents).
+2. `search(query)` — BM25 keyword search. Returns list of {docid, snippet} dicts.
+3. `get_document(docid)` — Retrieve full document text as a string.
+4. `llm_query(prompt)` — Query a sub-LLM to analyze text. Can handle ~10K chars of context.
+5. `batch_llm_query([p1, p2, ...])` — Run multiple LLM queries in parallel. Returns list of strings.
+6. `print()` — View output to continue reasoning.
 
-Write code in ```repl``` blocks:
+Write Python code in ```repl``` blocks. Variables persist between blocks.
+
+STRATEGY — think step by step, then execute immediately:
+1. First examine `context` to see what the initial searches found.
+2. Use get_document() to load full texts of promising documents.
+3. Use llm_query() or batch_llm_query() to analyze documents — ask specific questions about the text. This is your most powerful tool. Feed multiple documents per query.
+4. Store intermediate results in buffer variables. Build up evidence.
+5. When you have enough evidence, submit with FINAL("answer") or FINAL_VAR(variable_name).
+
+EXAMPLE — analyzing documents with LLM:
 ```repl
-results = search("keyword query")
-for r in results:
-    print(r["docid"], r["snippet"][:200])
+# Load and analyze promising documents
+docs = []
+for h in context[:5]:
+    doc = get_document(h["docid"])
+    docs.append(f"Document {h['docid']}:\n{doc[:5000]}")
+
+# Ask LLM to find specific info across all docs
+combined = "\n\n".join(docs)
+answer = llm_query(f"Based on these documents, who founded the company mentioned?\n\n{combined}")
+print(answer)
 ```
 
-STRATEGY — follow this carefully:
-1. Break the question into parts. Identify specific names, dates, places, and entities.
-2. For each part, search with 2-3 word keyword queries. BM25 works best with specific terms.
-3. When you find a promising hit, read the full document with get_document(docid).
-4. Look for connections between documents to answer multi-hop questions.
-5. When you have evidence, call FINAL("your answer").
-
-IMPORTANT — BM25 SEARCH TIPS:
-- Use SPECIFIC names and terms, not generic descriptions.
-- If the question mentions "a person who did X", search for X directly.
-- Try searching for distinctive phrases or proper nouns from the question.
-- If one search doesn't work, try completely DIFFERENT keywords.
-
-RULES:
+IMPORTANT:
+- Use llm_query() heavily — it can reason about text much better than keyword matching.
+- Feed multiple documents into a single llm_query() call for efficiency.
+- NEVER answer "Unable to determine". Always give your BEST GUESS.
 - Answer must be precise: a specific name, number, date, or short phrase.
-- NEVER say "Unable to determine" or "None". Always give your BEST GUESS.
-- Include articles ("The"), full names, exact formatting."#;
+
+/no_think"#;
 
 fn iteration_prompt(query: &str, iteration: usize) -> String {
+    let base = format!(
+        "Think step-by-step on what to do using the REPL environment (which contains the context) to answer the original query: \"{query}\"\n\n\
+         Continue using the REPL environment, which has the `context` variable, and querying sub-LLMs by writing to ```repl``` tags, and determine your answer. Your next action:"
+    );
     if iteration == 0 {
         format!(
-            "Question: {query}\n\n\
-             Search for key terms, then use get_document() to read the full text of the top hits. Example:\n\
-             ```repl\n\
-             results = search(\"key terms here\")\n\
-             for r in results[:3]:\n\
-                 print(r[\"docid\"], r[\"snippet\"][:200])\n\
-             ```\n\
-             Then:\n\
-             ```repl\n\
-             doc = get_document(\"promising_docid\")\n\
-             print(doc[:2000])\n\
-             ```"
+            "You have not interacted with the REPL environment or seen your context yet. \
+             Your next action should be to look through the context and start analyzing it — don't just provide a final answer yet.\n\n{base}"
         )
     } else {
         format!(
-            "Question: {query}\n\n\
-             Try different search keywords. Read full documents with get_document(). When ready, call FINAL(answer)."
+            "The history before is your previous interactions with the REPL environment. {base}"
         )
     }
 }
 
 fn final_prompt(query: &str) -> String {
     format!(
-        "You MUST provide a final answer NOW. Based on everything you've found, give the most specific answer you can. \
-         NEVER say 'Unable to determine' or 'None' — always give your best guess based on any evidence.\n\n\
-         Question: {query}\n\n\
-         Provide FINAL(your answer):"
+        "Based on all the information you have gathered, provide a final answer to the query: \"{query}\"\n\n\
+         You MUST give a specific answer. NEVER say 'Unable to determine'. Give your best guess. \
+         Use FINAL(\"your answer\") or FINAL_VAR(variable_name)."
     )
 }
 
@@ -448,9 +462,27 @@ fn final_prompt(query: &str) -> String {
 // rLM Loop
 // -------------------------------------------------------------------------- //
 
+/// Strip `<think>...</think>` blocks from LLM output (qwen3.5 thinking mode).
+fn strip_think_tags(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<think>") {
+        result.push_str(&rest[..start]);
+        if let Some(end) = rest[start..].find("</think>") {
+            rest = &rest[start + end + "</think>".len()..];
+        } else {
+            // Unclosed <think> — skip everything after it
+            return result.trim().to_string();
+        }
+    }
+    result.push_str(rest);
+    result.trim().to_string()
+}
+
 const QUERY_TIMEOUT_SECS: u64 = 90; // 90 seconds max per query
 
 /// Use the LLM to extract search queries from the question, then pre-search.
+/// Returns (context_json_for_ouros, text_summary_for_prompt, input_tokens, output_tokens)
 fn pre_search(
     llm: &OllamaClient,
     model: &str,
@@ -458,12 +490,12 @@ fn pre_search(
     bridge_search_url: &str,
     k: u32,
     rt: &tokio::runtime::Handle,
-) -> (String, u32, u32) {
+) -> (Vec<serde_json::Value>, String, u32, u32) {
     // Ask LLM to extract 3 short keyword queries
     let extract_prompt = format!(
         "Given this question, output exactly 3 short BM25 keyword search queries (2-5 words each) to find the answer. \
          Focus on specific names, places, dates, and distinctive terms. Output ONLY the queries, one per line.\n\n\
-         Question: {query}\n\nSearch queries:"
+         Question: {query}\n\nSearch queries: /no_think"
     );
 
     let messages = vec![Message {
@@ -475,16 +507,20 @@ fn pre_search(
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "Pre-search LLM call failed");
-            return (String::new(), 0, 0);
+            return (vec![], String::new(), 0, 0);
         }
     };
 
     let input_tokens = resp.input_tokens.unwrap_or(0);
     let output_tokens = resp.output_tokens.unwrap_or(0);
+    let content = strip_think_tags(&resp.content);
     let client = reqwest::Client::new();
 
-    let mut context = String::new();
-    let queries: Vec<&str> = resp.content.lines()
+    let mut all_hits: Vec<serde_json::Value> = Vec::new();
+    let mut seen_docids = std::collections::HashSet::new();
+    let mut context_text = String::new();
+
+    let queries: Vec<&str> = content.lines()
         .map(|l| l.trim().trim_start_matches(|c: char| c.is_numeric() || c == '.' || c == '-' || c == ')'))
         .map(|l| l.trim().trim_matches('"'))
         .filter(|l| !l.is_empty() && l.len() < 100)
@@ -505,21 +541,22 @@ fn pre_search(
 
         if let Ok(resp) = resp {
             if let Ok(hits) = rt.block_on(async { resp.json::<Vec<SearchHit>>().await }) {
-                if !hits.is_empty() {
-                    context.push_str(&format!("\n--- Search: \"{}\" ---\n", search_query));
-                    for hit in hits.iter().take(3) {
-                        context.push_str(&format!(
-                            "docid={}: {}\n",
-                            hit.docid,
-                            hit.snippet.as_deref().unwrap_or("").chars().take(500).collect::<String>()
-                        ));
+                for hit in hits {
+                    if seen_docids.insert(hit.docid.clone()) {
+                        let snippet = hit.snippet.as_deref().unwrap_or("");
+                        let preview: String = snippet.chars().take(300).collect();
+                        context_text.push_str(&format!("docid={}: {}\n", hit.docid, preview));
+                        all_hits.push(serde_json::json!({
+                            "docid": hit.docid,
+                            "snippet": snippet,
+                        }));
                     }
                 }
             }
         }
     }
 
-    (context, input_tokens, output_tokens)
+    (all_hits, context_text, input_tokens, output_tokens)
 }
 
 fn run_rlm_loop(
@@ -530,11 +567,17 @@ fn run_rlm_loop(
     max_iterations: u32,
     rt: &tokio::runtime::Handle,
     pre_search_context: &str,
-) -> (String, Vec<ResultEntry>, u32, u32) {
+) -> (String, Vec<ResultEntry>, u32, u32, Vec<TrajectoryMessage>) {
     let start_time = std::time::Instant::now();
     let mut messages: Vec<Message> = vec![Message {
         role: "system".into(),
         content: SYSTEM_PROMPT.to_string(),
+    }];
+    let mut trajectory: Vec<TrajectoryMessage> = vec![TrajectoryMessage {
+        role: "system".into(),
+        content: SYSTEM_PROMPT.to_string(),
+        code_blocks: vec![],
+        repl_output: None,
     }];
 
     let mut result_entries: Vec<ResultEntry> = Vec::new();
@@ -553,9 +596,10 @@ fn run_rlm_loop(
         } else if iteration == 0 && !pre_search_context.is_empty() {
             format!(
                 "Question: {query}\n\n\
-                 I already ran some initial searches. Here are the results:\n{pre_search_context}\n\n\
-                 Based on these results, search for more specific information and read promising documents with get_document(). \
-                 Use the docids above to retrieve full documents."
+                 The `context` variable has been pre-loaded with {n} search results (list of {{docid, snippet}} dicts). \
+                 Start by examining context, then use get_document() to read full texts and llm_query() to analyze them.\n\n\
+                 Initial search results preview:\n{pre_search_context}",
+                n = pre_search_context.lines().count(),
             )
         } else {
             iteration_prompt(query, iteration as usize)
@@ -563,7 +607,13 @@ fn run_rlm_loop(
 
         messages.push(Message {
             role: "user".into(),
+            content: user_prompt.clone(),
+        });
+        trajectory.push(TrajectoryMessage {
+            role: "user".into(),
             content: user_prompt,
+            code_blocks: vec![],
+            repl_output: None,
         });
 
         // Call root LLM
@@ -579,7 +629,8 @@ fn run_rlm_loop(
         total_input += resp.input_tokens.unwrap_or(0);
         total_output += resp.output_tokens.unwrap_or(0);
 
-        let content = resp.content.trim().to_string();
+        // Strip <think>...</think> blocks (qwen3.5 thinking mode)
+        let content = strip_think_tags(resp.content.trim());
         info!(iteration, len = content.len(), elapsed_s = start_time.elapsed().as_secs(), "LLM response");
 
         // Add assistant response to conversation
@@ -587,9 +638,16 @@ fn run_rlm_loop(
             role: "assistant".into(),
             content: content.clone(),
         });
+        // We'll add the full trajectory entry (with code_blocks + repl_output) after execution
 
         // Check for FINAL() in plain text (outside code blocks)
         if let Some(answer) = extract_final_answer(&content) {
+            trajectory.push(TrajectoryMessage {
+                role: "assistant".into(),
+                content: content.clone(),
+                code_blocks: vec![],
+                repl_output: None,
+            });
             if answer.starts_with("FINAL_VAR(") {
                 // Extract variable name and read from session
                 let var_name = answer
@@ -612,7 +670,7 @@ fn run_rlm_loop(
                             "Exact Answer: {answer_str}"
                         ))),
                     });
-                    return ("completed".into(), result_entries, total_input, total_output);
+                    return ("completed".into(), result_entries, total_input, total_output, trajectory);
                 }
             } else {
                 result_entries.push(ResultEntry {
@@ -621,7 +679,7 @@ fn run_rlm_loop(
                     arguments: None,
                     output: Some(serde_json::Value::String(format!("Exact Answer: {answer}"))),
                 });
-                return ("completed".into(), result_entries, total_input, total_output);
+                return ("completed".into(), result_entries, total_input, total_output, trajectory);
             }
         }
 
@@ -645,21 +703,37 @@ fn run_rlm_loop(
         for block in &code_blocks {
             match agent.execute(block) {
                 Ok(result) => {
+                    // Combine print output and return value
+                    let mut block_output = String::new();
                     if !result.stdout.is_empty() {
-                        // Truncate output to prevent context explosion
-                        let truncated = if result.stdout.len() > 3000 {
-                            format!("{}...\n[truncated]", &result.stdout[..3000])
-                        } else {
-                            result.stdout.clone()
-                        };
-                        exec_output.push_str(&truncated);
+                        block_output.push_str(&result.stdout);
                     }
+                    // If no print output, show the return value (handles cases
+                    // where model writes `search("query")` without print())
+                    if block_output.is_empty() && !result.value.is_null() {
+                        let val_str = match &result.value {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => serde_json::to_string_pretty(other).unwrap_or_default(),
+                        };
+                        if !val_str.is_empty() && val_str != "null" {
+                            block_output.push_str(&val_str);
+                        }
+                    }
+
+                    // Truncate to prevent context explosion
+                    let truncated = if block_output.len() > 3000 {
+                        let trunc: String = block_output.chars().take(3000).collect();
+                        format!("{}...\n[truncated]", trunc)
+                    } else {
+                        block_output.clone()
+                    };
+                    exec_output.push_str(&truncated);
 
                     result_entries.push(ResultEntry {
                         entry_type: "tool_call".into(),
                         tool_name: Some("repl".into()),
                         arguments: Some(serde_json::Value::String(block.clone())),
-                        output: Some(serde_json::Value::String(result.stdout)),
+                        output: Some(serde_json::Value::String(block_output)),
                     });
 
                     // Check if FINAL was called inside code
@@ -682,6 +756,7 @@ fn run_rlm_loop(
                                 result_entries,
                                 total_input,
                                 total_output,
+                                trajectory,
                             );
                         }
                     }
@@ -694,11 +769,26 @@ fn run_rlm_loop(
             }
         }
 
+        // Record assistant + REPL trajectory
+        trajectory.push(TrajectoryMessage {
+            role: "assistant".into(),
+            content: content.clone(),
+            code_blocks: code_blocks.clone(),
+            repl_output: if exec_output.is_empty() { None } else { Some(exec_output.clone()) },
+        });
+
         // Feed execution output back to the LLM
         if !exec_output.is_empty() {
+            let repl_msg = format!("REPL output:\n```\n{exec_output}```");
             messages.push(Message {
                 role: "user".into(),
-                content: format!("REPL output:\n```\n{exec_output}```"),
+                content: repl_msg.clone(),
+            });
+            trajectory.push(TrajectoryMessage {
+                role: "repl_output".into(),
+                content: repl_msg,
+                code_blocks: vec![],
+                repl_output: None,
             });
         }
 
@@ -715,7 +805,7 @@ fn run_rlm_loop(
                     arguments: None,
                     output: Some(serde_json::Value::String(format!("Exact Answer: {answer}"))),
                 });
-                return ("completed".into(), result_entries, total_input, total_output);
+                return ("completed".into(), result_entries, total_input, total_output, trajectory);
             }
         }
     }
@@ -734,6 +824,7 @@ fn run_rlm_loop(
         result_entries,
         total_input,
         total_output,
+        trajectory,
     )
 }
 
@@ -844,11 +935,15 @@ fn run_single_query(
         .ok();
 
     // Pre-search: extract keywords and run initial searches
-    let (pre_search_ctx, pre_input, pre_output) =
+    let (context_hits, context_text, pre_input, pre_output) =
         pre_search(llm, &cli.model, query_text, &cli.search_url, cli.k, rt);
 
-    let (status, result_entries, input_tokens, output_tokens) =
-        run_rlm_loop(llm, &cli.model, &mut agent, query_text, cli.max_turns, rt, &pre_search_ctx);
+    // Inject context as ouros variable (list of {docid, snippet} dicts)
+    let context_obj = json_to_object(serde_json::Value::Array(context_hits));
+    agent.set_variable("context", context_obj).ok();
+
+    let (status, result_entries, input_tokens, output_tokens, trajectory) =
+        run_rlm_loop(llm, &cli.model, &mut agent, query_text, cli.max_turns, rt, &context_text);
     let input_tokens = input_tokens + pre_input;
     let output_tokens = output_tokens + pre_output;
 
@@ -881,6 +976,7 @@ fn run_single_query(
         status,
         retrieved_docids: Vec::new(), // TODO: extract from bridge
         result: result_entries,
+        trajectory,
     }
 }
 
