@@ -127,10 +127,10 @@ impl BrowseCompBridge {
             all_docids: Vec::new(),
             total_input_tokens: 0,
             total_output_tokens: 0,
-            max_llm_calls: 8,
-            max_search_calls: 15,
+            max_llm_calls: 25,
+            max_search_calls: 20,
             start_time: std::time::Instant::now(),
-            timeout_secs: 60,
+            timeout_secs: 150,
         }
     }
 
@@ -394,68 +394,186 @@ impl HostBridge for BrowseCompBridge {
 
 const SYSTEM_PROMPT: &str = r#"You are tasked with answering a query by searching and analyzing a corpus of ~100K web documents. You work interactively in a REPL environment that persists state across code blocks.
 
-The REPL environment provides:
-1. A `context` variable containing initial search results (snippets from relevant documents).
-2. `search(query)` — BM25 keyword search. Returns list of {docid, snippet} dicts.
-3. `get_document(docid)` — Retrieve full document text as a string.
-4. `llm_query(prompt)` — Query a sub-LLM to analyze text. Can handle ~10K chars of context.
-5. `batch_llm_query([p1, p2, ...])` — Run multiple LLM queries in parallel. Returns list of strings.
-6. `print()` — View output to continue reasoning.
+TOOLS AVAILABLE:
+- `context` — pre-loaded list of {docid, snippet} dicts from initial searches
+- `search(query)` — BM25 keyword search, returns list of {docid, snippet} dicts
+- `get_document(docid)` — retrieve full document text
+- `llm_query(prompt)` — sub-LLM analysis (~10K char context). YOUR MOST POWERFUL TOOL.
+- `batch_llm_query([p1, p2, ...])` — parallel LLM queries
+- `print()` — view output to continue reasoning
+- `FINAL("answer")` — submit your final answer
 
 Write Python code in ```repl``` blocks. Variables persist between blocks.
 
-STRATEGY — think step by step, then execute immediately:
-1. First examine `context` to see what the initial searches found.
-2. Use get_document() to load full texts of promising documents.
-3. Use llm_query() or batch_llm_query() to analyze documents — ask specific questions about the text. This is your most powerful tool. Feed multiple documents per query.
-4. Store intermediate results in buffer variables. Build up evidence.
-5. When you have enough evidence, submit with FINAL("answer") or FINAL_VAR(variable_name).
+DIRECTIVES:
+1. EXPLORE FIRST — examine context, run diverse searches, load documents. Don't jump to conclusions.
+2. ITERATE — work in small code snippets. Store intermediate results in variables. Build evidence step by step.
+3. USE llm_query() FOR SEMANTICS — keyword search finds documents, but llm_query() understands them. Feed document text to llm_query() to extract specific facts.
+4. VERIFY — before submitting, sanity-check your answer. If uncertain, search for corroborating evidence.
+5. SUBMIT — when confident, call FINAL("answer"). Answer must be precise: a name, number, date, or short phrase.
 
-EXAMPLE — analyzing documents with LLM:
+EXAMPLE:
 ```repl
-# Load and analyze promising documents
-docs = []
-for h in context[:5]:
-    doc = get_document(h["docid"])
-    docs.append(f"Document {h['docid']}:\n{doc[:5000]}")
-
-# Ask LLM to find specific info across all docs
-combined = "\n\n".join(docs)
-answer = llm_query(f"Based on these documents, who founded the company mentioned?\n\n{combined}")
-print(answer)
+# Step 1: Examine initial search results
+for h in context[:3]:
+    print(h["docid"], h["snippet"][:200])
+```
+```repl
+# Step 2: Load promising documents
+doc1 = get_document(context[0]["docid"])
+doc2 = get_document(context[1]["docid"])
+# Step 3: Use LLM to extract specific information
+evidence = llm_query(f"What is the founder's name?\n\nDoc1:\n{doc1[:5000]}\n\nDoc2:\n{doc2[:5000]}")
+print(evidence)
+```
+```repl
+# Step 4: Verify and submit
+FINAL("John Smith")
 ```
 
-IMPORTANT:
-- Use llm_query() heavily — it can reason about text much better than keyword matching.
-- Feed multiple documents into a single llm_query() call for efficiency.
+RULES:
 - NEVER answer "Unable to determine". Always give your BEST GUESS.
-- Answer must be precise: a specific name, number, date, or short phrase.
+- Use diverse search queries — try synonyms, related terms, different phrasings.
+- Store evidence in variables; don't repeat work.
 
 /no_think"#;
 
-fn iteration_prompt(query: &str, iteration: usize) -> String {
-    let base = format!(
-        "Think step-by-step on what to do using the REPL environment (which contains the context) to answer the original query: \"{query}\"\n\n\
-         Continue using the REPL environment, which has the `context` variable, and querying sub-LLMs by writing to ```repl``` tags, and determine your answer. Your next action:"
-    );
+fn iteration_prompt(query: &str, iteration: usize, max_iterations: usize, variables_info: &str) -> String {
+    let counter = format!("[Iteration {}/{}]", iteration + 1, max_iterations);
+
     if iteration == 0 {
         format!(
-            "You have not interacted with the REPL environment or seen your context yet. \
-             Your next action should be to look through the context and start analyzing it — don't just provide a final answer yet.\n\n{base}"
+            "{counter} EXPLORE FIRST — you have not seen your context yet.\n\n\
+             Query: \"{query}\"\n\n\
+             Start by examining the `context` variable (pre-loaded search results). \
+             Load promising documents with get_document(). Do NOT submit a final answer yet.\n\n\
+             Write a ```repl``` code block:"
         )
     } else {
+        let vars_section = if variables_info.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nVariables in scope:\n{variables_info}\n")
+        };
         format!(
-            "The history before is your previous interactions with the REPL environment. {base}"
+            "{counter} Continue investigating to answer: \"{query}\"\n\
+             {vars_section}\n\
+             Review what you've found so far. What's still missing? \
+             Use search() with different keywords, get_document() to read full texts, \
+             and llm_query() to analyze content. Write a ```repl``` code block:"
         )
     }
 }
 
-fn final_prompt(query: &str) -> String {
+fn final_prompt(query: &str, variables_info: &str) -> String {
+    let vars_section = if variables_info.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nVariables in scope:\n{variables_info}\n")
+    };
     format!(
-        "Based on all the information you have gathered, provide a final answer to the query: \"{query}\"\n\n\
-         You MUST give a specific answer. NEVER say 'Unable to determine'. Give your best guess. \
-         Use FINAL(\"your answer\") or FINAL_VAR(variable_name)."
+        "[FINAL ITERATION] You MUST submit your answer NOW.\n\n\
+         Query: \"{query}\"\n\
+         {vars_section}\n\
+         Based on ALL evidence gathered, provide your best answer. \
+         NEVER say 'Unable to determine'. Give your BEST GUESS even if uncertain.\n\n\
+         Write a ```repl``` block ending with FINAL(\"your answer\"):"
     )
+}
+
+/// Build a summary of REPL variables (DSPy-style metadata preview).
+/// Shows type, length, and a short preview — NOT full content.
+fn build_variables_info(agent: &ReplAgent) -> String {
+    let var_names = ["context", "evidence", "answer", "doc", "doc1", "doc2", "doc3",
+                     "docs", "results", "hits", "response", "info", "data", "text",
+                     "combined", "analysis", "findings", "candidates", "best"];
+    let mut lines = Vec::new();
+    for name in &var_names {
+        if let Some(val) = agent.get_variable(name) {
+            let json_val = gw_runtime::object_to_json(&val);
+            let (type_str, length, preview) = describe_value(&json_val);
+            lines.push(format!("  {name}: {type_str}(len={length}) = {preview}"));
+        }
+    }
+    lines.join("\n")
+}
+
+fn describe_value(val: &serde_json::Value) -> (&'static str, usize, String) {
+    match val {
+        serde_json::Value::String(s) => {
+            let preview: String = s.chars().take(80).collect();
+            let suffix = if s.len() > 80 { "..." } else { "" };
+            ("str", s.len(), format!("\"{preview}{suffix}\""))
+        }
+        serde_json::Value::Array(arr) => {
+            let preview = if arr.is_empty() {
+                "[]".to_string()
+            } else {
+                let first = serde_json::to_string(&arr[0]).unwrap_or_default();
+                let first_short: String = first.chars().take(60).collect();
+                format!("[{first_short}..., ...]")
+            };
+            ("list", arr.len(), preview)
+        }
+        serde_json::Value::Number(n) => ("num", 1, n.to_string()),
+        serde_json::Value::Bool(b) => ("bool", 1, b.to_string()),
+        serde_json::Value::Null => ("null", 0, "None".to_string()),
+        serde_json::Value::Object(m) => {
+            let keys: Vec<&String> = m.keys().take(5).collect();
+            ("dict", m.len(), format!("{{{}}}", keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")))
+        }
+    }
+}
+
+/// Fallback extraction: if max_iterations reached without FINAL, ask LLM to extract answer
+/// from the accumulated conversation history (DSPy-style extract_sig).
+fn fallback_extract(
+    llm: &OllamaClient,
+    model: &str,
+    query: &str,
+    messages: &[Message],
+    rt: &tokio::runtime::Handle,
+) -> (Option<String>, u32, u32) {
+    // Build a condensed history for the extraction prompt
+    let mut history = String::new();
+    for msg in messages.iter().skip(1) {  // skip system prompt
+        let role = &msg.role;
+        let content_preview: String = msg.content.chars().take(2000).collect();
+        history.push_str(&format!("[{role}]: {content_preview}\n\n"));
+    }
+    // Cap total history
+    let history: String = history.chars().take(15000).collect();
+
+    let extract_prompt = format!(
+        "You are extracting a final answer from a research session. The researcher was investigating this query but ran out of iterations.\n\n\
+         Query: \"{query}\"\n\n\
+         Research history:\n{history}\n\n\
+         Based on ALL evidence found during the research, what is the BEST answer to the query?\n\
+         Give ONLY the answer — a specific name, number, date, or short phrase. No explanation.\n\
+         NEVER say 'Unable to determine'. Give your best guess.\n\n/no_think"
+    );
+
+    let msgs = vec![Message {
+        role: "user".into(),
+        content: extract_prompt,
+    }];
+
+    match rt.block_on(async { llm.chat(&msgs, Some(model)).await }) {
+        Ok(resp) => {
+            let answer = strip_think_tags(resp.content.trim());
+            let input = resp.input_tokens.unwrap_or(0);
+            let output = resp.output_tokens.unwrap_or(0);
+            if answer.is_empty() {
+                (None, input, output)
+            } else {
+                (Some(answer), input, output)
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "Fallback extraction failed");
+            (None, 0, 0)
+        }
+    }
 }
 
 // -------------------------------------------------------------------------- //
@@ -479,7 +597,7 @@ fn strip_think_tags(text: &str) -> String {
     result.trim().to_string()
 }
 
-const QUERY_TIMEOUT_SECS: u64 = 90; // 90 seconds max per query
+const QUERY_TIMEOUT_SECS: u64 = 180; // 3 minutes max per query (more iterations need more time)
 
 /// Use the LLM to extract search queries from the question, then pre-search.
 /// Returns (context_json_for_ouros, text_summary_for_prompt, input_tokens, output_tokens)
@@ -590,19 +708,24 @@ fn run_rlm_loop(
             warn!("Query timeout after {}s", start_time.elapsed().as_secs());
             break;
         }
+        // Build variables metadata preview (DSPy-style)
+        let variables_info = build_variables_info(agent);
+
         // Build iteration prompt
         let user_prompt = if iteration == max_iterations - 1 {
-            final_prompt(query)
+            final_prompt(query, &variables_info)
         } else if iteration == 0 && !pre_search_context.is_empty() {
             format!(
-                "Question: {query}\n\n\
-                 The `context` variable has been pre-loaded with {n} search results (list of {{docid, snippet}} dicts). \
+                "[Iteration 1/{}] EXPLORE FIRST\n\n\
+                 Query: \"{query}\"\n\n\
+                 The `context` variable has been pre-loaded with {} search results (list of {{docid, snippet}} dicts). \
                  Start by examining context, then use get_document() to read full texts and llm_query() to analyze them.\n\n\
                  Initial search results preview:\n{pre_search_context}",
-                n = pre_search_context.lines().count(),
+                max_iterations,
+                pre_search_context.lines().count(),
             )
         } else {
-            iteration_prompt(query, iteration as usize)
+            iteration_prompt(query, iteration as usize, max_iterations as usize, &variables_info)
         };
 
         messages.push(Message {
@@ -720,9 +843,9 @@ fn run_rlm_loop(
                         }
                     }
 
-                    // Truncate to prevent context explosion
-                    let truncated = if block_output.len() > 3000 {
-                        let trunc: String = block_output.chars().take(3000).collect();
+                    // Truncate to prevent context explosion (DSPy uses 10K, we use 8K)
+                    let truncated = if block_output.len() > 8000 {
+                        let trunc: String = block_output.chars().take(8000).collect();
                         format!("{}...\n[truncated]", trunc)
                     } else {
                         block_output.clone()
@@ -810,17 +933,28 @@ fn run_rlm_loop(
         }
     }
 
-    // Max iterations reached — take whatever we have
+    // Max iterations reached — try fallback extraction (DSPy-style extract_sig)
+    info!("Max iterations reached, attempting fallback extraction");
+    let (fallback_answer, fb_input, fb_output) =
+        fallback_extract(llm, model, query, &messages, rt);
+    total_input += fb_input;
+    total_output += fb_output;
+
+    let answer = fallback_answer.unwrap_or_else(|| "Unable to determine".to_string());
     result_entries.push(ResultEntry {
         entry_type: "output_text".into(),
         tool_name: None,
         arguments: None,
-        output: Some(serde_json::Value::String(
-            "Exact Answer: Unable to determine".into(),
-        )),
+        output: Some(serde_json::Value::String(format!("Exact Answer: {answer}"))),
+    });
+    trajectory.push(TrajectoryMessage {
+        role: "system".into(),
+        content: format!("Fallback extraction: {answer}"),
+        code_blocks: vec![],
+        repl_output: None,
     });
     (
-        "max_turns".into(),
+        "max_turns_fallback".into(),
         result_entries,
         total_input,
         total_output,
@@ -892,7 +1026,7 @@ struct Cli {
     k: u32,
 
     /// Max rLM iterations per query
-    #[arg(long, default_value_t = 8)]
+    #[arg(long, default_value_t = 12)]
     max_turns: u32,
 
     /// Query: a string or path to TSV file
