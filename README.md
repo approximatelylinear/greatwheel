@@ -1,6 +1,6 @@
 # Greatwheel
 
-An rLM-coordinated agentic runtime where Python agents execute inside sandboxed [ouros](https://crates.io/crates/ouros) sessions, with a Rust core managing memory, routing, and inter-agent communication — multi-tenant, observable, and fine-tunable.
+An RLM-coordinated agentic runtime where Python agents execute inside sandboxed [ouros](https://crates.io/crates/ouros) sessions, with a Rust core managing memory, routing, and inter-agent communication — multi-tenant, observable, and fine-tunable.
 
 ## Core Idea
 
