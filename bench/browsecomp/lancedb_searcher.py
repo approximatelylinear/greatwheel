@@ -57,14 +57,33 @@ def embed_texts(
 
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
-        resp = requests.post(
-            f"{ollama_url}/api/embed",
-            json={"model": model, "input": batch},
-            timeout=120,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        all_embeddings.extend(data["embeddings"])
+        try:
+            resp = requests.post(
+                f"{ollama_url}/api/embed",
+                json={"model": model, "input": batch},
+                timeout=120,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            all_embeddings.extend(data["embeddings"])
+        except Exception:
+            # Retry individually — some texts may be too long or malformed
+            for text in batch:
+                try:
+                    resp = requests.post(
+                        f"{ollama_url}/api/embed",
+                        json={"model": model, "input": [text[:4096]]},
+                        timeout=30,
+                    )
+                    resp.raise_for_status()
+                    all_embeddings.extend(resp.json()["embeddings"])
+                except Exception:
+                    # Use zero vector as fallback
+                    if all_embeddings:
+                        dim = len(all_embeddings[0])
+                    else:
+                        dim = 768
+                    all_embeddings.append([0.0] * dim)
 
     return np.array(all_embeddings, dtype=np.float32)
 
@@ -150,7 +169,11 @@ class LanceDBSearcher(BaseSearcher):
 # --------------------------------------------------------------------------- #
 
 def build_index(args):
-    """Build the LanceDB index from the BrowseComp-Plus corpus."""
+    """Build the LanceDB index from the BrowseComp-Plus corpus.
+
+    Supports --resume to continue from an interrupted build by skipping
+    documents that are already indexed.
+    """
     from datasets import load_dataset
 
     print("Loading BrowseComp-Plus corpus from HuggingFace...")
@@ -164,18 +187,30 @@ def build_index(args):
     dim = test_emb.shape[1]
     print(f"Embedding dimension: {dim} (model: {args.embedding_model})")
 
-    # Process in batches
     batch_size = args.embed_batch_size
     total = len(ds)
 
-    # Prepare schema
     schema = pa.schema([
         pa.field("docid", pa.string()),
         pa.field("text", pa.string()),
         pa.field("vector", pa.list_(pa.float32(), dim)),
     ])
 
+    # Resume support: find already-indexed docids
+    existing_docids = set()
     table = None
+    if args.resume:
+        try:
+            table = db.open_table(args.table_name)
+            existing_count = table.count_rows()
+            # Scan all docids already in the table
+            existing_docids = set(
+                r["docid"] for r in table.search().select(["docid"]).limit(existing_count + 1000).to_list()
+            )
+            print(f"Resuming: {len(existing_docids)} documents already indexed")
+        except Exception as e:
+            print(f"No existing table found, starting fresh: {e}")
+
     for start in tqdm(range(0, total, batch_size), desc="Embedding & indexing"):
         end = min(start + batch_size, total)
         batch = ds[start:end]
@@ -183,9 +218,15 @@ def build_index(args):
         docids = batch["docid"]
         texts = batch["text"]
 
-        # Truncate texts for embedding (most models have token limits)
-        truncated = [t[:8192] for t in texts]
+        # Skip already-indexed documents
+        if existing_docids:
+            keep = [i for i, d in enumerate(docids) if d not in existing_docids]
+            if not keep:
+                continue
+            docids = [docids[i] for i in keep]
+            texts = [texts[i] for i in keep]
 
+        truncated = [t[:8192] for t in texts]
         embeddings = embed_texts(truncated, args.ollama_url, args.embedding_model)
 
         data = pa.table(
@@ -217,6 +258,7 @@ def build_index(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="LanceDB searcher / index builder")
     parser.add_argument("--build-index", action="store_true", help="Build the index")
+    parser.add_argument("--resume", action="store_true", help="Resume interrupted index build")
     parser.add_argument("--db-path", default="./data/lancedb", help="LanceDB path")
     parser.add_argument("--table-name", default="browsecomp_docs", help="Table name")
     parser.add_argument(

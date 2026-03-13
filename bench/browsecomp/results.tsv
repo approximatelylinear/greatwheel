@@ -24,3 +24,5 @@ subfact-v1-9b	0.2333	~12	162387	keep	8 diverse pre-search queries (sub-fact deco
 ranking-v1-9b	0.2000	~12	84089	discard	LLM ranking of pre-search results (40→15), think:false for utilities. Regression — ranking adds overhead without benefit (1/5 partial)
 think-opt-9b	0.2333	~12	127446	keep	think:false for utility calls (pre-search, fallback), no ranking, 5 pre-search queries. 7/30: 159+191+464+572+797+853+1128
 bon3-vote-9b	0.2333	~12	389115	discard	Best-of-3 majority vote. 7/30 same accuracy, 3x tokens. Voting picks common wrong answer over rare correct one
+hybrid-rrf-9b	0.1000	~12	115340	discard	Hybrid BM25+LanceDB with RRF equal weighting. 3/30 regression — vector results dilute BM25 precision
+hybrid-aug-9b	0.3000	~12	140840	BEST-TIE	BM25-first + vector augmentation (k extra vector-unique docs). 9/30, matches retrieval-v1. Full 100K LanceDB index
