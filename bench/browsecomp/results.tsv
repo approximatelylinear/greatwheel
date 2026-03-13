@@ -21,3 +21,6 @@ rlm-v3-9b	0.1333	~6	37291	keep	rLM-style context+llm_query, qwen3.5:9b, got 191+
 dspy-v1-9b	0.2667	~12	139590	keep	DSPy insights: 12 turns, 8K output, vars_info, fallback extract, EXPLORE/VERIFY directives. 8/30: 159+175+191+464+572+797+830+1128
 retrieval-v1-9b	0.3000	~12	188074	BEST	k=10, 5 pre-search queries, search decomposition prompt, verify directive. 9/30: +469+853+885, -572-830
 subfact-v1-9b	0.2333	~12	162387	keep	8 diverse pre-search queries (sub-fact decomposition), k=5 presearch / k=10 REPL, sub-fact iteration prompts. 7/30: +1144, high variance. Union across runs: 12/30 (40%)
+ranking-v1-9b	0.2000	~12	84089	discard	LLM ranking of pre-search results (40→15), think:false for utilities. Regression — ranking adds overhead without benefit (1/5 partial)
+think-opt-9b	0.2333	~12	127446	keep	think:false for utility calls (pre-search, fallback), no ranking, 5 pre-search queries. 7/30: 159+191+464+572+797+853+1128
+bon3-vote-9b	0.2333	~12	389115	discard	Best-of-3 majority vote. 7/30 same accuracy, 3x tokens. Voting picks common wrong answer over rare correct one

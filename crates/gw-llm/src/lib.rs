@@ -34,7 +34,7 @@ impl OllamaClient {
         embedding_model: String,
     ) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(300))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
@@ -57,17 +57,33 @@ impl OllamaClient {
         messages: &[Message],
         model: Option<&str>,
     ) -> Result<CompletionResponse, Box<dyn std::error::Error + Send + Sync>> {
+        self.chat_with_options(messages, model, None).await
+    }
+
+    /// Non-streaming chat completion with optional think parameter.
+    /// think: None = default, Some(true) = enable thinking, Some(false) = disable thinking.
+    pub async fn chat_with_options(
+        &self,
+        messages: &[Message],
+        model: Option<&str>,
+        think: Option<bool>,
+    ) -> Result<CompletionResponse, Box<dyn std::error::Error + Send + Sync>> {
         let model = model.unwrap_or(&self.default_model);
-        tracing::debug!(model, "Sending chat completion");
+        tracing::debug!(model, ?think, "Sending chat completion");
+
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "stream": false,
+        });
+        if let Some(think_val) = think {
+            body["think"] = serde_json::Value::Bool(think_val);
+        }
 
         let resp = self
             .client
             .post(self.chat_url())
-            .json(&serde_json::json!({
-                "model": model,
-                "messages": messages,
-                "stream": false,
-            }))
+            .json(&body)
             .send()
             .await?;
 

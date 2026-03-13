@@ -22,7 +22,7 @@ use gw_runtime::{extract_code_blocks, extract_final_answer, json_to_object, Agen
 // Types matching BrowseComp-Plus output format
 // -------------------------------------------------------------------------- //
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct RunRecord {
     metadata: RunMetadata,
     query_id: Option<String>,
@@ -48,7 +48,7 @@ struct TrajectoryMessage {
     repl_output: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct RunMetadata {
     model: String,
     ollama_url: String,
@@ -57,7 +57,7 @@ struct RunMetadata {
     k: u32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct UsageInfo {
     input_tokens: u32,
     output_tokens: u32,
@@ -587,7 +587,7 @@ fn fallback_extract(
         content: extract_prompt,
     }];
 
-    match rt.block_on(async { llm.chat(&msgs, Some(model)).await }) {
+    match rt.block_on(async { llm.chat_with_options(&msgs, Some(model), Some(false)).await }) {
         Ok(resp) => {
             let answer = strip_think_tags(resp.content.trim());
             let input = resp.input_tokens.unwrap_or(0);
@@ -640,12 +640,12 @@ fn pre_search(
 ) -> (Vec<serde_json::Value>, String, u32, u32) {
     // Ask LLM to extract diverse keyword queries — one per sub-fact in the question
     let extract_prompt = format!(
-        "Given this question, output 5-8 SHORT BM25 keyword search queries (2-5 words each).\n\n\
+        "Given this question, output 5 SHORT BM25 keyword search queries (2-5 words each).\n\n\
          CRITICAL: Keep queries SHORT (2-5 words). BM25 matches keywords, not sentences.\n\
          Each query should target a DIFFERENT fact or entity from the question.\n\
          Include: specific names, places, dates, awards, organizations, works.\n\n\
          Output ONLY the queries, one per line. No numbering or explanation.\n\n\
-         Question: {query}\n\nSearch queries: /no_think"
+         Question: {query}\n\nSearch queries:"
     );
 
     let messages = vec![Message {
@@ -653,7 +653,7 @@ fn pre_search(
         content: extract_prompt,
     }];
 
-    let resp = match rt.block_on(async { llm.chat(&messages, Some(model)).await }) {
+    let resp = match rt.block_on(async { llm.chat_with_options(&messages, Some(model), Some(false)).await }) {
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "Pre-search LLM call failed");
@@ -674,7 +674,7 @@ fn pre_search(
         .map(|l| l.trim().trim_start_matches(|c: char| c.is_numeric() || c == '.' || c == '-' || c == ')'))
         .map(|l| l.trim().trim_matches('"'))
         .filter(|l| !l.is_empty() && l.len() < 100)
-        .take(8)
+        .take(5)
         .collect();
 
     info!(queries = ?queries, "Pre-search queries");
@@ -707,6 +707,7 @@ fn pre_search(
     }
 
     info!(n_hits = all_hits.len(), n_queries = queries.len(), "Pre-search complete");
+
     (all_hits, context_text, input_tokens, output_tokens)
 }
 
@@ -1070,6 +1071,10 @@ struct Cli {
     #[arg(long, default_value_t = 12)]
     max_turns: u32,
 
+    /// Best-of-N: run each query N times and pick majority answer
+    #[arg(long, default_value_t = 1)]
+    runs: u32,
+
     /// Query: a string or path to TSV file
     #[arg(long, default_value = "topics-qrels/queries.tsv")]
     query: String,
@@ -1155,6 +1160,124 @@ fn run_single_query(
     }
 }
 
+/// Extract the final answer string from a RunRecord.
+fn extract_answer(record: &RunRecord) -> Option<String> {
+    for entry in record.result.iter().rev() {
+        if let Some(output) = &entry.output {
+            if let Some(s) = output.as_str() {
+                if let Some(answer) = s.strip_prefix("Exact Answer: ") {
+                    let answer = answer.trim();
+                    if !answer.is_empty() && answer != "Unable to determine" {
+                        return Some(answer.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Pick the most common answer from multiple runs (majority vote).
+/// If there's a tie, pick the one that appeared first.
+fn majority_vote(answers: &[String]) -> String {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut first_seen: HashMap<String, usize> = HashMap::new();
+    for (i, a) in answers.iter().enumerate() {
+        let normalized = a.trim().to_lowercase();
+        *counts.entry(normalized.clone()).or_insert(0) += 1;
+        first_seen.entry(normalized).or_insert(i);
+    }
+    // Sort by count descending, then by first_seen ascending
+    let mut candidates: Vec<_> = counts.into_iter().collect();
+    candidates.sort_by(|a, b| {
+        b.1.cmp(&a.1).then_with(|| {
+            first_seen.get(&a.0).unwrap_or(&0).cmp(first_seen.get(&b.0).unwrap_or(&0))
+        })
+    });
+    // Return the original-cased version of the winning answer
+    let winner = &candidates[0].0;
+    for a in answers {
+        if a.trim().to_lowercase() == *winner {
+            return a.clone();
+        }
+    }
+    answers[0].clone()
+}
+
+/// Run a query N times and return the best record (majority-voted answer).
+fn run_with_voting(
+    llm: &OllamaClient,
+    cli: &Cli,
+    query_text: &str,
+    query_id: Option<&str>,
+    rt: &tokio::runtime::Handle,
+    n_runs: u32,
+) -> RunRecord {
+    if n_runs <= 1 {
+        return run_single_query(llm, cli, query_text, query_id, rt);
+    }
+
+    let mut records: Vec<RunRecord> = Vec::with_capacity(n_runs as usize);
+    let mut answers: Vec<String> = Vec::new();
+
+    for run_idx in 0..n_runs {
+        info!(run = run_idx + 1, total_runs = n_runs, "Best-of-N run");
+        let record = run_single_query(llm, cli, query_text, query_id, rt);
+        if let Some(answer) = extract_answer(&record) {
+            answers.push(answer);
+        }
+        records.push(record);
+    }
+
+    if answers.is_empty() {
+        // No valid answers from any run — return the last record
+        return records.pop().unwrap();
+    }
+
+    let voted_answer = majority_vote(&answers);
+    info!(
+        n_answers = answers.len(),
+        voted_answer = %voted_answer,
+        all_answers = ?answers,
+        "Majority vote result"
+    );
+
+    // Find the record whose answer matches the voted answer and return it,
+    // but override the answer with the voted one
+    let mut best_record = None;
+    let mut total_input = 0u32;
+    let mut total_output = 0u32;
+    for record in &records {
+        total_input += record.usage.input_tokens;
+        total_output += record.usage.output_tokens;
+        if best_record.is_none() {
+            if let Some(a) = extract_answer(record) {
+                if a == voted_answer {
+                    best_record = Some(record);
+                }
+            }
+        }
+    }
+
+    let mut result = best_record.unwrap_or(&records[0]).clone();
+    // Update usage to reflect total across all runs
+    result.usage = UsageInfo {
+        input_tokens: total_input,
+        output_tokens: total_output,
+        total_tokens: total_input + total_output,
+    };
+    // Update the final answer to the voted answer
+    if let Some(last_entry) = result.result.last_mut() {
+        last_entry.output = Some(serde_json::Value::String(format!("Exact Answer: {voted_answer}")));
+    }
+    result.status = if result.status == "completed" {
+        "completed_voted".into()
+    } else {
+        format!("{}_voted", result.status)
+    };
+    result
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -1200,7 +1323,7 @@ async fn main() {
             );
 
             let record = tokio::task::block_in_place(|| {
-                run_single_query(&llm, &cli, query_text, Some(qid), &rt)
+                run_with_voting(&llm, &cli, query_text, Some(qid), &rt, cli.runs)
             });
 
             let ts = Utc::now().format("%Y%m%dT%H%M%SZ");
@@ -1216,7 +1339,7 @@ async fn main() {
         }
     } else {
         let record = tokio::task::block_in_place(|| {
-            run_single_query(&llm, &cli, &cli.query, None, &rt)
+            run_with_voting(&llm, &cli, &cli.query, None, &rt, cli.runs)
         });
 
         let ts = Utc::now().format("%Y%m%dT%H%M%SZ");
