@@ -476,12 +476,20 @@ fn iteration_prompt(query: &str, iteration: usize, max_iterations: usize, variab
         } else {
             format!("\n\nVariables in scope:\n{variables_info}\n")
         };
+        let nudge = if iteration >= 4 {
+            "\nHINT: If stuck, try a COMPLETELY DIFFERENT search angle. \
+             Search for candidate answers BY NAME to verify them. \
+             Use llm_query() to analyze documents you've already loaded."
+        } else {
+            ""
+        };
         format!(
             "{counter} Continue investigating to answer: \"{query}\"\n\
              {vars_section}\n\
-             Review what you've found so far. What's still missing? \
-             Use search() with different keywords, get_document() to read full texts, \
-             and llm_query() to analyze content. Write a ```repl``` code block:"
+             Think: which sub-facts from the query have you established? Which are still unknown? \
+             Use search() with DIFFERENT keywords targeting the unknown facts. \
+             Use get_document() to read full texts and llm_query() to analyze content.{nudge}\n\n\
+             Write a ```repl``` code block:"
         )
     }
 }
@@ -630,15 +638,13 @@ fn pre_search(
     k: u32,
     rt: &tokio::runtime::Handle,
 ) -> (Vec<serde_json::Value>, String, u32, u32) {
-    // Ask LLM to decompose the question into 5 diverse keyword queries
+    // Ask LLM to extract diverse keyword queries — one per sub-fact in the question
     let extract_prompt = format!(
-        "Given this question, output exactly 5 short BM25 keyword search queries (2-6 words each) to find the answer.\n\n\
-         IMPORTANT: Make queries DIVERSE. Break the question into sub-parts and search each separately:\n\
-         - Search for specific names, places, dates mentioned in the question\n\
-         - Search for distinctive phrases or rare terms\n\
-         - Try different angles: search for the person, the event, the place, the work\n\
-         - Include at least one broad query and one very specific query\n\n\
-         Output ONLY the queries, one per line. No numbering, no explanation.\n\n\
+        "Given this question, output 5-8 SHORT BM25 keyword search queries (2-5 words each).\n\n\
+         CRITICAL: Keep queries SHORT (2-5 words). BM25 matches keywords, not sentences.\n\
+         Each query should target a DIFFERENT fact or entity from the question.\n\
+         Include: specific names, places, dates, awards, organizations, works.\n\n\
+         Output ONLY the queries, one per line. No numbering or explanation.\n\n\
          Question: {query}\n\nSearch queries: /no_think"
     );
 
@@ -668,7 +674,7 @@ fn pre_search(
         .map(|l| l.trim().trim_start_matches(|c: char| c.is_numeric() || c == '.' || c == '-' || c == ')'))
         .map(|l| l.trim().trim_matches('"'))
         .filter(|l| !l.is_empty() && l.len() < 100)
-        .take(5)
+        .take(8)
         .collect();
 
     info!(queries = ?queries, "Pre-search queries");
@@ -678,7 +684,7 @@ fn pre_search(
         let resp = rt.block_on(async {
             client
                 .post(&url)
-                .json(&serde_json::json!({ "query": search_query, "k": k }))
+                .json(&serde_json::json!({ "query": search_query, "k": std::cmp::min(k, 5) }))
                 .send()
                 .await
         });
@@ -700,6 +706,7 @@ fn pre_search(
         }
     }
 
+    info!(n_hits = all_hits.len(), n_queries = queries.len(), "Pre-search complete");
     (all_hits, context_text, input_tokens, output_tokens)
 }
 
@@ -740,15 +747,23 @@ fn run_rlm_loop(
         // Build iteration prompt
         let user_prompt = if iteration == max_iterations - 1 {
             final_prompt(query, &variables_info)
-        } else if iteration == 0 && !pre_search_context.is_empty() {
+        } else if iteration == 0 {
+            let context_section = if !pre_search_context.is_empty() {
+                format!(
+                    "\n\nThe `context` variable has been pre-loaded with {} search results (list of {{docid, snippet}} dicts).\n\
+                     Initial search results preview:\n{pre_search_context}",
+                    pre_search_context.lines().count(),
+                )
+            } else {
+                String::new()
+            };
             format!(
                 "[Iteration 1/{}] EXPLORE FIRST\n\n\
-                 Query: \"{query}\"\n\n\
-                 The `context` variable has been pre-loaded with {} search results (list of {{docid, snippet}} dicts). \
-                 Start by examining context, then use get_document() to read full texts and llm_query() to analyze them.\n\n\
-                 Initial search results preview:\n{pre_search_context}",
+                 Query: \"{query}\"\
+                 {context_section}\n\n\
+                 Start by examining context. Identify which sub-facts from the query each document might help with. \
+                 Use get_document() to read full texts and llm_query() to analyze them.",
                 max_iterations,
-                pre_search_context.lines().count(),
             )
         } else {
             iteration_prompt(query, iteration as usize, max_iterations as usize, &variables_info)
@@ -1094,7 +1109,7 @@ fn run_single_query(
         .set_variable("question", Object::String(query_text.to_string()))
         .ok();
 
-    // Pre-search: extract keywords and run initial searches
+    // Pre-search: decompose query into sub-facts and run diverse searches
     let (context_hits, context_text, pre_input, pre_output) =
         pre_search(llm, &cli.model, query_text, &cli.search_url, cli.k, rt);
 
