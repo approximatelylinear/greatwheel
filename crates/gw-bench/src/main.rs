@@ -407,33 +407,54 @@ Write Python code in ```repl``` blocks. Variables persist between blocks.
 
 DIRECTIVES:
 1. EXPLORE FIRST — examine context, run diverse searches, load documents. Don't jump to conclusions.
-2. ITERATE — work in small code snippets. Store intermediate results in variables. Build evidence step by step.
-3. USE llm_query() FOR SEMANTICS — keyword search finds documents, but llm_query() understands them. Feed document text to llm_query() to extract specific facts.
-4. VERIFY — before submitting, sanity-check your answer. If uncertain, search for corroborating evidence.
-5. SUBMIT — when confident, call FINAL("answer"). Answer must be precise: a name, number, date, or short phrase.
+2. DECOMPOSE THE QUERY — break complex questions into sub-parts. Search for each part separately:
+   - If the query mentions a person + an event + a place, search each independently.
+   - If early searches fail, try COMPLETELY DIFFERENT keywords — synonyms, related entities, broader/narrower terms.
+   - Don't repeat similar searches. Each search should use substantially different keywords.
+3. ITERATE — work in small code snippets. Store intermediate results in variables. Build evidence step by step.
+4. USE llm_query() FOR SEMANTICS — keyword search finds documents, but llm_query() understands them. Feed document text to llm_query() to extract specific facts.
+5. VERIFY — before submitting, sanity-check your answer. Search for the candidate answer by name to confirm.
+6. SUBMIT — when confident, call FINAL("answer"). Answer must be precise: a name, number, date, or short phrase.
+
+SEARCH STRATEGY (critical for success):
+- BM25 search works on keyword overlap. Use distinctive nouns, names, and numbers.
+- If a search returns irrelevant results, DON'T repeat it — try a completely different angle.
+- Search for entities mentioned in the query: people, places, organizations, works, events.
+- Once you identify a candidate answer, search for THAT NAME to find confirming documents.
 
 EXAMPLE:
 ```repl
 # Step 1: Examine initial search results
-for h in context[:3]:
+for h in context[:5]:
     print(h["docid"], h["snippet"][:200])
 ```
 ```repl
-# Step 2: Load promising documents
-doc1 = get_document(context[0]["docid"])
-doc2 = get_document(context[1]["docid"])
-# Step 3: Use LLM to extract specific information
-evidence = llm_query(f"What is the founder's name?\n\nDoc1:\n{doc1[:5000]}\n\nDoc2:\n{doc2[:5000]}")
+# Step 2: Decompose and search from multiple angles
+hits_person = search("specific person name mentioned")
+hits_event = search("specific event or work mentioned")
+hits_place = search("specific place or organization")
+# Combine all unique documents
+all_docs = {h["docid"]: h for h in context + hits_person + hits_event + hits_place}
+print(f"Found {len(all_docs)} unique documents")
+```
+```repl
+# Step 3: Load and analyze with LLM
+doc = get_document(list(all_docs.keys())[0])
+evidence = llm_query(f"Extract the answer to: [question]\n\nDocument:\n{doc[:8000]}")
 print(evidence)
 ```
 ```repl
-# Step 4: Verify and submit
-FINAL("John Smith")
+# Step 4: Verify candidate answer
+confirm = search("candidate answer name")
+print(confirm[0]["snippet"][:500])
+```
+```repl
+FINAL("verified answer")
 ```
 
 RULES:
 - NEVER answer "Unable to determine". Always give your BEST GUESS.
-- Use diverse search queries — try synonyms, related terms, different phrasings.
+- NEVER repeat a search query you already tried. Each search must use different keywords.
 - Store evidence in variables; don't repeat work.
 
 /no_think"#;
@@ -609,10 +630,15 @@ fn pre_search(
     k: u32,
     rt: &tokio::runtime::Handle,
 ) -> (Vec<serde_json::Value>, String, u32, u32) {
-    // Ask LLM to extract 3 short keyword queries
+    // Ask LLM to decompose the question into 5 diverse keyword queries
     let extract_prompt = format!(
-        "Given this question, output exactly 3 short BM25 keyword search queries (2-5 words each) to find the answer. \
-         Focus on specific names, places, dates, and distinctive terms. Output ONLY the queries, one per line.\n\n\
+        "Given this question, output exactly 5 short BM25 keyword search queries (2-6 words each) to find the answer.\n\n\
+         IMPORTANT: Make queries DIVERSE. Break the question into sub-parts and search each separately:\n\
+         - Search for specific names, places, dates mentioned in the question\n\
+         - Search for distinctive phrases or rare terms\n\
+         - Try different angles: search for the person, the event, the place, the work\n\
+         - Include at least one broad query and one very specific query\n\n\
+         Output ONLY the queries, one per line. No numbering, no explanation.\n\n\
          Question: {query}\n\nSearch queries: /no_think"
     );
 
@@ -642,7 +668,7 @@ fn pre_search(
         .map(|l| l.trim().trim_start_matches(|c: char| c.is_numeric() || c == '.' || c == '-' || c == ')'))
         .map(|l| l.trim().trim_matches('"'))
         .filter(|l| !l.is_empty() && l.len() < 100)
-        .take(3)
+        .take(5)
         .collect();
 
     info!(queries = ?queries, "Pre-search queries");
@@ -1022,7 +1048,7 @@ struct Cli {
     search_url: String,
 
     /// Number of search results per query
-    #[arg(long, default_value_t = 5)]
+    #[arg(long, default_value_t = 10)]
     k: u32,
 
     /// Max rLM iterations per query

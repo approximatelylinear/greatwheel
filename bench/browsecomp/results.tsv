@@ -18,4 +18,5 @@ qwen3.5-4b	0.0667	~6	20516	keep	qwen3.5:4b /no_think, got 1144+830
 qwen3.5-9b	0.0333	~6	16405	discard	qwen3.5:9b /no_think, got 853 only (too conservative)
 rlm-v3-4b	0.0667	~6	33176	keep	rLM-style context+llm_query prompt, qwen3.5:4b, got 191+1128 (new: Kiki Gyan!)
 rlm-v3-9b	0.1333	~6	37291	keep	rLM-style context+llm_query, qwen3.5:9b, got 191+464+797+853 (2x previous best!)
-dspy-v1-9b	0.2667	~12	139590	BEST	DSPy insights: 12 turns, 8K output, vars_info, fallback extract, EXPLORE/VERIFY directives. 8/30: 159+175+191+464+572+797+830+1128
+dspy-v1-9b	0.2667	~12	139590	keep	DSPy insights: 12 turns, 8K output, vars_info, fallback extract, EXPLORE/VERIFY directives. 8/30: 159+175+191+464+572+797+830+1128
+retrieval-v1-9b	0.3000	~12	188074	BEST	k=10, 5 pre-search queries, search decomposition prompt, verify directive. 9/30: +469+853+885, -572-830
