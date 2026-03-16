@@ -8,14 +8,16 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chrono::Utc;
 use clap::Parser;
 use ouros::Object;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::{info, info_span, warn};
 
 use gw_llm::{Message, OllamaClient};
+use gw_memory::corpus::CorpusSearcher;
 use gw_runtime::{extract_code_blocks, extract_final_answer, json_to_object, AgentError, HostBridge, ReplAgent};
 
 // -------------------------------------------------------------------------- //
@@ -89,12 +91,22 @@ struct SearchHit {
 // BrowseComp host bridge
 // -------------------------------------------------------------------------- //
 
+/// Search backend: HTTP (Python search server) or Native (in-process Rust).
+enum SearchBackend {
+    Http {
+        url: String,
+        client: reqwest::Client,
+    },
+    Native {
+        searcher: Arc<CorpusSearcher>,
+    },
+}
+
 struct BrowseCompBridge {
-    search_url: String,
+    backend: SearchBackend,
     k: u32,
     llm: OllamaClient,
     model: String,
-    client: reqwest::Client,
     rt: tokio::runtime::Handle,
     // Tracking
     tool_counts: HashMap<String, u32>,
@@ -110,18 +122,17 @@ struct BrowseCompBridge {
 
 impl BrowseCompBridge {
     fn new(
-        search_url: String,
+        backend: SearchBackend,
         k: u32,
         llm: OllamaClient,
         model: String,
         rt: tokio::runtime::Handle,
     ) -> Self {
         Self {
-            search_url,
+            backend,
             k,
             llm,
             model,
-            client: reqwest::Client::new(),
             rt,
             tool_counts: HashMap::new(),
             all_docids: Vec::new(),
@@ -138,7 +149,8 @@ impl BrowseCompBridge {
         self.start_time.elapsed().as_secs() > self.timeout_secs
     }
 
-    fn search(&mut self, query: &str) -> Result<Object, AgentError> {
+    #[tracing::instrument(name = "host_function", skip(self), fields(function = "search", gw.mode = mode, gw.hits))]
+    fn search_with_mode(&mut self, query: &str, mode: &str) -> Result<Object, AgentError> {
         if self.is_timed_out() {
             return Ok(Object::List(vec![]));
         }
@@ -148,36 +160,98 @@ impl BrowseCompBridge {
             return Ok(Object::List(vec![]));
         }
 
-        let url = format!("{}/call/search", self.search_url);
-        let k = self.k;
-        let client = self.client.clone();
-        let query = query.to_string();
+        let k = self.k as usize;
+        let query_str = query.to_string();
+        let mode_str = mode.to_string();
 
-        let hits: Vec<SearchHit> = self.rt.block_on(async {
-            let resp = client
-                .post(&url)
-                .json(&serde_json::json!({ "query": query, "k": k }))
-                .send()
-                .await
-                .map_err(|e| AgentError::HostFunction {
-                    function: "search".into(),
-                    message: format!("{e}"),
-                })?;
+        let hits: Vec<SearchHit> = match &self.backend {
+            SearchBackend::Http { url, client } => {
+                let url = format!("{url}/call/search");
+                let client = client.clone();
+                self.rt.block_on(async {
+                    let resp = client
+                        .post(&url)
+                        .json(&serde_json::json!({ "query": query_str, "k": k, "mode": mode_str }))
+                        .send()
+                        .await
+                        .map_err(|e| AgentError::HostFunction {
+                            function: "search".into(),
+                            message: format!("{e}"),
+                        })?;
 
-            if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                return Err(AgentError::HostFunction {
-                    function: "search".into(),
-                    message: format!("HTTP {body}"),
-                });
+                    if !resp.status().is_success() {
+                        let body = resp.text().await.unwrap_or_default();
+                        return Err(AgentError::HostFunction {
+                            function: "search".into(),
+                            message: format!("HTTP {body}"),
+                        });
+                    }
+
+                    resp.json().await.map_err(|e| AgentError::HostFunction {
+                        function: "search".into(),
+                        message: format!("{e}"),
+                    })
+                })?
             }
+            SearchBackend::Native { searcher } => {
+                let searcher = searcher.clone();
+                let llm = self.llm.clone();
+                self.rt.block_on(async {
+                    let corpus_hits = match mode_str.as_str() {
+                        "vector" => {
+                            let vecs = llm.embed(&[query_str.clone()]).await.map_err(|e| {
+                                AgentError::HostFunction {
+                                    function: "search".into(),
+                                    message: format!("embed error: {e}"),
+                                }
+                            })?;
+                            let vec = vecs.into_iter().next().unwrap_or_default();
+                            searcher.search_vector(vec, k).await.map_err(|e| {
+                                AgentError::HostFunction {
+                                    function: "search".into(),
+                                    message: format!("{e}"),
+                                }
+                            })?
+                        }
+                        "hybrid" => {
+                            let vecs = llm.embed(&[query_str.clone()]).await.map_err(|e| {
+                                AgentError::HostFunction {
+                                    function: "search".into(),
+                                    message: format!("embed error: {e}"),
+                                }
+                            })?;
+                            let vec = vecs.into_iter().next().unwrap_or_default();
+                            searcher.search_hybrid(&query_str, vec, k).await.map_err(|e| {
+                                AgentError::HostFunction {
+                                    function: "search".into(),
+                                    message: format!("{e}"),
+                                }
+                            })?
+                        }
+                        _ => {
+                            // Default to BM25
+                            searcher.search_bm25(&query_str, k).map_err(|e| {
+                                AgentError::HostFunction {
+                                    function: "search".into(),
+                                    message: format!("{e}"),
+                                }
+                            })?
+                        }
+                    };
+                    let hits: Vec<SearchHit> = corpus_hits
+                        .into_iter()
+                        .map(|h| SearchHit {
+                            docid: h.docid,
+                            score: Some(h.score as f64),
+                            snippet: Some(h.text),
+                        })
+                        .collect();
+                    Ok::<_, AgentError>(hits)
+                })?
+            }
+        };
 
-            resp.json().await.map_err(|e| AgentError::HostFunction {
-                function: "search".into(),
-                message: format!("{e}"),
-            })
-        })?;
-
+        tracing::Span::current().record("gw.hits", hits.len() as u64);
         for hit in &hits {
             self.all_docids.push(hit.docid.clone());
         }
@@ -195,44 +269,66 @@ impl BrowseCompBridge {
         Ok(json_to_object(serde_json::Value::Array(results)))
     }
 
+    fn search(&mut self, query: &str) -> Result<Object, AgentError> {
+        self.search_with_mode(query, "bm25")
+    }
+
+    fn vector_search(&mut self, query: &str) -> Result<Object, AgentError> {
+        self.search_with_mode(query, "vector")
+    }
+
+    #[tracing::instrument(name = "host_function", skip(self), fields(function = "get_document"))]
     fn get_document(&mut self, docid: &str) -> Result<Object, AgentError> {
         if self.is_timed_out() {
             return Ok(Object::String("[timeout]".into()));
         }
         *self.tool_counts.entry("get_document".into()).or_insert(0) += 1;
 
-        let url = format!("{}/call/get_document", self.search_url);
-        let client = self.client.clone();
         let docid = docid.to_string();
 
-        let text: String = self.rt.block_on(async {
-            let resp = client
-                .post(&url)
-                .json(&serde_json::json!({ "docid": docid }))
-                .send()
-                .await
-                .map_err(|e| AgentError::HostFunction {
-                    function: "get_document".into(),
-                    message: format!("{e}"),
-                })?;
+        let text: String = match &self.backend {
+            SearchBackend::Http { url, client } => {
+                let url = format!("{url}/call/get_document");
+                let client = client.clone();
+                self.rt.block_on(async {
+                    let resp = client
+                        .post(&url)
+                        .json(&serde_json::json!({ "docid": docid }))
+                        .send()
+                        .await
+                        .map_err(|e| AgentError::HostFunction {
+                            function: "get_document".into(),
+                            message: format!("{e}"),
+                        })?;
 
-            if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                return Err(AgentError::HostFunction {
-                    function: "get_document".into(),
-                    message: format!("HTTP {body}"),
-                });
+                    if !resp.status().is_success() {
+                        let body = resp.text().await.unwrap_or_default();
+                        return Err(AgentError::HostFunction {
+                            function: "get_document".into(),
+                            message: format!("HTTP {body}"),
+                        });
+                    }
+
+                    resp.text().await.map_err(|e| AgentError::HostFunction {
+                        function: "get_document".into(),
+                        message: format!("{e}"),
+                    })
+                })?
             }
-
-            resp.text().await.map_err(|e| AgentError::HostFunction {
-                function: "get_document".into(),
-                message: format!("{e}"),
-            })
-        })?;
+            SearchBackend::Native { searcher } => {
+                searcher.get_document(&docid).map_err(|e| {
+                    AgentError::HostFunction {
+                        function: "get_document".into(),
+                        message: format!("{e}"),
+                    }
+                })?.unwrap_or_else(|| format!("[document '{docid}' not found]"))
+            }
+        };
 
         Ok(Object::String(text))
     }
 
+    #[tracing::instrument(name = "host_function", skip(self, prompt), fields(function = "llm_query", gw.input_tokens, gw.output_tokens))]
     fn llm_query(&mut self, prompt: &str) -> Result<Object, AgentError> {
         if self.is_timed_out() {
             return Ok(Object::String("[timeout — provide your best answer now]".into()));
@@ -261,11 +357,14 @@ impl BrowseCompBridge {
 
         self.total_input_tokens += resp.input_tokens.unwrap_or(0);
         self.total_output_tokens += resp.output_tokens.unwrap_or(0);
+        tracing::Span::current().record("gw.input_tokens", resp.input_tokens.unwrap_or(0) as u64);
+        tracing::Span::current().record("gw.output_tokens", resp.output_tokens.unwrap_or(0) as u64);
 
         Ok(Object::String(resp.content))
     }
 
     /// Batch LLM query — runs multiple prompts in parallel and returns a list of responses.
+    #[tracing::instrument(name = "host_function", skip(self, prompts), fields(function = "batch_llm_query", gw.batch_size = prompts.len()))]
     fn batch_llm_query(&mut self, prompts: Vec<String>) -> Result<Object, AgentError> {
         if self.is_timed_out() {
             return Ok(Object::List(vec![Object::String("[timeout]".into())]));
@@ -343,6 +442,17 @@ impl HostBridge for BrowseCompBridge {
                     })?;
                 self.search(query)
             }
+            "vector_search" => {
+                let query = args
+                    .first()
+                    .and_then(|v| v.as_str())
+                    .or_else(|| kwargs.get("query").and_then(|v| v.as_str()))
+                    .ok_or_else(|| AgentError::HostFunction {
+                        function: "vector_search".into(),
+                        message: "missing 'query' argument".into(),
+                    })?;
+                self.vector_search(query)
+            }
             "get_document" => {
                 let docid = args
                     .first()
@@ -396,7 +506,8 @@ const SYSTEM_PROMPT: &str = r#"You are tasked with answering a query by searchin
 
 TOOLS AVAILABLE:
 - `context` — pre-loaded list of {docid, snippet} dicts from initial searches
-- `search(query)` — BM25 keyword search, returns list of {docid, snippet} dicts
+- `search(query)` — BM25 keyword search (use short keywords: names, dates, numbers). Returns list of {docid, snippet} dicts
+- `vector_search(query)` — semantic search by meaning (use natural language). Fallback when BM25 fails
 - `get_document(docid)` — retrieve full document text
 - `llm_query(prompt)` — sub-LLM analysis (~10K char context). YOUR MOST POWERFUL TOOL.
 - `batch_llm_query([p1, p2, ...])` — parallel LLM queries
@@ -433,7 +544,6 @@ for h in context[:5]:
 hits_person = search("specific person name mentioned")
 hits_event = search("specific event or work mentioned")
 hits_place = search("specific place or organization")
-# Combine all unique documents
 all_docs = {h["docid"]: h for h in context + hits_person + hits_event + hits_place}
 print(f"Found {len(all_docs)} unique documents")
 ```
@@ -628,13 +738,59 @@ fn strip_think_tags(text: &str) -> String {
 
 const QUERY_TIMEOUT_SECS: u64 = 180; // 3 minutes max per query (more iterations need more time)
 
+/// Run a BM25 search via the backend, returning SearchHit results.
+fn backend_search(
+    backend: &SearchBackend,
+    query: &str,
+    k: usize,
+    rt: &tokio::runtime::Handle,
+) -> Vec<SearchHit> {
+    match backend {
+        SearchBackend::Http { url, client } => {
+            let url = format!("{url}/call/search");
+            let client = client.clone();
+            let query = query.to_string();
+            let resp = rt.block_on(async {
+                client
+                    .post(&url)
+                    .json(&serde_json::json!({ "query": query, "k": k, "mode": "bm25" }))
+                    .send()
+                    .await
+            });
+            if let Ok(resp) = resp {
+                rt.block_on(async { resp.json::<Vec<SearchHit>>().await })
+                    .unwrap_or_default()
+            } else {
+                vec![]
+            }
+        }
+        SearchBackend::Native { searcher } => {
+            match searcher.search_bm25(query, k) {
+                Ok(hits) => hits
+                    .into_iter()
+                    .map(|h| SearchHit {
+                        docid: h.docid,
+                        score: Some(h.score as f64),
+                        snippet: Some(h.text),
+                    })
+                    .collect(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Native BM25 search failed");
+                    vec![]
+                }
+            }
+        }
+    }
+}
+
 /// Use the LLM to extract search queries from the question, then pre-search.
 /// Returns (context_json_for_ouros, text_summary_for_prompt, input_tokens, output_tokens)
+#[tracing::instrument(name = "rlm.pre_search", skip(llm, rt, backend), fields(gw.hits, gw.queries))]
 fn pre_search(
     llm: &OllamaClient,
     model: &str,
     query: &str,
-    bridge_search_url: &str,
+    backend: &SearchBackend,
     k: u32,
     rt: &tokio::runtime::Handle,
 ) -> (Vec<serde_json::Value>, String, u32, u32) {
@@ -664,7 +820,6 @@ fn pre_search(
     let input_tokens = resp.input_tokens.unwrap_or(0);
     let output_tokens = resp.output_tokens.unwrap_or(0);
     let content = strip_think_tags(&resp.content);
-    let client = reqwest::Client::new();
 
     let mut all_hits: Vec<serde_json::Value> = Vec::new();
     let mut seen_docids = std::collections::HashSet::new();
@@ -678,39 +833,144 @@ fn pre_search(
         .collect();
 
     info!(queries = ?queries, "Pre-search queries");
+    let mut total_queries = queries.len();
 
     for search_query in &queries {
-        let url = format!("{}/call/search", bridge_search_url);
-        let resp = rt.block_on(async {
-            client
-                .post(&url)
-                .json(&serde_json::json!({ "query": search_query, "k": std::cmp::min(k, 5) }))
-                .send()
-                .await
-        });
-
-        if let Ok(resp) = resp {
-            if let Ok(hits) = rt.block_on(async { resp.json::<Vec<SearchHit>>().await }) {
-                for hit in hits {
-                    if seen_docids.insert(hit.docid.clone()) {
-                        let snippet = hit.snippet.as_deref().unwrap_or("");
-                        let preview: String = snippet.chars().take(300).collect();
-                        context_text.push_str(&format!("docid={}: {}\n", hit.docid, preview));
-                        all_hits.push(serde_json::json!({
-                            "docid": hit.docid,
-                            "snippet": snippet,
-                        }));
-                    }
-                }
+        let hits = backend_search(backend, search_query, std::cmp::min(k as usize, 5), rt);
+        for hit in hits {
+            if seen_docids.insert(hit.docid.clone()) {
+                let snippet = hit.snippet.as_deref().unwrap_or("");
+                let preview: String = snippet.chars().take(300).collect();
+                context_text.push_str(&format!("docid={}: {}\n", hit.docid, preview));
+                all_hits.push(serde_json::json!({
+                    "docid": hit.docid,
+                    "snippet": snippet,
+                }));
             }
         }
     }
 
-    info!(n_hits = all_hits.len(), n_queries = queries.len(), "Pre-search complete");
+    info!(n_hits = all_hits.len(), n_queries = queries.len(), "Pre-search round 1 complete");
 
-    (all_hits, context_text, input_tokens, output_tokens)
+    // --- Round 2: Refinement ---
+    // Show the LLM round-1 results. Ask it to:
+    // 1. Pick the most relevant docids from round 1
+    // 2. Generate 3 new queries for missing information
+    let round1_preview: String = all_hits.iter().enumerate().take(25).map(|(i, h)| {
+        let docid = h["docid"].as_str().unwrap_or("?");
+        let snippet = h["snippet"].as_str().unwrap_or("");
+        let preview: String = snippet.chars().take(200).collect();
+        format!("  {}. [{}] {}", i + 1, docid, preview)
+    }).collect::<Vec<_>>().join("\n");
+
+    let refine_prompt = format!(
+        "Question: {query}\n\n\
+         Here are {n} search results. Select the MOST RELEVANT documents and generate new searches.\n\n\
+         Results:\n{round1_preview}\n\n\
+         First, list the numbers of the TOP 10 most relevant results (comma-separated).\n\
+         Then, output 3 NEW keyword search queries (2-5 words) for facts NOT covered above.\n\n\
+         Format:\n\
+         KEEP: 1, 3, 5, 7, ...\n\
+         SEARCH: query one\n\
+         SEARCH: query two\n\
+         SEARCH: query three",
+        n = all_hits.len().min(25),
+    );
+
+    let refine_messages = vec![Message {
+        role: "user".into(),
+        content: refine_prompt,
+    }];
+
+    let mut total_input = input_tokens;
+    let mut total_output = output_tokens;
+
+    if let Ok(resp2) = rt.block_on(async { llm.chat_with_options(&refine_messages, Some(model), Some(false)).await }) {
+        total_input += resp2.input_tokens.unwrap_or(0);
+        total_output += resp2.output_tokens.unwrap_or(0);
+        let content2 = strip_think_tags(&resp2.content);
+
+        // Parse KEEP line to filter round-1 results
+        let mut keep_set = std::collections::BTreeSet::new();
+        let mut new_query_set = std::collections::LinkedList::new();
+        let mut seen_queries = std::collections::HashSet::new();
+
+        for line in content2.lines() {
+            let trimmed = line.trim();
+            if trimmed.to_lowercase().starts_with("keep:") {
+                let nums_part = trimmed.splitn(2, ':').nth(1).unwrap_or("");
+                for num_str in nums_part.split(',') {
+                    if let Ok(n) = num_str.trim().parse::<usize>() {
+                        if n >= 1 && n <= all_hits.len() {
+                            keep_set.insert(n - 1); // 1-indexed to 0-indexed
+                        }
+                    }
+                }
+            } else if trimmed.to_lowercase().starts_with("search:") {
+                let q = trimmed.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
+                if !q.is_empty() && q.len() < 100 && seen_queries.insert(q.clone()) {
+                    new_query_set.push_back(q);
+                }
+            }
+        }
+
+        let keep_indices: Vec<usize> = keep_set.into_iter().collect();
+        let new_queries: Vec<String> = new_query_set.into_iter().take(3).collect();
+
+        info!(keep = ?keep_indices, new_queries = ?new_queries, "Pre-search round 2 parsed");
+
+        // If we got valid KEEP indices, filter the context
+        if !keep_indices.is_empty() && keep_indices.len() <= 15 {
+            let filtered: Vec<serde_json::Value> = keep_indices.iter()
+                .filter_map(|&i| all_hits.get(i).cloned())
+                .collect();
+
+            // Rebuild context text from filtered hits
+            context_text.clear();
+            all_hits = Vec::new();
+            seen_docids.clear();
+
+            for h in &filtered {
+                let docid = h["docid"].as_str().unwrap_or("?");
+                let snippet = h["snippet"].as_str().unwrap_or("");
+                if seen_docids.insert(docid.to_string()) {
+                    let preview: String = snippet.chars().take(300).collect();
+                    context_text.push_str(&format!("docid={}: {}\n", docid, preview));
+                    all_hits.push(h.clone());
+                }
+            }
+
+            info!(n_kept = all_hits.len(), "Filtered round-1 results");
+        }
+
+        // Run new searches from round 2
+        total_queries += new_queries.len().min(3);
+        for search_query in new_queries.iter().take(3) {
+            let hits = backend_search(backend, search_query, std::cmp::min(k as usize, 5), rt);
+            for hit in hits {
+                if seen_docids.insert(hit.docid.clone()) {
+                    let snippet = hit.snippet.as_deref().unwrap_or("");
+                    let preview: String = snippet.chars().take(300).collect();
+                    context_text.push_str(&format!("docid={}: {}\n", hit.docid, preview));
+                    all_hits.push(serde_json::json!({
+                        "docid": hit.docid,
+                        "snippet": snippet,
+                    }));
+                }
+            }
+        }
+
+        info!(n_hits = all_hits.len(), "Pre-search round 2 complete (filtered + new)");
+    }
+
+    let span = tracing::Span::current();
+    span.record("gw.hits", all_hits.len() as u64);
+    span.record("gw.queries", total_queries as u64);
+
+    (all_hits, context_text, total_input, total_output)
 }
 
+#[tracing::instrument(name = "rlm.loop", skip(llm, agent, rt, pre_search_context), fields(gw.max_iterations = max_iterations, gw.iterations_used, gw.status, gw.input_tokens, gw.output_tokens))]
 fn run_rlm_loop(
     llm: &OllamaClient,
     model: &str,
@@ -737,6 +997,7 @@ fn run_rlm_loop(
     let mut total_output = 0u32;
 
     for iteration in 0..max_iterations {
+        let _iter_span = info_span!("rlm.iteration", n = iteration + 1).entered();
         // Check timeout
         if start_time.elapsed().as_secs() > QUERY_TIMEOUT_SECS {
             warn!("Query timeout after {}s", start_time.elapsed().as_secs());
@@ -835,6 +1096,11 @@ fn run_rlm_loop(
                             "Exact Answer: {answer_str}"
                         ))),
                     });
+                    let span = tracing::Span::current();
+                    span.record("gw.status", "completed");
+                    span.record("gw.iterations_used", iteration + 1);
+                    span.record("gw.input_tokens", total_input as u64);
+                    span.record("gw.output_tokens", total_output as u64);
                     return ("completed".into(), result_entries, total_input, total_output, trajectory);
                 }
             } else {
@@ -844,6 +1110,11 @@ fn run_rlm_loop(
                     arguments: None,
                     output: Some(serde_json::Value::String(format!("Exact Answer: {answer}"))),
                 });
+                let span = tracing::Span::current();
+                span.record("gw.status", "completed");
+                span.record("gw.iterations_used", iteration + 1);
+                span.record("gw.input_tokens", total_input as u64);
+                span.record("gw.output_tokens", total_output as u64);
                 return ("completed".into(), result_entries, total_input, total_output, trajectory);
             }
         }
@@ -970,6 +1241,11 @@ fn run_rlm_loop(
                     arguments: None,
                     output: Some(serde_json::Value::String(format!("Exact Answer: {answer}"))),
                 });
+                let span = tracing::Span::current();
+                span.record("gw.status", "completed");
+                span.record("gw.iterations_used", iteration + 1);
+                span.record("gw.input_tokens", total_input as u64);
+                span.record("gw.output_tokens", total_output as u64);
                 return ("completed".into(), result_entries, total_input, total_output, trajectory);
             }
         }
@@ -995,6 +1271,11 @@ fn run_rlm_loop(
         code_blocks: vec![],
         repl_output: None,
     });
+    let span = tracing::Span::current();
+    span.record("gw.status", "max_turns_fallback");
+    span.record("gw.iterations_used", max_iterations as u64);
+    span.record("gw.input_tokens", total_input as u64);
+    span.record("gw.output_tokens", total_output as u64);
     (
         "max_turns_fallback".into(),
         result_entries,
@@ -1059,9 +1340,33 @@ struct Cli {
     #[arg(long, default_value = "qwen2.5:7b", env = "GW_MODEL")]
     model: String,
 
-    /// BrowseComp-Plus search server URL
+    /// Search backend: "http" (Python server) or "native" (in-process Rust)
+    #[arg(long, default_value = "http")]
+    search_backend: String,
+
+    /// BrowseComp-Plus search server URL (for http backend)
     #[arg(long, default_value = "http://localhost:8000")]
     search_url: String,
+
+    /// Path to tantivy corpus index (for native backend)
+    #[arg(long, default_value = "data/tantivy-corpus/")]
+    tantivy_index: String,
+
+    /// Path to LanceDB database (for native backend vector/hybrid search)
+    #[arg(long)]
+    lancedb_path: Option<String>,
+
+    /// LanceDB table name (for native backend)
+    #[arg(long, default_value = "browsecomp_docs")]
+    lancedb_table: String,
+
+    /// Build tantivy index from corpus JSONL, then exit
+    #[arg(long)]
+    build_index: bool,
+
+    /// Path to corpus JSONL file (for --build-index)
+    #[arg(long)]
+    corpus_jsonl: Option<String>,
 
     /// Number of search results per query
     #[arg(long, default_value_t = 10)]
@@ -1084,15 +1389,40 @@ struct Cli {
     output_dir: String,
 }
 
+#[tracing::instrument(name = "rlm.question", skip(llm, cli, rt, native_searcher), fields(gw.model = %cli.model, gw.query_id = query_id, gw.status, gw.answer))]
 fn run_single_query(
     llm: &OllamaClient,
     cli: &Cli,
     query_text: &str,
     query_id: Option<&str>,
     rt: &tokio::runtime::Handle,
+    native_searcher: Option<&Arc<CorpusSearcher>>,
 ) -> RunRecord {
+    let backend = if let Some(searcher) = native_searcher {
+        SearchBackend::Native {
+            searcher: searcher.clone(),
+        }
+    } else {
+        SearchBackend::Http {
+            url: cli.search_url.clone(),
+            client: reqwest::Client::new(),
+        }
+    };
+
+    // Build a second backend ref for pre_search (avoid moving)
+    let pre_search_backend = if let Some(searcher) = native_searcher {
+        SearchBackend::Native {
+            searcher: searcher.clone(),
+        }
+    } else {
+        SearchBackend::Http {
+            url: cli.search_url.clone(),
+            client: reqwest::Client::new(),
+        }
+    };
+
     let bridge = BrowseCompBridge::new(
-        cli.search_url.clone(),
+        backend,
         cli.k,
         llm.clone(),
         cli.model.clone(),
@@ -1101,6 +1431,7 @@ fn run_single_query(
 
     let external_fns = vec![
         "search".to_string(),
+        "vector_search".to_string(),
         "get_document".to_string(),
         "llm_query".to_string(),
         "batch_llm_query".to_string(),
@@ -1116,7 +1447,7 @@ fn run_single_query(
 
     // Pre-search: decompose query into sub-facts and run diverse searches
     let (context_hits, context_text, pre_input, pre_output) =
-        pre_search(llm, &cli.model, query_text, &cli.search_url, cli.k, rt);
+        pre_search(llm, &cli.model, query_text, &pre_search_backend, cli.k, rt);
 
     // Inject context as ouros variable (list of {docid, snippet} dicts)
     let context_obj = json_to_object(serde_json::Value::Array(context_hits));
@@ -1126,6 +1457,9 @@ fn run_single_query(
         run_rlm_loop(llm, &cli.model, &mut agent, query_text, cli.max_turns, rt, &context_text);
     let input_tokens = input_tokens + pre_input;
     let output_tokens = output_tokens + pre_output;
+
+    // Record status and answer on the rlm.question span
+    tracing::Span::current().record("gw.status", &status.as_str());
 
     // Extract tracking data from the bridge (it was moved into the agent)
     // We need to get it back — for now, count from result entries
@@ -1138,7 +1472,8 @@ fn run_single_query(
         }
     }
 
-    RunRecord {
+    // Record answer on span for trace analysis
+    let record = RunRecord {
         metadata: RunMetadata {
             model: cli.model.clone(),
             ollama_url: cli.ollama_url.clone(),
@@ -1157,7 +1492,11 @@ fn run_single_query(
         retrieved_docids: Vec::new(), // TODO: extract from bridge
         result: result_entries,
         trajectory,
+    };
+    if let Some(answer) = extract_answer(&record) {
+        tracing::Span::current().record("gw.answer", answer.as_str());
     }
+    record
 }
 
 /// Extract the final answer string from a RunRecord.
@@ -1212,9 +1551,10 @@ fn run_with_voting(
     query_id: Option<&str>,
     rt: &tokio::runtime::Handle,
     n_runs: u32,
+    native_searcher: Option<&Arc<CorpusSearcher>>,
 ) -> RunRecord {
     if n_runs <= 1 {
-        return run_single_query(llm, cli, query_text, query_id, rt);
+        return run_single_query(llm, cli, query_text, query_id, rt, native_searcher);
     }
 
     let mut records: Vec<RunRecord> = Vec::with_capacity(n_runs as usize);
@@ -1222,7 +1562,7 @@ fn run_with_voting(
 
     for run_idx in 0..n_runs {
         info!(run = run_idx + 1, total_runs = n_runs, "Best-of-N run");
-        let record = run_single_query(llm, cli, query_text, query_id, rt);
+        let record = run_single_query(llm, cli, query_text, query_id, rt, native_searcher);
         if let Some(answer) = extract_answer(&record) {
             answers.push(answer);
         }
@@ -1280,15 +1620,30 @@ fn run_with_voting(
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "gw_bench=info".into()),
-        )
-        .init();
+    let trace_config = gw_trace::TracingConfig {
+        exporter: std::env::var("GW_TRACE_EXPORTER").unwrap_or_else(|_| "console".into()),
+        otlp_endpoint: std::env::var("GW_TRACE_OTLP_ENDPOINT").ok(),
+        postgres_export: std::env::var("GW_TRACE_POSTGRES").is_ok_and(|v| v == "true" || v == "1"),
+        service_name: "gw-bench".into(),
+    };
+    gw_trace::init_tracing(&trace_config, None)
+        .expect("Failed to initialize tracing");
 
     let cli = Cli::parse();
     let rt = tokio::runtime::Handle::current();
+
+    // Handle --build-index: build tantivy corpus index and exit
+    if cli.build_index {
+        let jsonl_path = cli.corpus_jsonl.as_deref().expect(
+            "--corpus-jsonl is required with --build-index"
+        );
+        let tantivy_path = PathBuf::from(&cli.tantivy_index);
+        info!(jsonl = jsonl_path, out = %tantivy_path.display(), "Building tantivy corpus index");
+        let count = CorpusSearcher::build_index(Path::new(jsonl_path), &tantivy_path)
+            .expect("Failed to build index");
+        info!(count, "Index built successfully");
+        return;
+    }
 
     let llm = OllamaClient::new(
         cli.ollama_url.clone(),
@@ -1296,6 +1651,22 @@ async fn main() {
         cli.model.clone(),
         "nomic-embed-text".into(),
     );
+
+    // Open native searcher if requested
+    let native_searcher: Option<Arc<CorpusSearcher>> = if cli.search_backend == "native" {
+        let tantivy_path = PathBuf::from(&cli.tantivy_index);
+        let searcher = CorpusSearcher::open(
+            &tantivy_path,
+            cli.lancedb_path.as_deref(),
+            Some(&cli.lancedb_table),
+        )
+        .await
+        .expect("Failed to open CorpusSearcher");
+        Some(Arc::new(searcher))
+    } else {
+        None
+    };
+    let native_ref = native_searcher.as_ref();
 
     let output_dir = PathBuf::from(&cli.output_dir);
     std::fs::create_dir_all(&output_dir).expect("Failed to create output dir");
@@ -1312,6 +1683,7 @@ async fn main() {
         info!(
             total = remaining.len(),
             skipped = done.len(),
+            backend = cli.search_backend,
             "Processing queries"
         );
 
@@ -1323,7 +1695,7 @@ async fn main() {
             );
 
             let record = tokio::task::block_in_place(|| {
-                run_with_voting(&llm, &cli, query_text, Some(qid), &rt, cli.runs)
+                run_with_voting(&llm, &cli, query_text, Some(qid), &rt, cli.runs, native_ref)
             });
 
             let ts = Utc::now().format("%Y%m%dT%H%M%SZ");
@@ -1339,7 +1711,7 @@ async fn main() {
         }
     } else {
         let record = tokio::task::block_in_place(|| {
-            run_with_voting(&llm, &cli, &cli.query, None, &rt, cli.runs)
+            run_with_voting(&llm, &cli, &cli.query, None, &rt, cli.runs, native_ref)
         });
 
         let ts = Utc::now().format("%Y%m%dT%H%M%SZ");

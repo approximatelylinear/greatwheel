@@ -1,0 +1,153 @@
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::error::MemoryError;
+use crate::fusion::ScoredKey;
+use crate::MemoryScope;
+
+/// Postgres-backed full-text search store.
+pub struct PgMemoryStore {
+    pool: PgPool,
+}
+
+impl PgMemoryStore {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    /// Flatten a JSON value to a text string for FTS indexing.
+    fn flatten_value(value: &serde_json::Value) -> String {
+        match value {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        }
+    }
+
+    /// Upsert a memory (INSERT ON CONFLICT UPDATE).
+    pub async fn upsert(
+        &self,
+        org_id: &Uuid,
+        user_id: Option<&Uuid>,
+        agent_id: Option<&Uuid>,
+        session_id: Option<&Uuid>,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), MemoryError> {
+        let text_content = Self::flatten_value(value);
+
+        sqlx::query(
+            r#"
+            INSERT INTO memories (org_id, user_id, agent_id, session_id, key, value, text_content)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (org_id, key) DO UPDATE SET
+                value = EXCLUDED.value,
+                text_content = EXCLUDED.text_content,
+                user_id = EXCLUDED.user_id,
+                agent_id = EXCLUDED.agent_id,
+                session_id = EXCLUDED.session_id,
+                updated_at = now()
+            "#,
+        )
+        .bind(org_id)
+        .bind(user_id)
+        .bind(agent_id)
+        .bind(session_id)
+        .bind(key)
+        .bind(value)
+        .bind(&text_content)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Full-text search with scope filtering.
+    pub async fn fts_search(
+        &self,
+        org_id: &Uuid,
+        query: &str,
+        scope: &MemoryScope,
+        limit: usize,
+    ) -> Result<Vec<ScoredKey>, MemoryError> {
+        // Build scope filter clause
+        let (scope_clause, scope_id): (String, Option<Uuid>) = match scope {
+            MemoryScope::Org => (String::new(), None),
+            MemoryScope::User(uid) => (
+                " AND (user_id = $3 OR user_id IS NULL)".into(),
+                Some(uid.0),
+            ),
+            MemoryScope::Agent(aid) => (
+                " AND (agent_id = $3 OR agent_id IS NULL)".into(),
+                Some(aid.0),
+            ),
+            MemoryScope::Session(sid) => (
+                " AND (session_id = $3 OR session_id IS NULL)".into(),
+                Some(sid.0),
+            ),
+        };
+
+        let sql = format!(
+            r#"
+            SELECT key, ts_rank(tsv, plainto_tsquery('english', $1)) AS rank
+            FROM memories
+            WHERE org_id = $2
+              AND tsv @@ plainto_tsquery('english', $1)
+              {scope_clause}
+            ORDER BY rank DESC
+            LIMIT {limit}
+            "#
+        );
+
+        let rows: Vec<(String, f32)> = if let Some(sid) = scope_id {
+            sqlx::query_as(&sql)
+                .bind(query)
+                .bind(org_id)
+                .bind(sid)
+                .fetch_all(&self.pool)
+                .await?
+        } else {
+            sqlx::query_as(&sql)
+                .bind(query)
+                .bind(org_id)
+                .fetch_all(&self.pool)
+                .await?
+        };
+
+        Ok(rows
+            .into_iter()
+            .map(|(key, score)| ScoredKey { key, score })
+            .collect())
+    }
+
+    /// Look up memory values by keys.
+    pub async fn get_by_keys(
+        &self,
+        org_id: &Uuid,
+        keys: &[String],
+    ) -> Result<Vec<(String, serde_json::Value)>, MemoryError> {
+        if keys.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let rows: Vec<(String, serde_json::Value)> = sqlx::query_as(
+            "SELECT key, value FROM memories WHERE org_id = $1 AND key = ANY($2)",
+        )
+        .bind(org_id)
+        .bind(keys)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    /// Delete a memory by key.
+    pub async fn delete(&self, org_id: &Uuid, key: &str) -> Result<(), MemoryError> {
+        sqlx::query("DELETE FROM memories WHERE org_id = $1 AND key = $2")
+            .bind(org_id)
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+}

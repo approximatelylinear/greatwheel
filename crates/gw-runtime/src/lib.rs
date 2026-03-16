@@ -3,7 +3,7 @@ use ouros::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Errors during agent execution.
 #[derive(Debug, thiserror::Error)]
@@ -80,6 +80,7 @@ fn permission_error(msg: String) -> ouros::Exception {
 
 /// Run a complete Python script inside ouros, dispatching external function calls
 /// through the provided `HostBridge`.
+#[tracing::instrument(name = "invoke_agent", skip(code, inputs, bridge))]
 pub fn run_agent(
     code: &str,
     inputs: Vec<(String, Object)>,
@@ -115,7 +116,7 @@ pub fn run_agent(
                 call_id: _,
                 state,
             } => {
-                debug!(function = %function_name, "host function call");
+                let _span = tracing::info_span!("host_function", function = %function_name).entered();
                 let json_args = args_to_json(&args);
                 let json_kwargs = kwargs_to_map(&kwargs);
 
@@ -216,6 +217,11 @@ impl ReplAgent {
     ///
     /// External function calls are resolved synchronously through the bridge.
     /// If the code calls FINAL(value), sets `is_final = true`.
+    #[tracing::instrument(
+        name = "repl.execute",
+        skip(self, code),
+        fields(gw.code_length = code.len(), gw.is_final = tracing::field::Empty)
+    )]
     pub fn execute(&mut self, code: &str) -> Result<ReplExecResult, AgentError> {
         let mut print_buf = CollectStringPrint::new();
 
@@ -243,12 +249,11 @@ impl ReplAgent {
                     kwargs,
                     call_id: _,
                 } => {
-                    debug!(function = %function_name, "REPL host function call");
-
                     // Intercept FINAL() calls
                     if function_name == "FINAL" {
                         let final_obj = args.into_iter().next().unwrap_or(Object::None);
                         self.final_value = Some(final_obj.clone());
+                        tracing::Span::current().record("gw.is_final", true);
                         // Resume with the value itself so the code continues
                         progress = self
                             .session
@@ -257,6 +262,7 @@ impl ReplAgent {
                         continue;
                     }
 
+                    let _span = tracing::info_span!("host_function", function = %function_name).entered();
                     let json_args = args_to_json(&args);
                     let json_kwargs = kwargs_to_map(&kwargs);
 

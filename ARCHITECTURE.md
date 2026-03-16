@@ -393,9 +393,9 @@ trait LlmGate {
 
 #[async_trait]
 trait MemoryStore {
-    async fn store(&self, ctx: &CallContext, key: &str, value: Value, meta: Metadata);
-    async fn recall(&self, ctx: &CallContext, query: &str, opts: RecallOpts) -> Vec<MemoryEntry>;
-    async fn forget(&self, ctx: &CallContext, key: &str);
+    async fn store(&self, ctx: &CallContext, key: &str, value: Value) -> Result<(), MemoryError>;
+    async fn recall(&self, ctx: &CallContext, query: &str, opts: RecallOpts) -> Result<Vec<MemoryRecord>, MemoryError>;
+    async fn forget(&self, ctx: &CallContext, key: &str) -> Result<(), MemoryError>;
 }
 
 #[async_trait]
@@ -505,31 +505,46 @@ struct LlmGateConfig {
 }
 ```
 
-**Memory Store (LanceDB + Postgres)** — Hybrid search:
-- **LanceDB**: vector similarity + BM25 full-text + hybrid ranking.
-  Per-org table isolation. Embedded, no external service.
-- **Postgres**: structured metadata, memory indexes, SQL queries.
+**Memory Store (LanceDB + tantivy + Postgres)** — Hybrid search:
+- **LanceDB**: vector similarity search via Ollama embeddings.
+  Per-org table isolation (`memory_{org_id}`). Embedded, no external service.
+- **tantivy**: true BM25 full-text search via an embedded tantivy index.
+  Indexes key, text, org_id, and scope IDs (user, agent, session).
+  Replaces PostgreSQL's `tsvector`/`ts_rank` for higher-quality keyword
+  relevance scoring. Index lives on disk at a configurable path
+  (`data/tantivy`). Supports `rebuild_from_rows()` to sync from Postgres
+  on startup.
+- **Postgres**: source of truth for memory values (JSONB), scope
+  metadata, and upsert semantics via `ON CONFLICT`. No longer used for
+  FTS — only persistence and value lookups.
+- **Fusion**: Reciprocal Rank Fusion (RRF) merges vector + BM25 results.
+  Ported from the Python `search_server.py` reference implementation.
 - **Short-term**: ouros session state (Python variables).
+
+All writes go to all three stores: Postgres + LanceDB concurrently
+(`tokio::try_join!`), then tantivy (sync, fast).
+Embedding via `OllamaClient::embed()` with batch processing (32),
+truncation (8192 chars), individual retry on batch failure, and
+zero-vector fallback.
 
 ```rust
 struct RecallOpts {
     top_k: usize,
     mode: SearchMode,
-    filter: Option<MetadataFilter>,
     scope: MemoryScope,
 }
 
 enum SearchMode {
     Vector,
     FullText,
-    Hybrid { alpha: f32 },  // 0.0 = pure FTS, 1.0 = pure vector
+    Hybrid { alpha: f32 },
 }
 
 enum MemoryScope {
     Org,                    // search all org memory
-    User(UserId),           // only this user's memories
-    Agent(AgentId),         // only this agent's memories
-    Session(SessionId),     // only this session's memories
+    User(UserId),           // scoped + org-wide (NULL user_id)
+    Agent(AgentId),         // scoped + org-wide (NULL agent_id)
+    Session(SessionId),     // scoped + org-wide (NULL session_id)
 }
 ```
 
@@ -550,41 +565,152 @@ hot-reload + version history.
 
 Every operation emits OpenTelemetry spans using the
 [GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
+Instrumentation uses the `tracing` crate with `#[instrument]` as the
+single API surface, layered with `tracing-opentelemetry` for OTLP
+export and a custom `PostgresTraceLayer` for database persistence.
 
-### Span Hierarchy
+### Architecture
+
+The `gw-trace` crate provides `init_tracing(config, pg_pool)` which
+builds a three-layer `tracing_subscriber::Registry`:
+
+1. **`fmt::Layer` + `EnvFilter`** — always active, console output.
+2. **`tracing_opentelemetry::Layer`** — OTLP gRPC export to Jaeger/etc
+   (when `exporter = "otlp"` or `"both"`).
+3. **`PostgresTraceLayer`** — fire-and-forget INSERT into the `traces`
+   table for spans matching our naming conventions (when
+   `postgres_export = true` and a `PgPool` is provided).
+
+Configuration via `[tracing]` in `greatwheel.toml` or env vars in
+`gw-bench`:
+
+```toml
+[tracing]
+exporter = "console"               # "console", "otlp", or "both"
+# otlp_endpoint = "http://localhost:4317"
+postgres_export = false
+service_name = "greatwheel"
+```
+
+### Instrumented Crates
+
+**`gw-llm`** — `#[instrument]` on all LLM methods:
+- `chat_with_options()` → span `gen_ai.chat` with model, token counts
+  recorded from the Ollama response via `Span::current().record()`.
+- `embed()` → span `gen_ai.embeddings` with model, batch size.
+- `chat_stream()` → span `gen_ai.chat` with `gw.streaming = true`.
+
+**`gw-runtime`** — `#[instrument]` on execution entry points:
+- `run_agent()` → span `invoke_agent`.
+- `ReplAgent::execute()` → span `repl.execute` with `gw.code_length`,
+  `gw.is_final` (recorded when `FINAL()` is called).
+- Host function dispatch → `info_span!("host_function", function = %name)`
+  wrapping each bridge call in both sync and REPL execution paths.
+
+**`gw-memory`** — `#[instrument]` on `HybridStore` methods:
+- `store()` → span `memory.store` with `gw.memory.key`.
+- `recall()` → span `memory.recall` with `gw.memory.search_mode`,
+  `gw.memory.top_k`, `gw.memory.results_count`.
+- `forget()` → span `memory.forget` with `gw.memory.key`.
+
+**`gw-bench`** — Full rLM loop instrumentation:
+- `run_single_query()` → span `rlm.question` with `gw.model`.
+- `pre_search()` → span `rlm.pre_search`.
+- `run_rlm_loop()` → span `rlm.loop` with `gw.max_iterations`.
+- Per-iteration → `info_span!("rlm.iteration", n = iteration + 1)`.
+- `BrowseCompBridge` methods → `host_function` spans for `search`,
+  `get_document`, `llm_query`, `batch_llm_query`.
+
+**`gw-server`** — Calls `gw_trace::init_tracing()` at startup,
+`gw_trace::shutdown_tracing()` on exit. Postgres pool is connected
+before tracing init so the trace layer can use it.
+
+### PostgresTraceLayer
+
+A `tracing_subscriber::Layer` that captures completed spans matching
+these name prefixes: `gen_ai.*`, `memory.*`, `host_function`,
+`invoke_agent`, `repl.*`, `rlm.*`. All other spans are ignored.
+
+On span close:
+- Extracts recorded fields (model, tokens, duration, custom attributes).
+- Spawns a `tokio::spawn` fire-and-forget INSERT into the `traces` table.
+- Uses `eprintln` (not `tracing`) for INSERT errors to avoid recursion.
+
+### Span Hierarchy — rLM Benchmark
+
+```
+rlm.question{query_id, gw.model}
+├── rlm.pre_search
+│   ├── gen_ai.chat{model, input_tokens, output_tokens}  (decompose query)
+│   ├── host_function{function="search"} ×5
+│   ├── gen_ai.chat{...}                                 (refine)
+│   └── host_function{function="search"} ×3
+├── rlm.loop{gw.max_iterations}
+│   ├── rlm.iteration{n=1}
+│   │   ├── gen_ai.chat{model, input_tokens, output_tokens}
+│   │   ├── repl.execute{gw.code_length}
+│   │   │   ├── host_function{function="search"}
+│   │   │   ├── host_function{function="get_document"}
+│   │   │   └── host_function{function="llm_query"}
+│   │   │       └── gen_ai.chat{...}
+│   │   └── repl.execute{...}
+│   ├── rlm.iteration{n=2}
+│   │   └── ...
+│   └── rlm.iteration{n=3}
+│       └── repl.execute{gw.is_final=true}
+```
+
+### Span Hierarchy — Server Agent Invocation
 
 ```
 invoke_agent "triage"                          (gen_ai.agent.name = "triage")
-├── chat qwen2.5:7b                            (gen_ai.operation.name = "chat")
-│   ├── gen_ai.usage.input_tokens = 1200
-│   └── gen_ai.usage.output_tokens = 85
+├── gen_ai.chat{model, input_tokens, output_tokens}
 ├── invoke_agent "research"                    (child agent call)
-│   ├── chat qwen2.5:7b
-│   ├── memory.recall                          (custom span)
-│   │   ├── lance.search_mode = "hybrid"
-│   │   └── lance.results_count = 5
-│   ├── chat qwen2.5:7b
-│   └── memory.store
+│   ├── gen_ai.chat{...}
+│   ├── memory.recall{search_mode, top_k}
+│   │   └── gen_ai.embeddings{batch_size}      (query embedding)
+│   ├── gen_ai.chat{...}
+│   └── memory.store{key}
+│       └── gen_ai.embeddings{batch_size}      (value embedding)
 └── channel.send                               (reply to user)
 ```
 
 ### Key Attributes
 
-| Attribute | Example |
-|-----------|---------|
-| `gen_ai.operation.name` | `chat`, `embeddings`, `invoke_agent` |
-| `gen_ai.agent.id` | `agent_01j...` |
-| `gen_ai.agent.name` | `"research"` |
-| `gen_ai.request.model` | `"qwen2.5:7b"` |
-| `gen_ai.provider.name` | `"ollama"` |
-| `gen_ai.usage.input_tokens` | `1200` |
-| `gen_ai.usage.output_tokens` | `85` |
-| `gen_ai.input.messages` | (recorded for fine-tuning) |
-| `gen_ai.output.messages` | (recorded for fine-tuning) |
-| `gw.org_id` | `org_01j...` |
-| `gw.user_id` | `user_01j...` |
-| `gw.session_id` | `sess_01j...` |
-| `gw.task_id` | `task_01j...` |
+| Attribute | Example | Set by |
+|-----------|---------|--------|
+| `gen_ai.operation.name` | `chat`, `embeddings` | `gw-llm` |
+| `gen_ai.request.model` | `"qwen2.5:7b"` | `gw-llm` |
+| `gen_ai.provider.name` | `"ollama"` | `gw-llm` |
+| `gen_ai.usage.input_tokens` | `1200` | `gw-llm` (from response) |
+| `gen_ai.usage.output_tokens` | `85` | `gw-llm` (from response) |
+| `gw.streaming` | `true` | `gw-llm` (chat_stream) |
+| `gw.batch_size` | `32` | `gw-llm` (embed) |
+| `gw.code_length` | `245` | `gw-runtime` |
+| `gw.is_final` | `true` | `gw-runtime` |
+| `gw.memory.key` | `"user_prefs"` | `gw-memory` |
+| `gw.memory.search_mode` | `Hybrid { alpha: 0.5 }` | `gw-memory` |
+| `gw.memory.top_k` | `5` | `gw-memory` |
+| `gw.model` | `"qwen2.5:7b"` | `gw-bench` |
+| `gw.max_iterations` | `12` | `gw-bench` |
+
+### Verification
+
+```bash
+# Console spans — hierarchical output with token counts and timing
+RUST_LOG=info cargo run --bin gw-bench -- [args]
+
+# OTLP — send to Jaeger
+docker run -p 16686:16686 -p 4317:4317 jaegertracing/all-in-one
+GW_TRACE_EXPORTER=both GW_TRACE_OTLP_ENDPOINT=http://localhost:4317 \
+  cargo run --bin gw-bench -- [args]
+# View traces at http://localhost:16686
+
+# Postgres export
+# Set postgres_export = true in greatwheel.toml, then:
+SELECT operation_name, model, input_tokens, output_tokens, duration_ms
+FROM traces ORDER BY created_at DESC LIMIT 20;
+```
 
 ### Trace Recording → Fine-Tuning Pipeline
 
@@ -769,6 +895,27 @@ CREATE TABLE org_secrets (
     UNIQUE (org_id, name)
 );
 
+-- Hybrid memory store (LanceDB vectors + Postgres FTS)
+CREATE TABLE memories (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id       UUID NOT NULL REFERENCES orgs(id),
+    user_id      UUID,
+    agent_id     UUID,
+    session_id   UUID,
+    key          TEXT NOT NULL,
+    value        JSONB NOT NULL,
+    text_content TEXT NOT NULL,
+    tsv          TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', text_content)) STORED,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (org_id, key)
+);
+CREATE INDEX idx_memories_tsv ON memories USING GIN(tsv);
+CREATE INDEX idx_memories_org ON memories(org_id);
+CREATE INDEX idx_memories_org_user ON memories(org_id, user_id);
+CREATE INDEX idx_memories_org_agent ON memories(org_id, agent_id);
+CREATE INDEX idx_memories_org_session ON memories(org_id, session_id);
+
 -- Rate limit tracking
 CREATE TABLE rate_limit_counters (
     org_id UUID NOT NULL REFERENCES orgs(id),
@@ -793,15 +940,16 @@ greatwheel/
 │   │                          # host function bridge, hot-reload,
 │   │                          # snapshots, session lifecycle (idle eviction)
 │   ├── gw-llm/                # rl-play proxy client, Ollama direct client,
-│   │                          # provider trait, token tracking
-│   ├── gw-memory/             # LanceDB + Postgres hybrid store,
-│   │                          # embedding pipeline, search modes, scopes
+│   │                          # provider trait, token tracking, embed()
+│   ├── gw-memory/             # LanceDB + tantivy + Postgres hybrid store,
+│   │                          # embedding pipeline, BM25 via tantivy,
+│   │                          # RRF fusion, search modes, scope filtering
 │   ├── gw-bus/                # message bus, agent.call/notify routing
 │   ├── gw-channels/           # channel adapters (HTTP, WS, CLI, Slack)
 │   ├── gw-scheduler/          # task queue, per-org concurrency, retries,
 │   │                          # rate limit enforcement
-│   ├── gw-trace/              # OTel GenAI instrumentation, Postgres
-│   │                          # exporter, OTLP exporter
+│   ├── gw-trace/              # OTel GenAI instrumentation, init_tracing(),
+│   │                          # PostgresTraceLayer, OTLP exporter, config
 │   └── gw-server/             # binary — wires everything, HTTP/WS API,
 │                              # auth middleware, config loading,
 │                              # agent version management API
@@ -886,19 +1034,30 @@ volumes:
 
 ---
 
-## Next Steps
+## Implementation Status
 
-1. `cargo init` workspace + crate stubs + `docker-compose.yml`.
-2. Postgres migrations for the core schema.
-3. Integrate ouros — spike the session → pause → resume loop.
-4. Ollama client (`gw-llm`) via rl-play proxy — `complete()` + `embed()`.
-5. Wire up a minimal rLM agent: task in → rLM writes code → ouros
-   executes → `llm.complete()` pauses → rl-play→Ollama fulfills →
-   resume → response out.
-6. LanceDB integration for hybrid memory search.
-7. OTel instrumentation with GenAI semconv + Postgres trace export.
+### Complete
+1. ~~`cargo init` workspace + crate stubs + `docker-compose.yml`.~~
+2. ~~Postgres migrations for the core schema.~~ — 5 migration files (orgs/users, agent_defs/versions, sessions/tasks, traces, secrets/rate_limits).
+3. ~~Integrate ouros — spike the session → pause → resume loop.~~ — `ReplAgent` in `gw-runtime` with persistent REPL sessions, `HostBridge` trait for host function dispatch, `FINAL()` interception, variable injection/retrieval.
+4. ~~Ollama client (`gw-llm`) via rl-play proxy — `complete()` + `embed()`.~~ — Non-streaming and streaming chat, optional `think` parameter, per-call model override.
+5. ~~Wire up a minimal rLM agent.~~ — Implemented in `gw-bench` for BrowseComp-Plus: rLM writes code → ouros executes → host functions (`search`, `llm_query`, `get_document`) pause → Rust fulfills → resume → response. Full benchmark harness with multi-run voting and trajectory recording.
+6. ~~LanceDB + tantivy + Postgres hybrid memory search (`gw-memory`).~~ — `HybridStore` implementation: LanceDB for vector search (per-org tables, Ollama embeddings via `OllamaClient::embed()`), tantivy for true BM25 full-text search (replaces Postgres `tsvector`/`ts_rank`), Postgres for value persistence and scope metadata, RRF fusion. `TantivyStore` with on-disk index, org/scope filtering via boolean queries, `rebuild_from_rows()` for startup sync. `MemoryStore` trait, `MemoryError` (thiserror), `MemoryRecord` return type. Concurrent triple-store writes/deletes. Migration `006_memory.sql`.
+10. ~~Channel layer (HTTP API first).~~ — `gw-server` serves HTTP via Axum: `/api/chat` (streaming SSE), `/api/models`, `/api/config`, `/health`. Embedded chat UI with model selector, system prompt editor, token display.
+
+7. ~~OTel instrumentation with GenAI semconv + Postgres trace export (`gw-trace`).~~ — Three-layer tracing subscriber (console + OTLP + Postgres). `#[instrument]` spans on `gw-llm` (chat/embed/stream with token recording), `gw-runtime` (agent/REPL execution + host function dispatch), `gw-memory` (store/recall/forget), `gw-bench` (full rLM loop hierarchy). `PostgresTraceLayer` captures matching spans to `traces` table. Config via `[tracing]` TOML section or env vars.
+
+### Trait/type definitions only
+- `gw-bus` — `AgentBus` trait (`call`/`notify`). No concrete implementation.
+- `gw-channels` — `ChannelAdapter` trait. No HTTP/WS/Slack adapter implementations.
+- `gw-scheduler` — `Scheduler`, `RateLimiter` structs, `RateLimitResult` enum. No queue or enforcement logic.
+
+### Next Steps
 8. Session lifecycle (idle timeout → snapshot → evict).
 9. Agent versioning + hot-reload.
-10. Channel layer (HTTP API first).
-11. Rate limiting (soft + hard).
+11. Rate limiting — soft + hard (`gw-scheduler`).
 12. Session key auth model.
+13. Inter-agent message bus — concrete `AgentBus` implementation (`gw-bus`).
+14. Agent SDK — Python-side `llm`, `memory`, `agent`, `channel` globals wired to host bridge.
+15. Multi-tenancy auth middleware.
+16. Episodic memory + thread weaving (see [`docs/design-episodes.md`](docs/design-episodes.md)).

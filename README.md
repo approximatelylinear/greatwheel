@@ -288,23 +288,35 @@ unzip protoc.zip -d ~/.local
 
 ## Project Status
 
-This is the initial scaffold. The architecture is defined in [`ARCHITECTURE.md`](ARCHITECTURE.md). Current state:
+The architecture is defined in [`ARCHITECTURE.md`](ARCHITECTURE.md). Current state:
 
-- [x] Workspace with 9 crates and correct dependencies
-- [x] Core types (`OrgId`, `Task`, `AgentDef`, `CallContext`, etc.)
-- [x] Working Ollama client with streaming support
-- [x] Chat UI with SSE streaming
-- [x] Docker Compose (greatwheel + rl-play + Postgres + Ollama)
-- [x] Postgres migrations (5 files, full schema)
+### Implemented
+- [x] Workspace with 9 crates + `gw-bench` and correct dependencies
+- [x] Core types — `OrgId`, `Task`, `AgentDef`, `CallContext`, `ToolPermissions`, etc. (`gw-core`)
+- [x] Ouros integration — `ReplAgent` with persistent REPL sessions, host function bridge via `HostBridge` trait, `FINAL()` interception, variable injection/retrieval (`gw-runtime`)
+- [x] Ollama client — non-streaming, streaming (SSE), optional `think` parameter for reasoning models, model override per call (`gw-llm`)
+- [x] HTTP server — Axum with `/api/chat` (streaming SSE), `/api/models`, `/api/config`, `/health` (`gw-server`)
+- [x] Chat UI — embedded `chat.html` with dark theme, model selector, system prompt editor, real-time token display
+- [x] Hybrid search — BM25s (sparse) + LanceDB/Ollama (dense vector) with RRF fusion, HTTP search server, index builders with resume support (`bench/browsecomp/`)
+- [x] BrowseComp-Plus benchmark harness — rLM REPL agent with `search()`, `get_document()`, `llm_query()`, `batch_llm_query()` host functions, multi-run voting, trajectory recording (`gw-bench`)
+- [x] Postgres migrations — 5 files: orgs/users, agent_defs/versions, sessions/tasks, traces, secrets/rate_limits
+- [x] Docker Compose — 4 services (greatwheel, rl-play, postgres, ollama) + Dockerfiles
+- [x] Config — `greatwheel.toml` with server, database, LLM, agents, session sections
 - [x] Architecture explorer ([`greatwheel-explorer.html`](greatwheel-explorer.html))
-- [ ] Ouros session integration (spike the pause/resume loop)
-- [ ] Host function bridge (dispatch llm/memory/bus calls)
-- [ ] LanceDB hybrid memory search
-- [ ] OTel GenAI tracing to Postgres
+
+### Trait/type definitions only (no implementation)
+- [ ] Hybrid memory as a Rust crate — types defined (`RecallOpts`, `SearchMode`, `MemoryScope`), `MemoryStore` trait defined, no Rust LanceDB/Postgres integration yet (`gw-memory`). Working Python implementation exists in `bench/browsecomp/` (BM25s + LanceDB + RRF fusion)
+- [ ] Inter-agent message bus — `AgentBus` trait defined (`call`/`notify`), no concrete implementation (`gw-bus`)
+- [ ] Channel adapters — `ChannelAdapter` trait defined, no HTTP/WS/Slack implementations (`gw-channels`)
+- [ ] Task scheduler — `Scheduler`/`RateLimiter` structs stubbed, `RateLimitResult` enum defined, no queue or enforcement (`gw-scheduler`)
+- [ ] OTel tracing — `TraceRecord` struct defined, no Postgres persistence or OTLP export (`gw-trace`)
+
+### Not started
+- [ ] Agent SDK integration — `triage.py` references SDK that doesn't exist yet
 - [ ] Agent hot-reload + versioning
-- [ ] Rate limiting (soft + hard)
 - [ ] Session lifecycle (idle timeout → snapshot → evict)
 - [ ] Multi-tenancy auth middleware
+- [ ] Session key auth model
 
 ## License
 

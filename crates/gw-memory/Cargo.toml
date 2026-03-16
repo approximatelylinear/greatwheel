@@ -5,9 +5,17 @@ edition = "2021"
 
 [dependencies]
 gw-core = { workspace = true }
+gw-llm = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+futures = { workspace = true }
+chrono = { workspace = true }
 lancedb = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
+tantivy = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }

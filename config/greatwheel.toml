@@ -16,5 +16,16 @@ embedding_model = "nomic-embed-text"
 directory = "agents"
 hot_reload = true
 
+[memory]
+lance_db_path = "data/lancedb"
+tantivy_index_path = "data/tantivy"
+embedding_dim = 768
+
+[tracing]
+exporter = "console"
+# otlp_endpoint = "http://localhost:4317"
+postgres_export = false
+service_name = "greatwheel"
+
 [session]
 idle_timeout_secs = 1800

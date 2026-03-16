@@ -7,7 +7,7 @@ with a Rust core managing memory, routing, and inter-agent communication.
 ## Architecture
 See `ARCHITECTURE.md` for the full design. Key points:
 - 9-crate Rust workspace under `crates/`
-- Postgres for persistence, LanceDB for vector search
+- Postgres for persistence, LanceDB for vector search, tantivy for BM25
 - Ollama (via rl-play proxy) for LLM inference
 - ouros for sandboxed Python agent execution
 
@@ -15,7 +15,7 @@ See `ARCHITECTURE.md` for the full design. Key points:
 - `gw-core` — shared types (IDs, Task, AgentDef, CallContext, permissions)
 - `gw-runtime` — ouros integration, session management
 - `gw-llm` — LLM provider trait + Ollama client (via rl-play)
-- `gw-memory` — hybrid memory (LanceDB + Postgres)
+- `gw-memory` — hybrid memory (LanceDB + tantivy BM25 + Postgres)
 - `gw-bus` — inter-agent message bus
 - `gw-channels` — channel adapters (HTTP, WS, etc.)
 - `gw-scheduler` — task queue + rate limiting

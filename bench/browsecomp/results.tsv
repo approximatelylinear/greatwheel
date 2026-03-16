@@ -26,3 +26,9 @@ think-opt-9b	0.2333	~12	127446	keep	think:false for utility calls (pre-search, f
 bon3-vote-9b	0.2333	~12	389115	discard	Best-of-3 majority vote. 7/30 same accuracy, 3x tokens. Voting picks common wrong answer over rare correct one
 hybrid-rrf-9b	0.1000	~12	115340	discard	Hybrid BM25+LanceDB with RRF equal weighting. 3/30 regression — vector results dilute BM25 precision
 hybrid-aug-9b	0.3000	~12	140840	BEST-TIE	BM25-first + vector augmentation (k extra vector-unique docs). 9/30, matches retrieval-v1. Full 100K LanceDB index
+dualq-presearch-9b	0.1111	~12	~150000	discard	Dual BM25+vector pre-search queries. 1/9 — too many context docs overwhelm model, BM25 query quality degrades
+vsearch-tool-9b	0.2000	~12	156729	discard	vector_search() as REPL tool. 6/30: +643, -175-469-853-885. Model over-uses it, wastes turns on semantic search
+pyanalysis-9b	0.2000	~12	162654	discard	Python analysis emphasis in prompt. 5/25 (crash Q26). No improvement — analysis not the bottleneck
+turns16-9b	0.1000	~16	155708	discard	16 turns (vs 12). 3/30 regression — model second-guesses with extra iterations
+refine-add-9b	0.2000	~12	164974	discard	Pre-search refinement (add round-2 queries). 6/30: +1128+572, -159-175-469-830-885. Too many context docs (50-60)
+refine-filter-9b	0.2333	~12	175239	keep	Pre-search filter+refine (keep top-10, add 3 new queries). 7/30: +572+643, -175-469-830-853. Avg 31 context docs

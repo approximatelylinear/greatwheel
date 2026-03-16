@@ -1,5 +1,24 @@
+pub mod corpus;
+pub mod error;
+pub mod fusion;
+pub mod hybrid;
+pub mod lance;
+pub mod postgres;
+pub mod tantivy_store;
+
 use gw_core::{AgentId, CallContext, SessionId, UserId};
 use serde::{Deserialize, Serialize};
+
+pub use error::MemoryError;
+pub use hybrid::HybridStore;
+
+/// A memory record returned from recall queries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryRecord {
+    pub key: String,
+    pub value: serde_json::Value,
+    pub score: f32,
+}
 
 /// Options for memory recall queries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,29 +53,46 @@ pub trait MemoryStore {
         ctx: &CallContext,
         key: &str,
         value: serde_json::Value,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    ) -> Result<(), MemoryError>;
 
     async fn recall(
         &self,
         ctx: &CallContext,
         query: &str,
         opts: RecallOpts,
-    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>;
+    ) -> Result<Vec<MemoryRecord>, MemoryError>;
 
     async fn forget(
         &self,
         ctx: &CallContext,
         key: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    ) -> Result<(), MemoryError>;
 }
 
-/// Hybrid store implementation backed by LanceDB + Postgres.
-pub struct HybridStore {
-    // TODO: LanceDB connection, sqlx pool
-}
+impl MemoryStore for HybridStore {
+    async fn store(
+        &self,
+        ctx: &CallContext,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<(), MemoryError> {
+        self.store(ctx, key, value).await
+    }
 
-impl HybridStore {
-    pub fn new() -> Self {
-        Self {}
+    async fn recall(
+        &self,
+        ctx: &CallContext,
+        query: &str,
+        opts: RecallOpts,
+    ) -> Result<Vec<MemoryRecord>, MemoryError> {
+        self.recall(ctx, query, opts).await
+    }
+
+    async fn forget(
+        &self,
+        ctx: &CallContext,
+        key: &str,
+    ) -> Result<(), MemoryError> {
+        self.forget(ctx, key).await
     }
 }

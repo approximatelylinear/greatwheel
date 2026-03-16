@@ -10,13 +10,16 @@ path = "src/main.rs"
 [dependencies]
 gw-core = { workspace = true }
 gw-llm = { workspace = true }
+gw-memory = { workspace = true }
 gw-runtime = { workspace = true }
+gw-trace = { workspace = true }
 ouros = { workspace = true }
 
 clap = { workspace = true, features = ["env"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sqlx = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

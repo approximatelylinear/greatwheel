@@ -13,7 +13,6 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 use std::{convert::Infallible, sync::Arc};
 use tokio_stream::wrappers::ReceiverStream;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[derive(Parser)]
 #[command(name = "greatwheel", about = "Greatwheel agentic runtime")]
@@ -27,6 +26,9 @@ struct Config {
     server: ServerConfig,
     database: DatabaseConfig,
     llm: LlmConfig,
+    memory: MemoryConfig,
+    #[serde(default)]
+    tracing: gw_trace::TracingConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,6 +40,18 @@ struct ServerConfig {
 #[derive(Debug, Deserialize)]
 struct DatabaseConfig {
     url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MemoryConfig {
+    lance_db_path: String,
+    embedding_dim: i32,
+    #[serde(default = "default_tantivy_path")]
+    tantivy_index_path: String,
+}
+
+fn default_tantivy_path() -> String {
+    "data/tantivy".into()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -150,24 +164,35 @@ async fn chat(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
     let cli = Cli::parse();
 
     let config_str = tokio::fs::read_to_string(&cli.config).await?;
     let config: Config = toml::from_str(&config_str)?;
 
-    // Postgres is optional for dev — chat works without it
-    match sqlx::postgres::PgPoolOptions::new()
+    // Connect Postgres first — needed for trace layer
+    let pg_pool = match sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)
         .connect(&config.database.url)
         .await
     {
-        Ok(_pool) => tracing::info!("Database connected"),
-        Err(e) => tracing::warn!("Database unavailable (chat still works): {e}"),
+        Ok(pool) => Some(pool),
+        Err(e) => {
+            eprintln!("Database unavailable (chat still works): {e}");
+            None
+        }
+    };
+
+    // Initialize tracing (console + optional OTLP + optional Postgres)
+    let trace_pool = if config.tracing.postgres_export {
+        pg_pool.clone()
+    } else {
+        None
+    };
+    gw_trace::init_tracing(&config.tracing, trace_pool)
+        .expect("Failed to initialize tracing");
+
+    if pg_pool.is_some() {
+        tracing::info!("Database connected");
     }
 
     let llm = OllamaClient::new(
@@ -177,8 +202,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.llm.embedding_model.clone(),
     );
 
+    let llm = Arc::new(llm);
+
+    // Initialize memory store if database is available
+    if let Some(pool) = pg_pool {
+        match gw_memory::lance::LanceStore::new(
+            &config.memory.lance_db_path,
+            config.memory.embedding_dim,
+        )
+        .await
+        {
+            Ok(lance) => {
+                match gw_memory::tantivy_store::TantivyStore::open(
+                    std::path::Path::new(&config.memory.tantivy_index_path),
+                ) {
+                    Ok(tantivy) => {
+                        let pg_store = gw_memory::postgres::PgMemoryStore::new(pool);
+                        let _memory_store =
+                            gw_memory::HybridStore::new(pg_store, lance, tantivy, llm.clone());
+                        tracing::info!("Memory store initialized (LanceDB + tantivy + Postgres)");
+                    }
+                    Err(e) => tracing::warn!("Tantivy unavailable: {e}"),
+                }
+            }
+            Err(e) => tracing::warn!("LanceDB unavailable: {e}"),
+        }
+    }
+
     let state = AppState {
-        llm: Arc::new(llm),
+        llm,
         config: Arc::new(config.llm),
     };
 
@@ -195,6 +247,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
+
+    gw_trace::shutdown_tracing();
 
     Ok(())
 }

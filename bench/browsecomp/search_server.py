@@ -68,14 +68,20 @@ class SearchHandler(BaseHTTPRequestHandler):
         if self.path == "/call/search":
             query = body.get("query", "")
             k = body.get("k", 5)
+            mode = body.get("mode", "hybrid")  # "bm25", "vector", or "hybrid"
 
-            # BM25 results
-            bm25_results = self.bm25_searcher.search(query, k=k)
-
-            if self.lance_searcher is not None:
-                # BM25-first hybrid: return all k BM25 results, then
-                # append up to k/2 vector-unique results (documents
-                # BM25 missed but vector search found)
+            if mode == "vector" and self.lance_searcher is not None:
+                # Vector-only search
+                try:
+                    results = self.lance_searcher.search(query, k=k)
+                except Exception:
+                    results = []
+            elif mode == "bm25" or self.lance_searcher is None:
+                # BM25-only search
+                results = self.bm25_searcher.search(query, k=k)
+            else:
+                # Hybrid: BM25 results first, then vector-unique docs
+                bm25_results = self.bm25_searcher.search(query, k=k)
                 try:
                     vec_results = self.lance_searcher.search(query, k=k)
                 except Exception:
@@ -84,12 +90,9 @@ class SearchHandler(BaseHTTPRequestHandler):
                 if vec_results:
                     bm25_docids = {r["docid"] for r in bm25_results}
                     vec_extra = [r for r in vec_results if r["docid"] not in bm25_docids]
-                    # BM25 results first (full k), then vector extras
                     results = list(bm25_results) + vec_extra[:max(k // 2, 3)]
                 else:
                     results = bm25_results
-            else:
-                results = bm25_results
 
             out = []
             for r in results:
