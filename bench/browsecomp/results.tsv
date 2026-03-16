@@ -32,3 +32,8 @@ pyanalysis-9b	0.2000	~12	162654	discard	Python analysis emphasis in prompt. 5/25
 turns16-9b	0.1000	~16	155708	discard	16 turns (vs 12). 3/30 regression — model second-guesses with extra iterations
 refine-add-9b	0.2000	~12	164974	discard	Pre-search refinement (add round-2 queries). 6/30: +1128+572, -159-175-469-830-885. Too many context docs (50-60)
 refine-filter-9b	0.2333	~12	175239	keep	Pre-search filter+refine (keep top-10, add 3 new queries). 7/30: +572+643, -175-469-830-853. Avg 31 context docs
+native-bm25-9b	0.1000	~12	115340	discard	Native Rust tantivy BM25 (no stopwords, no query sanitization). 3/30 — tantivy query parser chokes on apostrophes
+native-bm25-fix-9b	0.1667	~12	127000	discard	Native BM25 + query sanitization (strip '"()[]{}~^\). 5/30: +2 from parse fix, still trails Python BM25s
+native-bm25-sw-9b	0.2000	~35	142998	keep	Native BM25 + en_stopwords tokenizer (matching bm25s defaults). 6/30: stopword removal +20% relative
+native-hybrid-9b	0.2333	~12	140000	keep	Native hybrid BM25+LanceDB RRF (no stopwords). 7/30 — proper RRF fusion, no Python server
+native-hybrid-sw-9b	0.3333	~35	150028	BEST	Native hybrid + en_stopwords tokenizer. 10/30: 159+175+191+464+572+797+853+1030+1128+1144. Beats Python baseline (9/30)
