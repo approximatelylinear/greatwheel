@@ -44,3 +44,4 @@ mar16-earlysubmit	0.3000	~12	113513	keep	Early-submit prompt when evidence found
 mar16-widepresearch	0.2667	~12	154344	discard	Wider pre-search (8+5 queries, full k). 8/30, too many context docs
 mar16-hybridsearch	0.2333	~12	108647	discard	Hybrid default search() in REPL. 7/30, vector search adds no value
 mar16-searchcoach	0.2333	~12	126580	discard	Search query coaching in prompt. 7/30, high run-to-run variance dominates
+f6d4868	0.3667	~12	149481	NEW-BEST	Boosted BM25 (phrase+AND+OR) + HyDE passage + PRF terms. 11/30 — new all-time best!
