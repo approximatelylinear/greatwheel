@@ -10,10 +10,10 @@ use arrow_array::{Array, Float32Array, StringArray};
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::query::{BooleanQuery, BoostQuery, Occur, PhraseQuery, QueryParser};
 use tantivy::schema::{Field, Schema, TextFieldIndexing, TextOptions, Value, IndexRecordOption, STORED, STRING};
-use tantivy::tokenizer::{Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, StopWordFilter, TextAnalyzer};
-use tantivy::{doc, Index, IndexReader, ReloadPolicy};
+use tantivy::tokenizer::{Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, StopWordFilter, TextAnalyzer, TokenStream};
+use tantivy::{doc, Index, IndexReader, ReloadPolicy, Term};
 use tracing;
 
 use crate::error::MemoryError;
@@ -174,6 +174,112 @@ impl CorpusSearcher {
             });
         }
 
+        Ok(hits)
+    }
+
+    /// Tokenize a query string using the same analyzer as the text field.
+    fn tokenize_query(&self, query: &str) -> Vec<String> {
+        let tokenizer_manager = self.index.tokenizers();
+        let mut tokenizer = tokenizer_manager
+            .get(TOKENIZER_NAME)
+            .expect("en_stopwords tokenizer not registered");
+        let mut stream = tokenizer.token_stream(query);
+        let mut terms = Vec::new();
+        while stream.advance() {
+            terms.push(stream.token().text.clone());
+        }
+        terms
+    }
+
+    /// Extract document fields from a tantivy document address.
+    fn extract_hit(&self, searcher: &tantivy::Searcher, score: f32, doc_address: tantivy::DocAddress) -> Result<CorpusHit, MemoryError> {
+        let doc: tantivy::TantivyDocument = searcher.doc(doc_address).map_err(|e| {
+            MemoryError::Tantivy(format!("doc retrieval failed: {e}"))
+        })?;
+        let docid = doc
+            .get_first(self.f_docid)
+            .and_then(|v| Value::as_str(&v).map(|s| s.to_string()))
+            .unwrap_or_default();
+        let text = doc
+            .get_first(self.f_text)
+            .and_then(|v| Value::as_str(&v).map(|s| s.to_string()))
+            .unwrap_or_default();
+        let snippet: String = text.chars().take(3000).collect();
+        Ok(CorpusHit { docid, text: snippet, score })
+    }
+
+    /// BM25 search with compound boosted query stacking multiple signals:
+    /// 1. Exact phrase match (boost 4.0)
+    /// 2. Phrase with slop (boost 2.0)
+    /// 3. All terms AND'd (boost 1.5)
+    /// 4. Individual terms OR'd (boost 1.0, fallback)
+    pub fn search_bm25_boosted(&self, query: &str, k: usize) -> Result<Vec<CorpusHit>, MemoryError> {
+        let terms = self.tokenize_query(query);
+        if terms.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let tantivy_terms: Vec<Term> = terms.iter()
+            .map(|t| Term::from_field_text(self.f_text, t))
+            .collect();
+
+        let mut clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
+
+        if tantivy_terms.len() > 1 {
+            // Signal 1: Exact phrase match (boost 4.0)
+            let phrase = PhraseQuery::new(tantivy_terms.clone());
+            clauses.push((
+                Occur::Should,
+                Box::new(BoostQuery::new(Box::new(phrase), 4.0)),
+            ));
+
+            // Signal 2: Phrase with slop 2 (boost 2.0) — terms near each other
+            let positioned: Vec<(usize, Term)> = tantivy_terms.iter()
+                .enumerate()
+                .map(|(i, t)| (i, t.clone()))
+                .collect();
+            let phrase_slop = PhraseQuery::new_with_offset_and_slop(positioned, 2);
+            clauses.push((
+                Occur::Should,
+                Box::new(BoostQuery::new(Box::new(phrase_slop), 2.0)),
+            ));
+
+            // Signal 3: All terms AND'd together (boost 1.5)
+            let and_clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = tantivy_terms.iter()
+                .map(|t| {
+                    let tq = tantivy::query::TermQuery::new(
+                        t.clone(),
+                        IndexRecordOption::WithFreqs,
+                    );
+                    (Occur::Must, Box::new(tq) as Box<dyn tantivy::query::Query>)
+                })
+                .collect();
+            let and_query = BooleanQuery::new(and_clauses);
+            clauses.push((
+                Occur::Should,
+                Box::new(BoostQuery::new(Box::new(and_query), 1.5)),
+            ));
+        }
+
+        // Signal 4: Individual terms OR'd (boost 1.0) — broadest fallback
+        for t in &tantivy_terms {
+            let tq = tantivy::query::TermQuery::new(
+                t.clone(),
+                IndexRecordOption::WithFreqs,
+            );
+            clauses.push((Occur::Should, Box::new(tq)));
+        }
+
+        let compound = BooleanQuery::new(clauses);
+        let searcher = self.reader.searcher();
+        let top_docs = searcher
+            .search(&compound, &TopDocs::with_limit(k))
+            .map_err(|e| MemoryError::Tantivy(format!("boosted search failed: {e}")))?;
+
+        let mut hits = Vec::with_capacity(top_docs.len());
+        for (score, doc_address) in top_docs {
+            hits.push(self.extract_hit(&searcher, score, doc_address)?);
+        }
         Ok(hits)
     }
 

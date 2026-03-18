@@ -229,8 +229,8 @@ impl BrowseCompBridge {
                             })?
                         }
                         _ => {
-                            // Default to BM25
-                            searcher.search_bm25(&query_str, k).map_err(|e| {
+                            // Default to boosted BM25
+                            searcher.search_bm25_boosted(&query_str, k).map_err(|e| {
                                 AgentError::HostFunction {
                                     function: "search".into(),
                                     message: format!("{e}"),
@@ -781,7 +781,7 @@ fn backend_search(
             }
         }
         SearchBackend::Native { searcher } => {
-            match searcher.search_bm25(query, k) {
+            match searcher.search_bm25_boosted(query, k) {
                 Ok(hits) => hits
                     .into_iter()
                     .map(|h| SearchHit {
@@ -868,6 +868,101 @@ fn pre_search(
 
     info!(n_hits = all_hits.len(), n_queries = queries.len(), "Pre-search round 1 complete");
 
+    let mut hyde_input = 0u32;
+    let mut hyde_output = 0u32;
+
+    // --- HyDE: Generate a hypothetical answer passage, use as BM25 query ---
+    let hyde_prompt = format!(
+        "Write a 2-3 sentence passage that would directly answer this question. \
+         Write it as if quoting from a real document or article. Use specific names, dates, and facts. \
+         Do NOT say you don't know. Make your best guess.\n\n\
+         Question: {query}\n\nPassage:"
+    );
+    let hyde_messages = vec![Message {
+        role: "user".into(),
+        content: hyde_prompt,
+    }];
+    if let Ok(hyde_resp) = rt.block_on(async {
+        llm.chat_with_options(&hyde_messages, Some(model), Some(false)).await
+    }) {
+        hyde_input += hyde_resp.input_tokens.unwrap_or(0);
+        hyde_output += hyde_resp.output_tokens.unwrap_or(0);
+        let hyde_passage = strip_think_tags(&hyde_resp.content);
+        info!(hyde_len = hyde_passage.len(), "HyDE passage generated");
+
+        // Use the hypothetical passage as a BM25 search query (token overlap with real docs)
+        let hyde_hits = backend_search(backend, &hyde_passage, std::cmp::min(k as usize, 5), rt);
+        for hit in hyde_hits {
+            if seen_docids.insert(hit.docid.clone()) {
+                let snippet = hit.snippet.as_deref().unwrap_or("");
+                let preview: String = snippet.chars().take(300).collect();
+                context_text.push_str(&format!("docid={}: {}\n", hit.docid, preview));
+                all_hits.push(serde_json::json!({
+                    "docid": hit.docid,
+                    "snippet": snippet,
+                }));
+            }
+        }
+        total_queries += 1;
+    }
+
+    // --- Pseudo-relevance feedback: extract distinctive terms from top snippets ---
+    let prf_terms = {
+        let mut term_freq: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for h in all_hits.iter().take(5) {
+            let snippet = h["snippet"].as_str().unwrap_or("");
+            for word in snippet.split_whitespace() {
+                let clean: String = word.to_lowercase()
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect();
+                if clean.len() >= 4 && clean.len() <= 20 {
+                    *term_freq.entry(clean).or_insert(0) += 1;
+                }
+            }
+        }
+        // Remove terms already in the query
+        let query_lower = query.to_lowercase();
+        let query_words: std::collections::HashSet<String> = query_lower
+            .split_whitespace()
+            .map(|w| w.chars().filter(|c| c.is_alphanumeric()).collect())
+            .collect();
+        term_freq.retain(|t, _| !query_words.contains(t));
+        // Remove very common words
+        let stopwords = ["this", "that", "with", "from", "have", "been",
+            "were", "they", "their", "about", "would", "which", "could", "other",
+            "more", "some", "also", "into", "than", "them", "only", "over",
+            "said", "will", "when", "what", "there", "after", "before", "first",
+            "most", "very", "just", "like", "each", "where", "does", "many"];
+        let stop_set: std::collections::HashSet<&str> = stopwords.iter().cloned().collect();
+        term_freq.retain(|t, _| !stop_set.contains(t.as_str()));
+        // Sort by freq, take top 5
+        let mut sorted: Vec<(String, usize)> = term_freq.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.into_iter().take(5).map(|(t, _)| t).collect::<Vec<String>>()
+    };
+
+    if !prf_terms.is_empty() {
+        info!(prf_terms = ?prf_terms, "PRF terms extracted");
+        // Search with PRF terms as a combined query
+        let prf_query = prf_terms.join(" ");
+        let prf_hits = backend_search(backend, &prf_query, 3, rt);
+        for hit in prf_hits {
+            if seen_docids.insert(hit.docid.clone()) {
+                let snippet = hit.snippet.as_deref().unwrap_or("");
+                let preview: String = snippet.chars().take(300).collect();
+                context_text.push_str(&format!("docid={}: {}\n", hit.docid, preview));
+                all_hits.push(serde_json::json!({
+                    "docid": hit.docid,
+                    "snippet": snippet,
+                }));
+            }
+        }
+        total_queries += 1;
+    }
+
+    info!(n_hits = all_hits.len(), "Pre-search after HyDE + PRF");
+
     // --- Round 2: Refinement ---
     // Show the LLM round-1 results. Ask it to:
     // 1. Pick the most relevant docids from round 1
@@ -879,12 +974,21 @@ fn pre_search(
         format!("  {}. [{}] {}", i + 1, docid, preview)
     }).collect::<Vec<_>>().join("\n");
 
+    let prf_hint = if !prf_terms.is_empty() {
+        format!(
+            "\n\nFrequent distinctive terms from top results: {}. Consider incorporating these into your new queries.",
+            prf_terms.join(", ")
+        )
+    } else {
+        String::new()
+    };
+
     let refine_prompt = format!(
         "Question: {query}\n\n\
          Here are {n} search results. Select the MOST RELEVANT documents and generate new searches.\n\n\
          Results:\n{round1_preview}\n\n\
          First, list the numbers of the TOP 10 most relevant results (comma-separated).\n\
-         Then, output 3 NEW keyword search queries (2-5 words) for facts NOT covered above.\n\n\
+         Then, output 3 NEW keyword search queries (2-5 words) for facts NOT covered above.{prf_hint}\n\n\
          Format:\n\
          KEEP: 1, 3, 5, 7, ...\n\
          SEARCH: query one\n\
@@ -898,8 +1002,8 @@ fn pre_search(
         content: refine_prompt,
     }];
 
-    let mut total_input = input_tokens;
-    let mut total_output = output_tokens;
+    let mut total_input = input_tokens + hyde_input;
+    let mut total_output = output_tokens + hyde_output;
 
     if let Ok(resp2) = rt.block_on(async { llm.chat_with_options(&refine_messages, Some(model), Some(false)).await }) {
         total_input += resp2.input_tokens.unwrap_or(0);
