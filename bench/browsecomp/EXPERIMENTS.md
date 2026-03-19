@@ -174,8 +174,8 @@ The bottleneck is LLM inference in the rLM loop, not search latency.
   Also works with hybrid search: `query_type="hybrid"` (with `return_score="relevance"`)
 - **Effort:** Medium — Python sidecar is straightforward; Rust-native is larger
 - **Expected impact:** Medium-high — cross-encoders consistently outperform bi-encoders and BM25 for precision. Our failure analysis showed the right document is often in the top-20 BM25 results but not top-10 — reranking could surface it.
-- **Latency:** ColBERT reranking of 20-30 documents per query adds ~100-500ms per search call (GPU) or ~1-3s (CPU). Pre-search adds one reranking pass; REPL searches add per-call latency.
-- **Risk:** Python sidecar adds HTTP round-trip overhead. CPU-only reranking may be too slow for REPL search calls. Could limit reranking to pre-search only.
+- **Latency:** ColBERT reranking of 20-30 documents per query adds ~100-500ms per search call on GPU. The `device` parameter auto-selects CUDA if available, or can be forced with `device="cuda"`. ColBERT v2.0 is ~400MB VRAM; the small variant is lighter. With qwen3.5:9b at ~6-7GB, a 24GB GPU has room for both.
+- **Risk:** Python sidecar adds HTTP round-trip overhead. GPU memory contention with Ollama during concurrent LLM + reranking calls. Could limit reranking to pre-search only if per-call latency is too high.
 - **Status:** Ready to prototype (Python sidecar path)
 
 #### R3. Learned sparse retrieval (SPLADE-style)
