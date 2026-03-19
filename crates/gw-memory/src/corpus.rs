@@ -301,6 +301,7 @@ impl CorpusSearcher {
         let mut stream = table
             .vector_search(query_vec)
             .map_err(|e| MemoryError::Embedding(format!("vector search error: {e}")))?
+            .nprobes(50)  // higher nprobes for better IVF-PQ recall (default ~20)
             .limit(k)
             .execute()
             .await?;
@@ -346,7 +347,7 @@ impl CorpusSearcher {
         query_vec: Vec<f32>,
         k: usize,
     ) -> Result<Vec<CorpusHit>, MemoryError> {
-        let bm25_hits = self.search_bm25(query, k)?;
+        let bm25_hits = self.search_bm25_boosted(query, k)?;
         let vec_hits = self.search_vector(query_vec, k).await?;
 
         // Build ScoredKey lists for RRF
@@ -365,7 +366,8 @@ impl CorpusSearcher {
             })
             .collect();
 
-        let fused = reciprocal_rank_fusion(&[bm25_keys, vec_keys], 60);
+        // BM25 gets 2x weight — pass its list twice into RRF
+        let fused = reciprocal_rank_fusion(&[bm25_keys.clone(), bm25_keys, vec_keys], 60);
 
         // Build a lookup of docid -> text from both result sets
         let mut text_map = std::collections::HashMap::new();

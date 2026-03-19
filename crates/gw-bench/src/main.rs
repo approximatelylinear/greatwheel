@@ -199,7 +199,7 @@ impl BrowseCompBridge {
                 self.rt.block_on(async {
                     let corpus_hits = match mode_str.as_str() {
                         "vector" => {
-                            let vecs = llm.embed(&[query_str.clone()]).await.map_err(|e| {
+                            let vecs = llm.embed_queries(&[query_str.clone()]).await.map_err(|e| {
                                 AgentError::HostFunction {
                                     function: "search".into(),
                                     message: format!("embed error: {e}"),
@@ -214,7 +214,7 @@ impl BrowseCompBridge {
                             })?
                         }
                         "hybrid" => {
-                            let vecs = llm.embed(&[query_str.clone()]).await.map_err(|e| {
+                            let vecs = llm.embed_queries(&[query_str.clone()]).await.map_err(|e| {
                                 AgentError::HostFunction {
                                     function: "search".into(),
                                     message: format!("embed error: {e}"),

@@ -230,6 +230,19 @@ impl OllamaClient {
         Ok(all_embeddings)
     }
 
+    /// Generate embeddings for search queries, prepending the `search_query: ` prefix
+    /// for nomic-embed-text's asymmetric retrieval support.
+    pub async fn embed_queries(
+        &self,
+        texts: &[String],
+    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error + Send + Sync>> {
+        let prefixed: Vec<String> = texts
+            .iter()
+            .map(|t| format!("search_query: {t}"))
+            .collect();
+        self.embed(&prefixed).await
+    }
+
     /// Streaming chat — returns the raw reqwest Response for NDJSON processing.
     /// Each line is a JSON object with `message.content` (token) and `done` flag.
     #[tracing::instrument(
