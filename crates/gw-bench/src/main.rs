@@ -868,44 +868,6 @@ fn pre_search(
 
     info!(n_hits = all_hits.len(), n_queries = queries.len(), "Pre-search round 1 complete");
 
-    let mut hyde_input = 0u32;
-    let mut hyde_output = 0u32;
-
-    // --- HyDE: Generate a hypothetical answer passage, use as BM25 query ---
-    let hyde_prompt = format!(
-        "Write a 2-3 sentence passage that would directly answer this question. \
-         Write it as if quoting from a real document or article. Use specific names, dates, and facts. \
-         Do NOT say you don't know. Make your best guess.\n\n\
-         Question: {query}\n\nPassage:"
-    );
-    let hyde_messages = vec![Message {
-        role: "user".into(),
-        content: hyde_prompt,
-    }];
-    if let Ok(hyde_resp) = rt.block_on(async {
-        llm.chat_with_options(&hyde_messages, Some(model), Some(false)).await
-    }) {
-        hyde_input += hyde_resp.input_tokens.unwrap_or(0);
-        hyde_output += hyde_resp.output_tokens.unwrap_or(0);
-        let hyde_passage = strip_think_tags(&hyde_resp.content);
-        info!(hyde_len = hyde_passage.len(), "HyDE passage generated");
-
-        // Use the hypothetical passage as a BM25 search query (token overlap with real docs)
-        let hyde_hits = backend_search(backend, &hyde_passage, std::cmp::min(k as usize, 5), rt);
-        for hit in hyde_hits {
-            if seen_docids.insert(hit.docid.clone()) {
-                let snippet = hit.snippet.as_deref().unwrap_or("");
-                let preview: String = snippet.chars().take(300).collect();
-                context_text.push_str(&format!("docid={}: {}\n", hit.docid, preview));
-                all_hits.push(serde_json::json!({
-                    "docid": hit.docid,
-                    "snippet": snippet,
-                }));
-            }
-        }
-        total_queries += 1;
-    }
-
     // --- Pseudo-relevance feedback: extract distinctive terms from top snippets ---
     let prf_terms = {
         let mut term_freq: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -1002,8 +964,8 @@ fn pre_search(
         content: refine_prompt,
     }];
 
-    let mut total_input = input_tokens + hyde_input;
-    let mut total_output = output_tokens + hyde_output;
+    let mut total_input = input_tokens;
+    let mut total_output = output_tokens;
 
     if let Ok(resp2) = rt.block_on(async { llm.chat_with_options(&refine_messages, Some(model), Some(false)).await }) {
         total_input += resp2.input_tokens.unwrap_or(0);
