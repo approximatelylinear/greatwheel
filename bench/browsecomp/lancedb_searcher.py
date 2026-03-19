@@ -226,7 +226,8 @@ def build_index(args):
             docids = [docids[i] for i in keep]
             texts = [texts[i] for i in keep]
 
-        truncated = [t[:8192] for t in texts]
+        # Prepend search_document: prefix for nomic-embed-text asymmetric retrieval
+        truncated = [f"search_document: {t[:8192]}" for t in texts]
         embeddings = embed_texts(truncated, args.ollama_url, args.embedding_model)
 
         data = pa.table(
