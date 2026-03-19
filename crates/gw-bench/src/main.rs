@@ -25,11 +25,25 @@ use gw_runtime::{extract_code_blocks, extract_final_answer, json_to_object, Agen
 // -------------------------------------------------------------------------- //
 
 #[derive(Debug, Clone, Serialize)]
+struct TimingInfo {
+    total_ms: u64,
+    bm25_ms: u64,
+    embed_ms: u64,
+    vector_ms: u64,
+    llm_query_ms: u64,
+    get_doc_ms: u64,
+    root_llm_ms: u64,
+    other_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct RunRecord {
     metadata: RunMetadata,
     query_id: Option<String>,
     tool_call_counts: HashMap<String, u32>,
     usage: UsageInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timing: Option<TimingInfo>,
     status: String,
     retrieved_docids: Vec<String>,
     result: Vec<ResultEntry>,
@@ -118,6 +132,12 @@ struct BrowseCompBridge {
     max_search_calls: u32,
     start_time: std::time::Instant,
     timeout_secs: u64,
+    // Timing (cumulative milliseconds)
+    timing_bm25_ms: u64,
+    timing_embed_ms: u64,
+    timing_vector_ms: u64,
+    timing_llm_ms: u64,
+    timing_get_doc_ms: u64,
 }
 
 impl BrowseCompBridge {
@@ -142,6 +162,11 @@ impl BrowseCompBridge {
             max_search_calls: 20,
             start_time: std::time::Instant::now(),
             timeout_secs: 150,
+            timing_bm25_ms: 0,
+            timing_embed_ms: 0,
+            timing_vector_ms: 0,
+            timing_llm_ms: 0,
+            timing_get_doc_ms: 0,
         }
     }
 
@@ -196,46 +221,63 @@ impl BrowseCompBridge {
             SearchBackend::Native { searcher } => {
                 let searcher = searcher.clone();
                 let llm = self.llm.clone();
-                self.rt.block_on(async {
+                let (corpus_hits, embed_ms, vector_ms, bm25_ms) = self.rt.block_on(async {
+                    let mut embed_ms = 0u64;
+                    let mut vector_ms = 0u64;
+                    let mut bm25_ms = 0u64;
                     let corpus_hits = match mode_str.as_str() {
                         "vector" => {
+                            let t0 = std::time::Instant::now();
                             let vecs = llm.embed_queries(&[query_str.clone()]).await.map_err(|e| {
                                 AgentError::HostFunction {
                                     function: "search".into(),
                                     message: format!("embed error: {e}"),
                                 }
                             })?;
+                            embed_ms = t0.elapsed().as_millis() as u64;
                             let vec = vecs.into_iter().next().unwrap_or_default();
-                            searcher.search_vector(vec, k).await.map_err(|e| {
+                            let t1 = std::time::Instant::now();
+                            let hits = searcher.search_vector(vec, k).await.map_err(|e| {
                                 AgentError::HostFunction {
                                     function: "search".into(),
                                     message: format!("{e}"),
                                 }
-                            })?
+                            })?;
+                            vector_ms = t1.elapsed().as_millis() as u64;
+                            hits
                         }
                         "hybrid" => {
+                            let t0 = std::time::Instant::now();
                             let vecs = llm.embed_queries(&[query_str.clone()]).await.map_err(|e| {
                                 AgentError::HostFunction {
                                     function: "search".into(),
                                     message: format!("embed error: {e}"),
                                 }
                             })?;
+                            embed_ms = t0.elapsed().as_millis() as u64;
                             let vec = vecs.into_iter().next().unwrap_or_default();
-                            searcher.search_hybrid(&query_str, vec, k).await.map_err(|e| {
+                            let t1 = std::time::Instant::now();
+                            let hits = searcher.search_hybrid(&query_str, vec, k).await.map_err(|e| {
                                 AgentError::HostFunction {
                                     function: "search".into(),
                                     message: format!("{e}"),
                                 }
-                            })?
+                            })?;
+                            // hybrid internally does BM25 + vector, but we measure the whole thing
+                            vector_ms = t1.elapsed().as_millis() as u64;
+                            hits
                         }
                         _ => {
                             // Default to boosted BM25
-                            searcher.search_bm25_boosted(&query_str, k).map_err(|e| {
+                            let t0 = std::time::Instant::now();
+                            let hits = searcher.search_bm25_boosted(&query_str, k).map_err(|e| {
                                 AgentError::HostFunction {
                                     function: "search".into(),
                                     message: format!("{e}"),
                                 }
-                            })?
+                            })?;
+                            bm25_ms = t0.elapsed().as_millis() as u64;
+                            hits
                         }
                     };
                     let hits: Vec<SearchHit> = corpus_hits
@@ -246,8 +288,12 @@ impl BrowseCompBridge {
                             snippet: Some(h.text),
                         })
                         .collect();
-                    Ok::<_, AgentError>(hits)
-                })?
+                    Ok::<_, AgentError>((hits, embed_ms, vector_ms, bm25_ms))
+                })?;
+                self.timing_embed_ms += embed_ms;
+                self.timing_vector_ms += vector_ms;
+                self.timing_bm25_ms += bm25_ms;
+                corpus_hits
             }
         };
 
@@ -279,6 +325,7 @@ impl BrowseCompBridge {
 
     #[tracing::instrument(name = "host_function", skip(self), fields(function = "get_document"))]
     fn get_document(&mut self, docid: &str) -> Result<Object, AgentError> {
+        let t0 = std::time::Instant::now();
         if self.is_timed_out() {
             return Ok(Object::String("[timeout]".into()));
         }
@@ -325,11 +372,13 @@ impl BrowseCompBridge {
             }
         };
 
+        self.timing_get_doc_ms += t0.elapsed().as_millis() as u64;
         Ok(Object::String(text))
     }
 
     #[tracing::instrument(name = "host_function", skip(self, prompt), fields(function = "llm_query", gw.input_tokens, gw.output_tokens))]
     fn llm_query(&mut self, prompt: &str) -> Result<Object, AgentError> {
+        let t0 = std::time::Instant::now();
         if self.is_timed_out() {
             return Ok(Object::String("[timeout — provide your best answer now]".into()));
         }
@@ -360,6 +409,7 @@ impl BrowseCompBridge {
         tracing::Span::current().record("gw.input_tokens", resp.input_tokens.unwrap_or(0) as u64);
         tracing::Span::current().record("gw.output_tokens", resp.output_tokens.unwrap_or(0) as u64);
 
+        self.timing_llm_ms += t0.elapsed().as_millis() as u64;
         Ok(Object::String(resp.content))
     }
 
@@ -420,6 +470,23 @@ impl BrowseCompBridge {
             .collect();
 
         Ok(Object::List(response_strings))
+    }
+
+    /// Log a timing summary for this query.
+    fn log_timing_summary(&self) {
+        let total = self.start_time.elapsed().as_millis() as u64;
+        let accounted = self.timing_bm25_ms + self.timing_embed_ms + self.timing_vector_ms
+            + self.timing_llm_ms + self.timing_get_doc_ms;
+        info!(
+            total_ms = total,
+            bm25_ms = self.timing_bm25_ms,
+            embed_ms = self.timing_embed_ms,
+            vector_ms = self.timing_vector_ms,
+            llm_query_ms = self.timing_llm_ms,
+            get_doc_ms = self.timing_get_doc_ms,
+            other_ms = total.saturating_sub(accounted),
+            "Bridge timing summary"
+        );
     }
 }
 
@@ -1503,6 +1570,8 @@ fn run_single_query(
         }
     };
 
+    let query_start = std::time::Instant::now();
+
     let bridge = BrowseCompBridge::new(
         backend,
         cli.k,
@@ -1528,17 +1597,29 @@ fn run_single_query(
         .ok();
 
     // Pre-search: decompose query into sub-facts and run diverse searches
+    let pre_search_start = std::time::Instant::now();
     let (context_hits, context_text, pre_input, pre_output) =
         pre_search(llm, &cli.model, query_text, &pre_search_backend, cli.k, rt);
+    let pre_search_ms = pre_search_start.elapsed().as_millis() as u64;
 
     // Inject context as ouros variable (list of {docid, snippet} dicts)
     let context_obj = json_to_object(serde_json::Value::Array(context_hits));
     agent.set_variable("context", context_obj).ok();
 
+    let rlm_start = std::time::Instant::now();
     let (status, result_entries, input_tokens, output_tokens, trajectory) =
         run_rlm_loop(llm, &cli.model, &mut agent, query_text, cli.max_turns, rt, &context_text);
+    let rlm_ms = rlm_start.elapsed().as_millis() as u64;
+    let total_ms = query_start.elapsed().as_millis() as u64;
     let input_tokens = input_tokens + pre_input;
     let output_tokens = output_tokens + pre_output;
+
+    info!(
+        total_ms,
+        pre_search_ms,
+        rlm_loop_ms = rlm_ms,
+        "Query timing breakdown"
+    );
 
     // Record status and answer on the rlm.question span
     tracing::Span::current().record("gw.status", &status.as_str());
@@ -1570,6 +1651,7 @@ fn run_single_query(
             output_tokens,
             total_tokens: input_tokens + output_tokens,
         },
+        timing: None,
         status,
         retrieved_docids: Vec::new(), // TODO: extract from bridge
         result: result_entries,
