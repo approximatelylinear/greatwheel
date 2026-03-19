@@ -45,6 +45,13 @@ mar16-widepresearch	0.2667	~12	154344	discard	Wider pre-search (8+5 queries, ful
 mar16-hybridsearch	0.2333	~12	108647	discard	Hybrid default search() in REPL. 7/30, vector search adds no value
 mar16-searchcoach	0.2333	~12	126580	discard	Search query coaching in prompt. 7/30, high run-to-run variance dominates
 f6d4868	0.3667	~12	149481	NEW-BEST	Boosted BM25 (phrase+AND+OR) + HyDE passage + PRF terms. 11/30 — new all-time best!
+f6d4868-repro	0.3000	~12	152215	keep	Reproducibility run. 9/30
+ablate-nohyde	0.3667	~12	168311	keep	Ablation: no HyDE. 11/30 — HyDE not contributing
+ablate-noprf	0.3000	~12	150822	keep	Ablation: no PRF. 9/30
+ablate-noboosted	0.2667	~12	135541	keep	Ablation: naive BM25. 8/30 — boosted BM25 biggest contributor
+483189f-sick	0.0667	~12	31787	discard	V1-V4 (Ollama was sick). 2/30 — invalid
+483189f-retry	0.2333	~12	168595	discard	V1-V4 unprefixed docs. 7/30 — prefix mismatch hurts vector recall
+v1234-prefixed	0.3000	~12	141325	keep	V1-V4 with search_document: prefix. 9/30 — vector search adds no value even with proper prefixes
 f6d4868-repro	0.3000	~12	152215	keep	Reproducibility run of f6d4868. 9/30 (variance: 9-11 range, mean ~10)
 ablate-nohyde	0.3667	~12	168311	keep	Ablation: no HyDE (boosted BM25 + PRF only). 11/30 — HyDE not contributing
 ablate-noprf	0.3000	~12	150822	keep	Ablation: no PRF (boosted BM25 + HyDE only). 9/30 — PRF provides ~1-2 query lift

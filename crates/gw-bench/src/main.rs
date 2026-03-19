@@ -228,7 +228,7 @@ impl BrowseCompBridge {
                     let corpus_hits = match mode_str.as_str() {
                         "vector" => {
                             let t0 = std::time::Instant::now();
-                            let vecs = llm.embed_queries(&[query_str.clone()]).await.map_err(|e| {
+                            let vecs = llm.embed(&[query_str.clone()]).await.map_err(|e| {
                                 AgentError::HostFunction {
                                     function: "search".into(),
                                     message: format!("embed error: {e}"),
@@ -248,7 +248,7 @@ impl BrowseCompBridge {
                         }
                         "hybrid" => {
                             let t0 = std::time::Instant::now();
-                            let vecs = llm.embed_queries(&[query_str.clone()]).await.map_err(|e| {
+                            let vecs = llm.embed(&[query_str.clone()]).await.map_err(|e| {
                                 AgentError::HostFunction {
                                     function: "search".into(),
                                     message: format!("embed error: {e}"),
