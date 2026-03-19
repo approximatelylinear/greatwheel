@@ -1,12 +1,16 @@
 # BrowseComp-Plus Experiment Designs
 
-## Current Best: 30% (9/30) — retrieval-v1 / hybrid-aug
-- qwen3.5:9b, 12 turns, k=10, 5 pre-search BM25 queries, search decomposition prompt
-- Competitive with frontier models + premium embeddings (Mixedbread blog: 33-38%)
+## Current Best: 36.7% (11/30) — commit f6d4868
+
+Boosted BM25 (phrase+AND+OR) + PRF + doc-grounded prompts.
+Reproducibility range: 9-11/30 across runs (mean ~10).
 
 ## What We've Learned
 
 ### Things that help
+- **Boosted BM25** (phrase match 4x, slop 2x, AND 1.5x, OR 1x): Biggest single contributor per ablation
+- **Pseudo-relevance feedback (PRF)**: Extract distinctive terms from round-1 snippets, use as additional queries (~1-2 query lift)
+- **Doc-grounded prompts**: Force get_document()+llm_query(), emphasize corpus-only answers
 - **More pre-search queries (1→5)**: Decomposes multi-hop queries into independent sub-fact searches
 - **k=10** (vs k=5): More retrieval breadth without overwhelming the model
 - **12 turns** (vs 6-8): Enough iterations to explore, verify, and submit
@@ -17,6 +21,8 @@
 - **Fallback extraction**: Recovers answers when model doesn't call FINAL in time
 
 ### Things that don't help (or hurt)
+- **HyDE (hypothetical document embeddings)**: Ablated out — no benefit for BM25 queries
+- **Vector search in pre-search or REPL**: Consistently no benefit across multiple experiments
 - **More context documents (>25-30)**: Dilutes signal, overwhelms 9B model attention
 - **More turns (16 vs 12)**: Model second-guesses itself, goes down rabbit holes
 - **vector_search as REPL tool**: Model over-uses it, wastes turns on noisy semantic results
@@ -24,221 +30,130 @@
 - **LLM ranking of pre-search**: Fragile parsing, adds overhead, discards useful docs
 - **Best-of-N majority voting**: Wrong answers agree more than correct ones (3x cost, same accuracy)
 - **RRF equal weighting (BM25+vector)**: Vector results dilute BM25's keyword precision
-- **Dual query generation (BM25+vector in pre-search)**: Degrades BM25 query quality, too many docs
+- **Search query coaching in prompt**: No measurable benefit over baseline
+- **Wider pre-search (8+5 queries, full k)**: Too many context docs overwhelm model
 
 ### Key insight
-The bottleneck is **retrieval** (finding the right documents), not **analysis** (understanding them). The 9B model reasons well once it has the right documents. Improvements should focus on getting better documents into context, not on how the model processes them.
+86% of failures are **retrieval** (right documents never found), not extraction. The 9B model reasons well once it has the right documents. Improvements should focus on getting better documents into context.
 
 ---
 
-## Experiment Designs
+## Planned: Vector Search Improvements (no model changes)
 
-### A. Pre-search: Adaptive k per query
+### V1. Fix search_hybrid to use boosted BM25
+- **Where:** `crates/gw-memory/src/corpus.rs` — `search_hybrid()` calls `search_bm25()`, should call `search_bm25_boosted()`
+- **Effort:** 1 line
+- **Expected impact:** Medium — compounds boosted BM25 with vector signal in hybrid mode
+- **Status:** Ready to implement
 
-**Hypothesis**: Some queries need broad retrieval (k=10+), others benefit from precision (k=3). Currently k is fixed.
+### V2. nomic-embed-text task prefixes (query side)
+- **Where:** `crates/gw-llm/src/lib.rs` embed() or call sites in gw-bench
+- **What:** Prepend `search_query: ` to query text before embedding. nomic-embed-text is trained with asymmetric prefixes (`search_query:` for queries, `search_document:` for docs). Even without re-embedding docs, the query prefix alone may improve retrieval.
+- **Effort:** Small — add prefix string at embedding call sites for search queries
+- **Expected impact:** Medium-high — known 5-15% recall improvement for nomic models
+- **Status:** Ready to implement
+- **Risk:** Documents were embedded without `search_document:` prefix; partial prefix may help or hurt
 
-**Design**: After generating 5 pre-search queries, have the LLM also rate each query's expected specificity (1-5). Use higher k for vague queries, lower k for specific ones. E.g., "Tim Ellis Relativity Space" → k=3, "rocket company Pacific Northwest" → k=8.
+### V3. Weighted RRF (BM25-favored fusion)
+- **Where:** `crates/gw-memory/src/fusion.rs` + `crates/gw-memory/src/corpus.rs`
+- **What:** Give BM25 results higher weight in RRF. Options:
+  - Double BM25 results in RRF input (count each BM25 hit twice)
+  - Add per-list weight parameter to `reciprocal_rank_fusion()`
+  - Use asymmetric k constants (lower k for BM25 = steeper rank decay = more weight)
+- **Effort:** Small
+- **Expected impact:** Medium — BM25 is demonstrably stronger, shouldn't be diluted by equal-weight fusion
+- **Status:** Ready to implement
 
-**Expected effect**: Reduces noise for specific queries while maintaining recall for broad ones. Should keep context at ~25 docs.
+### V4. LanceDB nprobes tuning
+- **Where:** `crates/gw-memory/src/corpus.rs` — `search_vector()` LanceDB query
+- **What:** Increase nprobes for IVF-PQ search. Default is often low (10-20). Try 50-100 for better recall at slight latency cost.
+- **Effort:** Small — add `.nprobes(N)` to vector search query builder
+- **Expected impact:** Low-medium — depends on current default and index geometry
+- **Status:** Ready to implement
 
-**Risk**: Extra LLM call overhead. Specificity rating may not correlate with retrieval quality.
+### V5. Query reformulation before vector embedding
+- **Where:** `crates/gw-bench/src/main.rs` — bridge `search_with_mode()` for "hybrid"/"vector"
+- **What:** Before embedding a keyword query for vector search, reformulate as natural language. The agent generates keyword queries like `"convent Michigan 1932"` that embed poorly. Reformulate to `"A convent in Michigan established around 1932"` for better semantic matching.
+- **Options:**
+  - Fast LLM call (adds latency but high quality)
+  - Template-based expansion (no latency: prepend "Find documents about" or expand abbreviations)
+  - Cache reformulations per query session to avoid repeated LLM calls
+- **Effort:** Medium
+- **Expected impact:** Medium — better query-doc alignment in embedding space
+- **Status:** Needs design
 
----
+### V6. Re-embed documents with search_document prefix
+- **Where:** LanceDB index rebuild pipeline (bench/browsecomp/lancedb_searcher.py or equivalent)
+- **What:** Re-embed all 100K documents with `search_document: ` prefix for nomic-embed-text. Combined with V2 (query prefix), gives full asymmetric retrieval benefit.
+- **Effort:** Large — full re-indexing, ~hours with Ollama embedding at 100K docs
+- **Expected impact:** High — completes the nomic task-prefix story
+- **Status:** Blocked on V2 results (only worth rebuilding if query prefix alone shows promise)
 
-### B. Pre-search: Iterative query reformulation (no filtering)
-
-**Hypothesis**: Round-1 results can inform better round-2 queries, but we should ADD round-2 results rather than REPLACE round-1 results (filtering is lossy).
-
-**Design**:
-1. Round 1: Generate 5 queries, search, keep ALL results
-2. Round 2: Show the LLM the query + round-1 snippets. Ask for 3 NEW queries targeting UNCOVERED facts only. Add round-2 results to context (no filtering of round-1)
-3. Cap total context at 30 documents (drop lowest-ranked docs from round-1 if over limit)
-
-**Key difference from refine-add (failed)**: Cap at 30 docs prevents context dilution. Drop by BM25 rank, not by LLM filtering.
-
-**Expected effect**: More diverse retrieval without context explosion. Estimated 25-35 context docs.
-
-**Risk**: Capping by rank may drop relevant low-ranked docs. Marginal improvement over just using 5 good initial queries.
-
----
-
-### C. Pre-search: Entity-focused decomposition
-
-**Hypothesis**: Current pre-search generates 5 generic keyword queries. Many BrowseComp queries contain 3-5 entities (person, place, event, organization, work). Explicitly extracting and searching for each entity may improve recall.
-
-**Design**: Change the pre-search LLM prompt from "output 5 search queries" to:
-```
-Extract all named entities from this question (people, places, organizations, events, works, dates).
-For each entity, output a BM25 search query (2-4 words).
-Format: ENTITY_TYPE: search query
-```
-Then search for each entity separately with k=5.
-
-**Expected effect**: More systematic coverage of query sub-facts. Prevents the LLM from generating overlapping queries.
-
-**Risk**: Some entities may not be searchable (too generic). May miss non-entity facts (e.g., "served as Vice President").
-
----
-
-### D. REPL: Guided search strategy per turn
-
-**Hypothesis**: The model sometimes wastes turns repeating similar searches or doing unproductive analysis. Explicit per-turn guidance could steer it more effectively.
-
-**Design**: Replace generic iteration prompts with phase-specific prompts:
-- **Turns 1-3 (EXPLORE)**: "Focus on searching. Run at least 3 different searches per turn. Don't analyze yet."
-- **Turns 4-6 (ANALYZE)**: "Load the most promising documents. Use llm_query() to extract specific facts."
-- **Turns 7-9 (SYNTHESIZE)**: "Cross-reference your findings. Which candidate answers are supported by multiple documents?"
-- **Turns 10-12 (VERIFY+SUBMIT)**: "Search for your candidate answer to confirm. Then call FINAL()."
-
-**Expected effect**: Prevents premature convergence. Ensures the model explores broadly before committing.
-
-**Risk**: Rigid phases may not match all query types. Some queries are better answered with early convergence.
+### V7. Multi-vector query fusion
+- **Where:** `crates/gw-memory/src/corpus.rs` — new method
+- **What:** For a single search query, generate multiple embedding vectors (original query, expanded query, hypothetical answer) and fuse their vector search results with RRF.
+- **Effort:** Medium
+- **Expected impact:** Low-medium — HyDE already showed no benefit for BM25; may help for vector
+- **Status:** Deprioritized (HyDE ablation suggests limited value)
 
 ---
 
-### E. REPL: Parallel sub-fact investigation
+## Planned: BM25 Refinements
 
-**Hypothesis**: BrowseComp queries have multiple independent sub-facts. The model could investigate them in parallel using batch_llm_query.
+### B1. Fuzzy term matching (5th signal)
+- **Where:** `crates/gw-memory/src/corpus.rs` — `search_bm25_boosted()`
+- **What:** Add FuzzyTermQuery with edit distance 1 (boost 0.5) as 5th signal. Catches typos and morphological variants (e.g., "Gyan" matching "Gyans").
+- **Effort:** Small — tantivy has `FuzzyTermQuery`
+- **Expected impact:** Low — may help with name misspellings in rare cases
+- **Status:** Ready to implement
 
-**Design**: Add an explicit prompt pattern:
-```
-For multi-part queries, investigate each sub-fact independently:
-1. Search for each sub-fact separately
-2. Use batch_llm_query() to analyze multiple documents simultaneously
-3. Cross-reference: which entity appears in documents from DIFFERENT sub-facts?
-```
-The cross-referencing step is key — the answer is often the entity that connects multiple sub-facts.
-
-**Expected effect**: More efficient use of turns. Cross-referencing could identify correct answers that single-fact searches miss.
-
-**Risk**: batch_llm_query adds token cost. Cross-referencing logic may be too complex for 9B model.
-
----
-
-### F. Context: Snippet quality improvement
-
-**Hypothesis**: Pre-search snippets are truncated at 300 chars from document start. Many documents have irrelevant headers/metadata at the start. Better snippet extraction could improve the model's ability to identify relevant docs.
-
-**Design**: Instead of `snippet[:300]`, extract the most relevant 300-char window:
-1. In search_server.py, for each BM25 hit, find the paragraph containing the most query term matches
-2. Return that paragraph as the snippet (centered on the best match)
-3. Alternatively, return the first 300 chars after stripping markdown headers/metadata
-
-**Expected effect**: More informative snippets help the model decide which documents to load with get_document().
-
-**Risk**: Server-side changes. Paragraph extraction adds latency. May not matter since model already uses get_document().
+### B2. Document field boosting (BM25f)
+- **Where:** `crates/gw-memory/src/corpus.rs` — index schema + search
+- **What:** Extract title/heading from web documents at index time. Add separate tantivy fields with higher boost. BrowseComp docs are web pages — `<title>` and `<h1>` are high-signal.
+- **Effort:** Large — requires corpus analysis + re-indexing
+- **Expected impact:** Medium — titles are high-signal for entity matching
+- **Status:** Needs corpus structure analysis
 
 ---
 
-### G. Retrieval: Query expansion with synonyms
+## Planned: Agent/Prompt Improvements
 
-**Hypothesis**: BM25 misses documents that use different terminology. Query expansion with synonyms or related terms could improve recall.
+### A1. Iterative search budget enforcement
+- **What:** Track unique search queries per question. If < 5 by iteration 4, force more searching before allowing FINAL().
+- **Where:** `crates/gw-bench/src/main.rs` — iteration prompts + bridge tracking
+- **Effort:** Medium
+- **Expected impact:** Low-medium — addresses under-searching
 
-**Design**: For each pre-search query, generate 2-3 synonym variants:
-- "Vice President born Maine" → also search "VP born Maine", "vice-president Maine"
-- Use the LLM to generate variants, or use a simple rule-based approach (abbreviations, alternate spellings)
+### A2. Answer type classification
+- **What:** Classify expected answer type (person, place, date, number, etc.) before REPL loop. Inject into prompt.
+- **Effort:** Low — one LLM call
+- **Expected impact:** Low-medium — focuses extraction
 
-**Expected effect**: Catches documents that use different terminology for the same concept.
+### A3. Larger model for main loop
+- **What:** Use qwen2.5:32b or qwen3.5:32b for main rLM loop (keep 9B for utility calls).
+- **Effort:** Small config change, large latency increase
+- **Expected impact:** High — better reasoning → better queries + extraction
+- **Status:** Requires GPU memory assessment
 
-**Risk**: Query explosion (5 queries × 3 variants = 15 searches). Most BM25 misses are due to missing content, not terminology mismatch.
-
----
-
-### H. Model: Thinking budget allocation
-
-**Hypothesis**: The model uses thinking tokens (when enabled) even for simple searches, wasting budget. Selectively enabling thinking for hard analysis steps could improve quality/cost ratio.
-
-**Design**:
-- `think:false` for pre-search query generation (already done)
-- `think:false` for early exploration turns (1-3) where the model is just searching
-- `think:true` for analysis turns (4+) where reasoning matters
-- `think:false` for fallback extraction (already done)
-
-**Expected effect**: Saves ~50% of thinking tokens. Better reasoning on hard analysis steps.
-
-**Risk**: Think mode affects output quality unpredictably with qwen3.5. The `/no_think` suffix in system prompt may already handle this.
-
----
-
-### I. Ensemble: Config-diverse runs with union scoring
-
-**Hypothesis**: Different configurations find different queries correct. Union across configs could yield 40%+ accuracy.
-
-**Design**: Run 3 configurations that have shown complementary correct sets:
-1. retrieval-v1 (best overall): Q159, Q175, Q191, Q464, Q469, Q797, Q830, Q853, Q885
-2. refine-filter (gains Q572, Q643): Q159, Q191, Q464, Q572, Q643, Q797, Q885
-3. dspy-v1 (gains Q1128): Q159, Q175, Q191, Q464, Q572, Q797, Q830, Q1128
-
-Union: Q159, Q175, Q191, Q464, Q469, Q572, Q643, Q797, Q830, Q853, Q885, Q1128 = **12/30 (40%)**
-
-For each query, run all 3 configs and pick the answer that appears most (or any non-"Unable to determine" answer).
-
-**Expected effect**: 40% accuracy from existing configurations without new model improvements.
-
-**Risk**: 3x compute cost. Need a good meta-strategy for picking among disagreeing answers.
-
----
-
-### J. Retrieval: Document re-ranking with cross-encoder
-
-**Hypothesis**: BM25 retrieves broadly but ranks imprecisely. A cross-encoder could re-rank top-k results for better precision.
-
-**Design**: After BM25 retrieves k=20 results, use a cross-encoder model (e.g., via Ollama or a small local model) to score each (query, document) pair and re-rank. Keep top 10.
-
-**Expected effect**: More relevant documents in top positions. Better signal-to-noise in context.
-
-**Risk**: Cross-encoder inference adds latency. Need a good cross-encoder model that runs locally. Previous LLM-based ranking (ranking-v1) failed due to parsing fragility — a dedicated cross-encoder avoids that issue.
-
----
-
-### K. Pre-search: Two-phase with gold document detection
-
-**Hypothesis**: Some pre-search results are very likely to contain the answer ("gold documents"). Detecting these early and loading them fully could improve accuracy.
-
-**Design**:
-1. Pre-search as normal (5 queries, k=5 each)
-2. For each result, compute a "gold score" based on: number of query terms in snippet, snippet length, title relevance
-3. Auto-load the top 3 "gold" documents with get_document() before the REPL loop
-4. Inject loaded documents as additional context variables (e.g., `gold_doc_1`, `gold_doc_2`)
-
-**Expected effect**: Model starts with full text of most promising documents instead of just snippets.
-
-**Risk**: Loading 3 full documents adds ~24K chars to context. May overwhelm the model if documents are large.
-
----
-
-### L. Prompt: Answer type classification
-
-**Hypothesis**: Knowing the expected answer type (person, place, date, number, organization) could help the model focus its search and extraction.
-
-**Design**: Before the REPL loop, classify the query into answer types:
-```
-What type of answer does this question expect?
-A) Person name  B) Place/location  C) Date/time  D) Number  E) Organization  F) Other
-```
-Inject the answer type into the system prompt: "The answer is expected to be a PERSON NAME."
-
-**Expected effect**: Helps the model focus extraction. Prevents answers like "Episode 2" when the question asks for a person.
-
-**Risk**: Misclassification could mislead. BrowseComp queries often have non-obvious answer types.
+### A4. Config-diverse ensemble with union scoring
+- **What:** Run 2-3 diverse configurations per query, take union of correct answers.
+- **Expected impact:** High — historical union across configs reaches ~40%
+- **Cost:** 2-3x compute
+- **Status:** Needs orchestration code
 
 ---
 
 ## Priority Ranking
 
-Based on our experimental history, ranked by expected impact and feasibility:
-
-| Priority | Experiment | Expected Impact | Cost | Rationale |
-|----------|-----------|----------------|------|-----------|
-| 1 | **I. Ensemble** | High (40%) | 3x compute | Guaranteed improvement from known correct sets |
-| 2 | **C. Entity decomposition** | Medium | Low | Better pre-search targeting, addresses retrieval bottleneck |
-| 3 | **B. Iterative reformulation (capped)** | Medium | Low | Addresses gaps without dilution, simple to implement |
-| 4 | **D. Guided search phases** | Medium | None | Better turn utilization, no extra compute |
-| 5 | **L. Answer type classification** | Medium | Low | Focuses extraction, cheap LLM call |
-| 6 | **F. Snippet quality** | Medium | Low | Better doc selection, addresses retrieval |
-| 7 | **K. Gold document detection** | Medium | Medium | Gives model full text early, risky context size |
-| 8 | **E. Parallel sub-facts** | Low-Medium | Medium | Efficient but complex for 9B model |
-| 9 | **H. Thinking budget** | Low | None | Marginal optimization |
-| 10 | **A. Adaptive k** | Low | Low | Over-engineering for small effect |
-| 11 | **G. Query expansion** | Low | Medium | Most misses are content gaps, not terminology |
-| 12 | **J. Cross-encoder** | Medium | High | Good idea but needs infrastructure |
+| Priority | Experiment | Expected Impact | Effort | Rationale |
+|----------|-----------|----------------|--------|-----------|
+| **1** | V1. Hybrid uses boosted BM25 | Medium | Trivial | Free improvement, 1 line |
+| **2** | V2. nomic query prefix | Medium-High | Small | Known technique, easy to test |
+| **3** | V3. Weighted RRF | Medium | Small | BM25 shouldn't be diluted |
+| **4** | V4. LanceDB nprobes | Low-Medium | Small | Easy to test |
+| **5** | V5. Query reformulation | Medium | Medium | Better embedding alignment |
+| **6** | B1. Fuzzy matching | Low | Small | Marginal but easy |
+| **7** | A4. Ensemble | High | Medium | Guaranteed from known sets |
+| **8** | A3. Larger model | High | Small | Biggest ceiling lift |
+| **9** | V6. Re-embed with prefix | High | Large | Only after V2 validates |
+| **10** | B2. Field boosting | Medium | Large | Requires re-indexing |
