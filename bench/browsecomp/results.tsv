@@ -45,3 +45,7 @@ mar16-widepresearch	0.2667	~12	154344	discard	Wider pre-search (8+5 queries, ful
 mar16-hybridsearch	0.2333	~12	108647	discard	Hybrid default search() in REPL. 7/30, vector search adds no value
 mar16-searchcoach	0.2333	~12	126580	discard	Search query coaching in prompt. 7/30, high run-to-run variance dominates
 f6d4868	0.3667	~12	149481	NEW-BEST	Boosted BM25 (phrase+AND+OR) + HyDE passage + PRF terms. 11/30 — new all-time best!
+f6d4868-repro	0.3000	~12	152215	keep	Reproducibility run of f6d4868. 9/30 (variance: 9-11 range, mean ~10)
+ablate-nohyde	0.3667	~12	168311	keep	Ablation: no HyDE (boosted BM25 + PRF only). 11/30 — HyDE not contributing
+ablate-noprf	0.3000	~12	150822	keep	Ablation: no PRF (boosted BM25 + HyDE only). 9/30 — PRF provides ~1-2 query lift
+ablate-noboosted	0.2667	~12	135541	keep	Ablation: naive BM25 (HyDE + PRF only). 8/30 — boosted BM25 is the biggest contributor
