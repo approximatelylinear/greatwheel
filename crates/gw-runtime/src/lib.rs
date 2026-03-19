@@ -335,14 +335,30 @@ pub fn extract_code_blocks(text: &str) -> Vec<String> {
     blocks
 }
 
-/// Check if LLM output contains a FINAL() or FINAL_VAR() directive outside code.
+/// Check if LLM output contains a FINAL() or FINAL_VAR() directive outside code blocks.
+/// Skips content inside ```...``` fenced blocks to avoid capturing FINAL(variable_name)
+/// from code that should be executed instead.
 pub fn extract_final_answer(text: &str) -> Option<String> {
+    let mut in_code_block = false;
     for line in text.lines() {
         let trimmed = line.trim();
-        // FINAL(answer) outside of code blocks
+        // Track fenced code blocks
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            continue;
+        }
+        if in_code_block {
+            continue;
+        }
+        // FINAL("literal answer") outside of code blocks — only match quoted strings
         if let Some(rest) = trimmed.strip_prefix("FINAL(") {
             if let Some(answer) = rest.strip_suffix(')') {
-                return Some(answer.trim().trim_matches('"').trim_matches('\'').to_string());
+                let clean = answer.trim().trim_matches('"').trim_matches('\'');
+                // Only accept if the argument was quoted (literal string, not a variable name)
+                if answer.trim().starts_with('"') || answer.trim().starts_with('\'') {
+                    return Some(clean.to_string());
+                }
+                // Unquoted — likely a variable reference, skip (let code execution handle it)
             }
         }
         // FINAL_VAR(variable_name) — handled by the caller reading from session
