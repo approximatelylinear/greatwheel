@@ -8,7 +8,7 @@ Reproducibility range: 9-11/30 across runs (mean ~10).
 ## What We've Learned
 
 ### Things that help
-- **Boosted BM25** (phrase match 4x, slop 2x, AND 1.5x, OR 1x): Biggest single contributor per ablation
+- **Boosted BM25** (phrase match 4x, slop 2x, AND 1.5x, OR 1x): Biggest single contributor per ablation (+2-3 queries vs naive BM25)
 - **Pseudo-relevance feedback (PRF)**: Extract distinctive terms from round-1 snippets, use as additional queries (~1-2 query lift)
 - **Doc-grounded prompts**: Force get_document()+llm_query(), emphasize corpus-only answers
 - **More pre-search queries (1→5)**: Decomposes multi-hop queries into independent sub-fact searches
@@ -22,124 +22,144 @@ Reproducibility range: 9-11/30 across runs (mean ~10).
 
 ### Things that don't help (or hurt)
 - **HyDE (hypothetical document embeddings)**: Ablated out — no benefit for BM25 queries
-- **Vector search in pre-search or REPL**: Consistently no benefit across multiple experiments
+- **Vector search — all variants tested**: See "Vector Search Findings" below
 - **More context documents (>25-30)**: Dilutes signal, overwhelms 9B model attention
 - **More turns (16 vs 12)**: Model second-guesses itself, goes down rabbit holes
 - **vector_search as REPL tool**: Model over-uses it, wastes turns on noisy semantic results
 - **Python analysis emphasis**: Analysis isn't the bottleneck — retrieval is
 - **LLM ranking of pre-search**: Fragile parsing, adds overhead, discards useful docs
 - **Best-of-N majority voting**: Wrong answers agree more than correct ones (3x cost, same accuracy)
-- **RRF equal weighting (BM25+vector)**: Vector results dilute BM25's keyword precision
 - **Search query coaching in prompt**: No measurable benefit over baseline
 - **Wider pre-search (8+5 queries, full k)**: Too many context docs overwhelm model
 
+### Vector Search Findings (mar16-mar19)
+
+We ran an extensive set of vector search experiments. **None improved accuracy over BM25-only.**
+
+| Experiment | What we tried | Result |
+|---|---|---|
+| Hybrid BM25+vector pre-search | Vector search during pre-search phase | 7/30, same as baseline, +53% tokens |
+| Hybrid default search() in REPL | Agent's search() uses hybrid instead of BM25 | 7/30, no improvement |
+| V1: Hybrid uses boosted BM25 | `search_hybrid()` calls `search_bm25_boosted()` | Tested as part of V1-V4 bundle |
+| V2: nomic query prefix | Prepend `search_query:` to queries before embedding | Tested as part of V1-V4 bundle |
+| V3: Weighted RRF (2x BM25) | BM25 results counted twice in RRF fusion | Tested as part of V1-V4 bundle |
+| V4: LanceDB nprobes=50 | Increase IVF-PQ probes for better recall | Tested as part of V1-V4 bundle |
+| V1-V4 bundle (unprefixed docs) | All four changes, docs without `search_document:` prefix | 7/30 — prefix mismatch hurts |
+| V6: Re-embed with prefix | 100K docs re-embedded with `search_document:` prefix (37 min) | Done, table: `browsecomp_docs_prefixed` |
+| V1-V4 bundle (prefixed docs) | All four changes, docs with proper prefix | **9/30** — still no improvement over BM25-only (9-11/30) |
+
+**Conclusion:** Vector search with nomic-embed-text adds no value on BrowseComp, even with:
+- Proper asymmetric prefixes (`search_query:`/`search_document:`)
+- BM25-weighted RRF fusion
+- Increased nprobes for better ANN recall
+- Boosted BM25 in the hybrid path
+
+Possible explanations:
+1. BrowseComp queries are entity-heavy (names, dates, places) — BM25 keyword matching is naturally strong here
+2. nomic-embed-text (768d) may lack the semantic discrimination needed for 100K docs
+3. The RRF fusion adds noise — documents retrieved by vector but not BM25 tend to be irrelevant
+4. The 9B model generates keyword-style search queries that don't benefit from semantic matching
+
+**Recommendation:** Use boosted BM25 only for search. Vector search adds latency without accuracy gains. The `embed_queries()` helper and prefixed LanceDB table (`browsecomp_docs_prefixed`) remain available if we want to revisit with a different embedding model.
+
+### Timing Profile (mar19)
+
+Per-query timing breakdown (avg across 30 queries, V1-V4 prefixed run):
+- **Total: 115s** per query
+- **Pre-search: 12s** (10%) — LLM query decomposition + BM25 searches + PRF
+- **rLM loop: 103s** (90%) — 12-iteration agent loop (dominated by LLM inference)
+- **Embedding: ~20ms** per call (warm) — not a bottleneck
+- **LanceDB ANN: ~5-8ms** per call (warm) — not a bottleneck
+
+The bottleneck is LLM inference in the rLM loop, not search latency.
+
 ### Key insight
-86% of failures are **retrieval** (right documents never found), not extraction. The 9B model reasons well once it has the right documents. Improvements should focus on getting better documents into context.
+86% of failures are **retrieval** (right documents never found), not extraction. The 9B model reasons well once it has the right documents. However, vector search doesn't help with retrieval on this benchmark — the missing documents lack keyword overlap AND semantic overlap with the queries.
 
 ---
 
-## Planned: Vector Search Improvements (no model changes)
+## Completed Experiments (mar16-mar19)
 
-### V1. Fix search_hybrid to use boosted BM25
-- **Where:** `crates/gw-memory/src/corpus.rs` — `search_hybrid()` calls `search_bm25()`, should call `search_bm25_boosted()`
-- **Effort:** 1 line
-- **Expected impact:** Medium — compounds boosted BM25 with vector signal in hybrid mode
-- **Status:** Ready to implement
+### Retrieval (Rust: gw-memory, gw-bench)
+- [x] **Boosted BM25** — phrase match (4x), slop phrase (2x), AND'd terms (1.5x), OR'd terms (1x). **Biggest contributor.**
+- [x] **PRF (pseudo-relevance feedback)** — distinctive snippet terms as additional queries. Worth ~1-2 queries.
+- [x] **HyDE** — hypothetical answer passage as BM25 query. **Ablated out: no benefit.**
+- [x] **Vector search (6 variants)** — all showed no improvement. See table above.
+- [x] **Wider pre-search** — 8+5 queries overwhelm model with context.
 
-### V2. nomic-embed-text task prefixes (query side)
-- **Where:** `crates/gw-llm/src/lib.rs` embed() or call sites in gw-bench
-- **What:** Prepend `search_query: ` to query text before embedding. nomic-embed-text is trained with asymmetric prefixes (`search_query:` for queries, `search_document:` for docs). Even without re-embedding docs, the query prefix alone may improve retrieval.
-- **Effort:** Small — add prefix string at embedding call sites for search queries
-- **Expected impact:** Medium-high — known 5-15% recall improvement for nomic models
-- **Status:** Ready to implement
-- **Risk:** Documents were embedded without `search_document:` prefix; partial prefix may help or hurt
+### Prompts (Rust: gw-bench)
+- [x] **Doc-grounded prompts** — force document reading + verification. Matches best.
+- [x] **Early-submit prompts** — nudge when evidence found. Slight regression.
+- [x] **Search query coaching** — BM25 formulation advice. No benefit.
 
-### V3. Weighted RRF (BM25-favored fusion)
-- **Where:** `crates/gw-memory/src/fusion.rs` + `crates/gw-memory/src/corpus.rs`
-- **What:** Give BM25 results higher weight in RRF. Options:
-  - Double BM25 results in RRF input (count each BM25 hit twice)
-  - Add per-list weight parameter to `reciprocal_rank_fusion()`
-  - Use asymmetric k constants (lower k for BM25 = steeper rank decay = more weight)
-- **Effort:** Small
-- **Expected impact:** Medium — BM25 is demonstrably stronger, shouldn't be diluted by equal-weight fusion
-- **Status:** Ready to implement
-
-### V4. LanceDB nprobes tuning
-- **Where:** `crates/gw-memory/src/corpus.rs` — `search_vector()` LanceDB query
-- **What:** Increase nprobes for IVF-PQ search. Default is often low (10-20). Try 50-100 for better recall at slight latency cost.
-- **Effort:** Small — add `.nprobes(N)` to vector search query builder
-- **Expected impact:** Low-medium — depends on current default and index geometry
-- **Status:** Ready to implement
-
-### V5. Query reformulation before vector embedding
-- **Where:** `crates/gw-bench/src/main.rs` — bridge `search_with_mode()` for "hybrid"/"vector"
-- **What:** Before embedding a keyword query for vector search, reformulate as natural language. The agent generates keyword queries like `"convent Michigan 1932"` that embed poorly. Reformulate to `"A convent in Michigan established around 1932"` for better semantic matching.
-- **Options:**
-  - Fast LLM call (adds latency but high quality)
-  - Template-based expansion (no latency: prepend "Find documents about" or expand abbreviations)
-  - Cache reformulations per query session to avoid repeated LLM calls
-- **Effort:** Medium
-- **Expected impact:** Medium — better query-doc alignment in embedding space
-- **Status:** Needs design
-
-### V6. Re-embed documents with search_document prefix
-- **Where:** LanceDB index rebuild pipeline (bench/browsecomp/lancedb_searcher.py or equivalent)
-- **What:** Re-embed all 100K documents with `search_document: ` prefix for nomic-embed-text. Combined with V2 (query prefix), gives full asymmetric retrieval benefit.
-- **Effort:** Large — full re-indexing, ~hours with Ollama embedding at 100K docs
-- **Expected impact:** High — completes the nomic task-prefix story
-- **Status:** Blocked on V2 results (only worth rebuilding if query prefix alone shows promise)
-
-### V7. Multi-vector query fusion
-- **Where:** `crates/gw-memory/src/corpus.rs` — new method
-- **What:** For a single search query, generate multiple embedding vectors (original query, expanded query, hypothetical answer) and fuse their vector search results with RRF.
-- **Effort:** Medium
-- **Expected impact:** Low-medium — HyDE already showed no benefit for BM25; may help for vector
-- **Status:** Deprioritized (HyDE ablation suggests limited value)
+### Infrastructure
+- [x] **Per-query timing breakdown** — pre_search_ms, rlm_loop_ms, bridge component timers
+- [x] **Re-embedded LanceDB index** — `browsecomp_docs_prefixed` with `search_document:` prefix (100K docs, 37 min)
 
 ---
 
-## Planned: BM25 Refinements
+## Planned Experiments
 
-### B1. Fuzzy term matching (5th signal)
+### BM25 Refinements
+
+#### B1. Fuzzy term matching (5th signal)
 - **Where:** `crates/gw-memory/src/corpus.rs` — `search_bm25_boosted()`
-- **What:** Add FuzzyTermQuery with edit distance 1 (boost 0.5) as 5th signal. Catches typos and morphological variants (e.g., "Gyan" matching "Gyans").
+- **What:** Add FuzzyTermQuery with edit distance 1 (boost 0.5) as 5th signal. Catches typos and morphological variants.
 - **Effort:** Small — tantivy has `FuzzyTermQuery`
-- **Expected impact:** Low — may help with name misspellings in rare cases
+- **Expected impact:** Low — may help with name misspellings
 - **Status:** Ready to implement
 
-### B2. Document field boosting (BM25f)
+#### B2. Document field boosting (BM25f)
 - **Where:** `crates/gw-memory/src/corpus.rs` — index schema + search
-- **What:** Extract title/heading from web documents at index time. Add separate tantivy fields with higher boost. BrowseComp docs are web pages — `<title>` and `<h1>` are high-signal.
+- **What:** Extract title/heading from web documents at index time. Add separate tantivy fields with higher boost.
 - **Effort:** Large — requires corpus analysis + re-indexing
 - **Expected impact:** Medium — titles are high-signal for entity matching
 - **Status:** Needs corpus structure analysis
 
----
+#### B3. Query expansion via LLM
+- **Where:** `crates/gw-bench/src/main.rs` — pre_search or bridge
+- **What:** Before each BM25 search, expand the query with synonyms/related terms via a fast LLM call. Different from HyDE — this targets keyword expansion, not passage generation.
+- **Effort:** Medium
+- **Expected impact:** Low-medium — addresses vocabulary mismatch
 
-## Planned: Agent/Prompt Improvements
+### Agent/Prompt Improvements
 
-### A1. Iterative search budget enforcement
+#### A1. Iterative search budget enforcement
 - **What:** Track unique search queries per question. If < 5 by iteration 4, force more searching before allowing FINAL().
 - **Where:** `crates/gw-bench/src/main.rs` — iteration prompts + bridge tracking
 - **Effort:** Medium
 - **Expected impact:** Low-medium — addresses under-searching
 
-### A2. Answer type classification
+#### A2. Answer type classification
 - **What:** Classify expected answer type (person, place, date, number, etc.) before REPL loop. Inject into prompt.
 - **Effort:** Low — one LLM call
 - **Expected impact:** Low-medium — focuses extraction
 
-### A3. Larger model for main loop
+#### A3. Larger model for main loop
 - **What:** Use qwen2.5:32b or qwen3.5:32b for main rLM loop (keep 9B for utility calls).
-- **Effort:** Small config change, large latency increase
+- **Effort:** Small config change, large latency increase (~4x slower)
 - **Expected impact:** High — better reasoning → better queries + extraction
 - **Status:** Requires GPU memory assessment
 
-### A4. Config-diverse ensemble with union scoring
+#### A4. Config-diverse ensemble with union scoring
 - **What:** Run 2-3 diverse configurations per query, take union of correct answers.
 - **Expected impact:** High — historical union across configs reaches ~40%
 - **Cost:** 2-3x compute
 - **Status:** Needs orchestration code
+
+### Alternative Retrieval
+
+#### R1. Different embedding model
+- **What:** Try a stronger embedding model (e.g., bge-large, e5-mistral) instead of nomic-embed-text
+- **Effort:** Medium — need to re-embed 100K docs
+- **Expected impact:** Unknown — vector search may benefit from better embeddings, but BrowseComp's entity-heavy nature favors BM25
+- **Status:** Deprioritized given vector search findings
+
+#### R2. Learned sparse retrieval (SPLADE-style)
+- **What:** Use a learned sparse model that outputs weighted term expansions. Combines BM25-style matching with learned term importance.
+- **Effort:** Large — needs model + index infrastructure
+- **Expected impact:** Medium-high — addresses vocabulary mismatch without the noise of dense vectors
+- **Status:** Research needed
 
 ---
 
@@ -147,13 +167,12 @@ Reproducibility range: 9-11/30 across runs (mean ~10).
 
 | Priority | Experiment | Expected Impact | Effort | Rationale |
 |----------|-----------|----------------|--------|-----------|
-| **1** | V1. Hybrid uses boosted BM25 | Medium | Trivial | Free improvement, 1 line |
-| **2** | V2. nomic query prefix | Medium-High | Small | Known technique, easy to test |
-| **3** | V3. Weighted RRF | Medium | Small | BM25 shouldn't be diluted |
-| **4** | V4. LanceDB nprobes | Low-Medium | Small | Easy to test |
-| **5** | V5. Query reformulation | Medium | Medium | Better embedding alignment |
-| **6** | B1. Fuzzy matching | Low | Small | Marginal but easy |
-| **7** | A4. Ensemble | High | Medium | Guaranteed from known sets |
-| **8** | A3. Larger model | High | Small | Biggest ceiling lift |
-| **9** | V6. Re-embed with prefix | High | Large | Only after V2 validates |
-| **10** | B2. Field boosting | Medium | Large | Requires re-indexing |
+| **1** | A3. Larger model | High | Small | Biggest ceiling lift, bottleneck is LLM reasoning |
+| **2** | A4. Ensemble | High | Medium | Guaranteed from known correct set diversity |
+| **3** | B2. Field boosting | Medium | Large | Titles are high-signal for entity queries |
+| **4** | B1. Fuzzy matching | Low | Small | Easy marginal gain |
+| **5** | A2. Answer type | Low-Medium | Low | Cheap, may focus extraction |
+| **6** | A1. Search budget | Low-Medium | Medium | Addresses under-searching |
+| **7** | B3. Query expansion | Low-Medium | Medium | Vocabulary mismatch |
+| **8** | R2. SPLADE | Medium-High | Large | Best-of-both-worlds retrieval |
+| **9** | R1. Different embeddings | Unknown | Medium | Deprioritized — vector search doesn't help |
