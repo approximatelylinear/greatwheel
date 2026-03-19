@@ -229,8 +229,8 @@ impl BrowseCompBridge {
                             })?
                         }
                         _ => {
-                            // Default to BM25
-                            searcher.search_bm25(&query_str, k).map_err(|e| {
+                            // Default to boosted BM25
+                            searcher.search_bm25_boosted(&query_str, k).map_err(|e| {
                                 AgentError::HostFunction {
                                     function: "search".into(),
                                     message: format!("{e}"),
@@ -508,30 +508,38 @@ TOOLS AVAILABLE:
 - `context` — pre-loaded list of {docid, snippet} dicts from initial searches
 - `search(query)` — BM25 keyword search (use short keywords: names, dates, numbers). Returns list of {docid, snippet} dicts
 - `vector_search(query)` — semantic search by meaning (use natural language). Fallback when BM25 fails
-- `get_document(docid)` — retrieve full document text
-- `llm_query(prompt)` — sub-LLM analysis (~10K char context). YOUR MOST POWERFUL TOOL.
+- `get_document(docid)` — retrieve full document text. ALWAYS READ FULL DOCUMENTS before answering.
+- `llm_query(prompt)` — sub-LLM analysis (~10K char context). YOUR MOST POWERFUL TOOL for extracting specific facts.
 - `batch_llm_query([p1, p2, ...])` — parallel LLM queries
 - `print()` — view output to continue reasoning
 - `FINAL("answer")` — submit your final answer
 
 Write Python code in ```repl``` blocks. Variables persist between blocks.
 
-DIRECTIVES:
-1. EXPLORE FIRST — examine context, run diverse searches, load documents. Don't jump to conclusions.
-2. DECOMPOSE THE QUERY — break complex questions into sub-parts. Search for each part separately:
-   - If the query mentions a person + an event + a place, search each independently.
-   - If early searches fail, try COMPLETELY DIFFERENT keywords — synonyms, related entities, broader/narrower terms.
-   - Don't repeat similar searches. Each search should use substantially different keywords.
-3. ITERATE — work in small code snippets. Store intermediate results in variables. Build evidence step by step.
-4. USE llm_query() FOR SEMANTICS — keyword search finds documents, but llm_query() understands them. Feed document text to llm_query() to extract specific facts.
-5. VERIFY — before submitting, sanity-check your answer. Search for the candidate answer by name to confirm.
-6. SUBMIT — when confident, call FINAL("answer"). Answer must be precise: a name, number, date, or short phrase.
+CRITICAL: The answer MUST come from the documents, not from your own knowledge. You are searching a specific corpus — the answer is IN the documents. Read them carefully.
 
-SEARCH STRATEGY (critical for success):
-- BM25 search works on keyword overlap. Use distinctive nouns, names, and numbers.
-- If a search returns irrelevant results, DON'T repeat it — try a completely different angle.
-- Search for entities mentioned in the query: people, places, organizations, works, events.
-- Once you identify a candidate answer, search for THAT NAME to find confirming documents.
+WORKFLOW (follow this order):
+1. EXPLORE — examine context snippets. Identify 3+ promising documents.
+2. READ — use get_document() to load the full text of promising documents. Snippets are NOT enough.
+3. EXTRACT — use llm_query() to extract specific facts from each document:
+   llm_query(f"Question: {question}\n\nRead this document and extract any facts relevant to answering the question. Quote exact names, dates, and numbers.\n\nDocument:\n{doc[:8000]}")
+4. SEARCH MORE — if you haven't found the answer, search with COMPLETELY DIFFERENT keywords. Try:
+   - Specific names/entities found in documents you read
+   - Synonyms and alternate phrasings
+   - Dates, numbers, locations mentioned in the query
+5. VERIFY — search for your candidate answer BY NAME to find confirming documents. The answer must appear in at least one document.
+6. SUBMIT — call FINAL("answer") with a precise name, number, date, or short phrase.
+
+SEARCH STRATEGY:
+- BM25 search matches keywords. Use 2-5 distinctive nouns, names, or numbers.
+- NEVER repeat a similar search. Each search must target different information.
+- When stuck, search for entities DISCOVERED in documents, not just from the query.
+
+COMMON MISTAKES TO AVOID:
+- Don't guess from snippets alone — READ FULL DOCUMENTS with get_document().
+- Don't rely on your own knowledge — the answer must come from the corpus.
+- Don't submit without verifying — search for your candidate answer to confirm.
+- Don't pick a well-known answer when the document mentions a different, specific one.
 
 EXAMPLE:
 ```repl
@@ -540,31 +548,31 @@ for h in context[:5]:
     print(h["docid"], h["snippet"][:200])
 ```
 ```repl
-# Step 2: Decompose and search from multiple angles
-hits_person = search("specific person name mentioned")
-hits_event = search("specific event or work mentioned")
-hits_place = search("specific place or organization")
-all_docs = {h["docid"]: h for h in context + hits_person + hits_event + hits_place}
-print(f"Found {len(all_docs)} unique documents")
-```
-```repl
-# Step 3: Load and analyze with LLM
-doc = get_document(list(all_docs.keys())[0])
-evidence = llm_query(f"Extract the answer to: [question]\n\nDocument:\n{doc[:8000]}")
+# Step 2: Read the most promising document
+doc = get_document(context[0]["docid"])
+evidence = llm_query(f"Question: [question]\n\nExtract all relevant facts from this document. Quote exact names and dates.\n\nDocument:\n{doc[:8000]}")
 print(evidence)
 ```
 ```repl
+# Step 3: Search from a different angle using discovered facts
+hits2 = search("discovered entity name")
+for h in hits2[:3]:
+    print(h["docid"], h["snippet"][:300])
+```
+```repl
 # Step 4: Verify candidate answer
-confirm = search("candidate answer name")
-print(confirm[0]["snippet"][:500])
+doc2 = get_document(hits2[0]["docid"])
+verify = llm_query(f"Does this document confirm that [candidate answer] is the answer to: [question]?\n\nDocument:\n{doc2[:8000]}")
+print(verify)
 ```
 ```repl
 FINAL("verified answer")
 ```
 
 RULES:
-- NEVER answer "Unable to determine". Always give your BEST GUESS.
-- NEVER repeat a search query you already tried. Each search must use different keywords.
+- NEVER answer "Unable to determine". Always give your BEST GUESS from the documents.
+- NEVER repeat a search query. Each search must use different keywords.
+- ALWAYS read at least 2 full documents before submitting an answer.
 - Store evidence in variables; don't repeat work.
 
 /no_think"#;
@@ -577,7 +585,8 @@ fn iteration_prompt(query: &str, iteration: usize, max_iterations: usize, variab
             "{counter} EXPLORE FIRST — you have not seen your context yet.\n\n\
              Query: \"{query}\"\n\n\
              Start by examining the `context` variable (pre-loaded search results). \
-             Load promising documents with get_document(). Do NOT submit a final answer yet.\n\n\
+             Pick the 2-3 most promising documents and load them with get_document(). \
+             Use llm_query() to extract relevant facts. Do NOT submit a final answer yet.\n\n\
              Write a ```repl``` code block:"
         )
     } else {
@@ -586,19 +595,26 @@ fn iteration_prompt(query: &str, iteration: usize, max_iterations: usize, variab
         } else {
             format!("\n\nVariables in scope:\n{variables_info}\n")
         };
-        let nudge = if iteration >= 4 {
+        let nudge = if iteration >= 6 {
+            "\nHINT: You're running low on iterations. If you have a candidate answer, \
+             VERIFY it by searching for it by name. If not, pick the BEST answer from the \
+             evidence you've gathered so far and submit with FINAL()."
+        } else if iteration >= 4 {
             "\nHINT: If stuck, try a COMPLETELY DIFFERENT search angle. \
-             Search for candidate answers BY NAME to verify them. \
-             Use llm_query() to analyze documents you've already loaded."
+             Search for entities you DISCOVERED in documents (not just from the query). \
+             Use llm_query() to carefully analyze documents — don't skim snippets."
+        } else if iteration >= 2 {
+            "\nREMINDER: Have you read full documents with get_document()? \
+             Snippets are NOT enough. Load documents and use llm_query() to extract facts."
         } else {
             ""
         };
         format!(
             "{counter} Continue investigating to answer: \"{query}\"\n\
              {vars_section}\n\
-             Think: which sub-facts from the query have you established? Which are still unknown? \
-             Use search() with DIFFERENT keywords targeting the unknown facts. \
-             Use get_document() to read full texts and llm_query() to analyze content.{nudge}\n\n\
+             Think: which sub-facts have you established? Which are still unknown? \
+             Read more documents with get_document() and extract facts with llm_query(). \
+             Search with DIFFERENT keywords targeting unknown facts.{nudge}\n\n\
              Write a ```repl``` code block:"
         )
     }
@@ -765,7 +781,7 @@ fn backend_search(
             }
         }
         SearchBackend::Native { searcher } => {
-            match searcher.search_bm25(query, k) {
+            match searcher.search_bm25_boosted(query, k) {
                 Ok(hits) => hits
                     .into_iter()
                     .map(|h| SearchHit {
@@ -852,6 +868,63 @@ fn pre_search(
 
     info!(n_hits = all_hits.len(), n_queries = queries.len(), "Pre-search round 1 complete");
 
+    // --- Pseudo-relevance feedback: extract distinctive terms from top snippets ---
+    let prf_terms = {
+        let mut term_freq: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for h in all_hits.iter().take(5) {
+            let snippet = h["snippet"].as_str().unwrap_or("");
+            for word in snippet.split_whitespace() {
+                let clean: String = word.to_lowercase()
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect();
+                if clean.len() >= 4 && clean.len() <= 20 {
+                    *term_freq.entry(clean).or_insert(0) += 1;
+                }
+            }
+        }
+        // Remove terms already in the query
+        let query_lower = query.to_lowercase();
+        let query_words: std::collections::HashSet<String> = query_lower
+            .split_whitespace()
+            .map(|w| w.chars().filter(|c| c.is_alphanumeric()).collect())
+            .collect();
+        term_freq.retain(|t, _| !query_words.contains(t));
+        // Remove very common words
+        let stopwords = ["this", "that", "with", "from", "have", "been",
+            "were", "they", "their", "about", "would", "which", "could", "other",
+            "more", "some", "also", "into", "than", "them", "only", "over",
+            "said", "will", "when", "what", "there", "after", "before", "first",
+            "most", "very", "just", "like", "each", "where", "does", "many"];
+        let stop_set: std::collections::HashSet<&str> = stopwords.iter().cloned().collect();
+        term_freq.retain(|t, _| !stop_set.contains(t.as_str()));
+        // Sort by freq, take top 5
+        let mut sorted: Vec<(String, usize)> = term_freq.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.into_iter().take(5).map(|(t, _)| t).collect::<Vec<String>>()
+    };
+
+    if !prf_terms.is_empty() {
+        info!(prf_terms = ?prf_terms, "PRF terms extracted");
+        // Search with PRF terms as a combined query
+        let prf_query = prf_terms.join(" ");
+        let prf_hits = backend_search(backend, &prf_query, 3, rt);
+        for hit in prf_hits {
+            if seen_docids.insert(hit.docid.clone()) {
+                let snippet = hit.snippet.as_deref().unwrap_or("");
+                let preview: String = snippet.chars().take(300).collect();
+                context_text.push_str(&format!("docid={}: {}\n", hit.docid, preview));
+                all_hits.push(serde_json::json!({
+                    "docid": hit.docid,
+                    "snippet": snippet,
+                }));
+            }
+        }
+        total_queries += 1;
+    }
+
+    info!(n_hits = all_hits.len(), "Pre-search after HyDE + PRF");
+
     // --- Round 2: Refinement ---
     // Show the LLM round-1 results. Ask it to:
     // 1. Pick the most relevant docids from round 1
@@ -863,12 +936,21 @@ fn pre_search(
         format!("  {}. [{}] {}", i + 1, docid, preview)
     }).collect::<Vec<_>>().join("\n");
 
+    let prf_hint = if !prf_terms.is_empty() {
+        format!(
+            "\n\nFrequent distinctive terms from top results: {}. Consider incorporating these into your new queries.",
+            prf_terms.join(", ")
+        )
+    } else {
+        String::new()
+    };
+
     let refine_prompt = format!(
         "Question: {query}\n\n\
          Here are {n} search results. Select the MOST RELEVANT documents and generate new searches.\n\n\
          Results:\n{round1_preview}\n\n\
          First, list the numbers of the TOP 10 most relevant results (comma-separated).\n\
-         Then, output 3 NEW keyword search queries (2-5 words) for facts NOT covered above.\n\n\
+         Then, output 3 NEW keyword search queries (2-5 words) for facts NOT covered above.{prf_hint}\n\n\
          Format:\n\
          KEEP: 1, 3, 5, 7, ...\n\
          SEARCH: query one\n\
