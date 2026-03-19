@@ -155,7 +155,30 @@ The bottleneck is LLM inference in the rLM loop, not search latency.
 - **Expected impact:** Unknown — vector search may benefit from better embeddings, but BrowseComp's entity-heavy nature favors BM25
 - **Status:** Deprioritized given vector search findings
 
-#### R2. Learned sparse retrieval (SPLADE-style)
+#### R2. ColBERT reranker on BM25 results
+- **What:** After boosted BM25 retrieves top-k candidates, rerank them with a ColBERT cross-encoder before feeding to the agent. ColBERT computes fine-grained token-level similarity between query and document — much more precise than BM25 scores for ranking.
+- **Where:** Two implementation paths:
+  1. **Python sidecar (fastest to test):** Add a reranking step in `lancedb_searcher.py` or a new `reranker.py` that the Rust bridge calls via HTTP. LanceDB's Python client has built-in support: `tbl.search(query, query_type="fts").rerank(reranker=ColbertReranker()).to_list()`
+  2. **Rust-native (production path):** Run the ColBERT model via ONNX runtime in Rust, or call Ollama/a local model server for reranking scores.
+- **Models:** `colbert-ir/colbertv2.0` (default) or `answerdotai/answerai-colbert-small-v1` (lighter). Both auto-download on first use via HuggingFace.
+- **Integration with current pipeline:**
+  - Pre-search: BM25 retrieves k=20-30 candidates → ColBERT reranks → top 10 go into `context`
+  - REPL search: Each `search()` call retrieves k=20 → ColBERT reranks → top 10 returned to agent
+  - This is different from vector search (which failed) because ColBERT scores query-document **pairs** rather than comparing independent embeddings
+- **LanceDB Python API:**
+  ```python
+  from lancedb.rerankers import ColbertReranker
+  reranker = ColbertReranker()  # or model_name="answerdotai/answerai-colbert-small-v1"
+  results = tbl.search("query", query_type="fts").rerank(reranker=reranker).to_list()
+  ```
+  Also works with hybrid search: `query_type="hybrid"` (with `return_score="relevance"`)
+- **Effort:** Medium — Python sidecar is straightforward; Rust-native is larger
+- **Expected impact:** Medium-high — cross-encoders consistently outperform bi-encoders and BM25 for precision. Our failure analysis showed the right document is often in the top-20 BM25 results but not top-10 — reranking could surface it.
+- **Latency:** ColBERT reranking of 20-30 documents per query adds ~100-500ms per search call (GPU) or ~1-3s (CPU). Pre-search adds one reranking pass; REPL searches add per-call latency.
+- **Risk:** Python sidecar adds HTTP round-trip overhead. CPU-only reranking may be too slow for REPL search calls. Could limit reranking to pre-search only.
+- **Status:** Ready to prototype (Python sidecar path)
+
+#### R3. Learned sparse retrieval (SPLADE-style)
 - **What:** Use a learned sparse model that outputs weighted term expansions. Combines BM25-style matching with learned term importance.
 - **Effort:** Large — needs model + index infrastructure
 - **Expected impact:** Medium-high — addresses vocabulary mismatch without the noise of dense vectors
@@ -168,11 +191,12 @@ The bottleneck is LLM inference in the rLM loop, not search latency.
 | Priority | Experiment | Expected Impact | Effort | Rationale |
 |----------|-----------|----------------|--------|-----------|
 | **1** | A3. Larger model | High | Small | Biggest ceiling lift, bottleneck is LLM reasoning |
-| **2** | A4. Ensemble | High | Medium | Guaranteed from known correct set diversity |
-| **3** | B2. Field boosting | Medium | Large | Titles are high-signal for entity queries |
-| **4** | B1. Fuzzy matching | Low | Small | Easy marginal gain |
-| **5** | A2. Answer type | Low-Medium | Low | Cheap, may focus extraction |
-| **6** | A1. Search budget | Low-Medium | Medium | Addresses under-searching |
-| **7** | B3. Query expansion | Low-Medium | Medium | Vocabulary mismatch |
-| **8** | R2. SPLADE | Medium-High | Large | Best-of-both-worlds retrieval |
-| **9** | R1. Different embeddings | Unknown | Medium | Deprioritized — vector search doesn't help |
+| **2** | R2. ColBERT reranker | Medium-High | Medium | Cross-encoders beat BM25 for precision; right docs may be in top-20 but not top-10 |
+| **3** | A4. Ensemble | High | Medium | Guaranteed from known correct set diversity |
+| **4** | B2. Field boosting | Medium | Large | Titles are high-signal for entity queries |
+| **5** | B1. Fuzzy matching | Low | Small | Easy marginal gain |
+| **6** | A2. Answer type | Low-Medium | Low | Cheap, may focus extraction |
+| **7** | A1. Search budget | Low-Medium | Medium | Addresses under-searching |
+| **8** | B3. Query expansion | Low-Medium | Medium | Vocabulary mismatch |
+| **9** | R3. SPLADE | Medium-High | Large | Best-of-both-worlds retrieval |
+| **10** | R1. Different embeddings | Unknown | Medium | Deprioritized — vector search doesn't help |
