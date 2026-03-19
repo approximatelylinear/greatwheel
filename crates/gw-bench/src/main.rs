@@ -573,13 +573,13 @@ const SYSTEM_PROMPT: &str = r#"You are tasked with answering a query by searchin
 
 TOOLS AVAILABLE:
 - `context` — pre-loaded list of {docid, snippet} dicts from initial searches
-- `search(query)` — BM25 keyword search (use short keywords: names, dates, numbers). Returns list of {docid, snippet} dicts
-- `vector_search(query)` — semantic search by meaning (use natural language). Fallback when BM25 fails
+- `question` — the query string you need to answer
+- `search(query)` — BM25 keyword search. Use 2-5 specific nouns/names/numbers. Returns list of {docid, snippet} dicts
 - `get_document(docid)` — retrieve full document text. ALWAYS READ FULL DOCUMENTS before answering.
 - `llm_query(prompt)` — sub-LLM analysis (~10K char context). YOUR MOST POWERFUL TOOL for extracting specific facts.
-- `batch_llm_query([p1, p2, ...])` — parallel LLM queries
+- `batch_llm_query([p1, p2, ...])` — parallel LLM queries (use to analyze multiple docs at once)
 - `print()` — view output to continue reasoning
-- `FINAL("answer")` — submit your final answer
+- `FINAL("answer")` — submit your final answer. Answer must be a precise name, number, date, or short phrase.
 
 Write Python code in ```repl``` blocks. Variables persist between blocks.
 
@@ -610,29 +610,29 @@ COMMON MISTAKES TO AVOID:
 
 EXAMPLE:
 ```repl
-# Step 1: Examine initial search results
-for h in context[:5]:
-    print(h["docid"], h["snippet"][:200])
+# Step 1: Scan context for promising documents
+for i, h in enumerate(context[:8]):
+    print(f"{i}: {h['docid']} — {h['snippet'][:150]}")
 ```
 ```repl
-# Step 2: Read the most promising document
-doc = get_document(context[0]["docid"])
-evidence = llm_query(f"Question: [question]\n\nExtract all relevant facts from this document. Quote exact names and dates.\n\nDocument:\n{doc[:8000]}")
-print(evidence)
+# Step 2: Read top documents in parallel with batch_llm_query
+docs = [get_document(context[i]["docid"]) for i in [0, 2, 4]]
+prompts = [f"Question: {question}\n\nExtract ALL facts relevant to this question. Quote exact names, dates, numbers.\n\nDocument:\n{d[:8000]}" for d in docs]
+evidence = batch_llm_query(prompts)
+for i, e in enumerate(evidence):
+    print(f"=== Doc {i} ===\n{e}\n")
 ```
 ```repl
-# Step 3: Search from a different angle using discovered facts
-hits2 = search("discovered entity name")
+# Step 3: Search for entities discovered in the documents
+hits2 = search("discovered person name")
 for h in hits2[:3]:
-    print(h["docid"], h["snippet"][:300])
+    doc = get_document(h["docid"])
+    print(h["docid"], doc[:500])
 ```
 ```repl
-# Step 4: Verify candidate answer
-doc2 = get_document(hits2[0]["docid"])
-verify = llm_query(f"Does this document confirm that [candidate answer] is the answer to: [question]?\n\nDocument:\n{doc2[:8000]}")
+# Step 4: Verify candidate answer appears in a document
+verify = llm_query(f"Does this document confirm that [candidate] answers: {question}?\n\nDocument:\n{doc[:8000]}")
 print(verify)
-```
-```repl
 FINAL("verified answer")
 ```
 
