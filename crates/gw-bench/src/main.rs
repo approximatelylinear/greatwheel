@@ -120,6 +120,7 @@ struct BrowseCompBridge {
     backend: SearchBackend,
     k: u32,
     search_mode: String, // mode string sent to HTTP backend ("bm25", "rerank", etc.)
+    rerank_url: Option<String>, // Optional rerank server URL (for native backend + ColBERT)
     llm: OllamaClient,
     model: String,
     rt: tokio::runtime::Handle,
@@ -146,6 +147,7 @@ impl BrowseCompBridge {
         backend: SearchBackend,
         k: u32,
         search_mode: String,
+        rerank_url: Option<String>,
         llm: OllamaClient,
         model: String,
         rt: tokio::runtime::Handle,
@@ -154,6 +156,7 @@ impl BrowseCompBridge {
             backend,
             k,
             search_mode,
+            rerank_url,
             llm,
             model,
             rt,
@@ -224,6 +227,7 @@ impl BrowseCompBridge {
             SearchBackend::Native { searcher } => {
                 let searcher = searcher.clone();
                 let llm = self.llm.clone();
+                let rerank_url = self.rerank_url.clone();
                 let (corpus_hits, embed_ms, vector_ms, bm25_ms) = self.rt.block_on(async {
                     let mut embed_ms = 0u64;
                     let mut vector_ms = 0u64;
@@ -271,9 +275,10 @@ impl BrowseCompBridge {
                             hits
                         }
                         _ => {
-                            // Default to boosted BM25
+                            // Default to boosted BM25 — retrieve more if reranking
+                            let retrieve_k = if rerank_url.is_some() { std::cmp::max(k, 50) } else { k };
                             let t0 = std::time::Instant::now();
-                            let hits = searcher.search_bm25_boosted(&query_str, k).map_err(|e| {
+                            let hits = searcher.search_bm25_boosted(&query_str, retrieve_k).map_err(|e| {
                                 AgentError::HostFunction {
                                     function: "search".into(),
                                     message: format!("{e}"),
@@ -283,7 +288,7 @@ impl BrowseCompBridge {
                             hits
                         }
                     };
-                    let hits: Vec<SearchHit> = corpus_hits
+                    let mut hits: Vec<SearchHit> = corpus_hits
                         .into_iter()
                         .map(|h| SearchHit {
                             docid: h.docid,
@@ -291,6 +296,46 @@ impl BrowseCompBridge {
                             snippet: Some(h.text),
                         })
                         .collect();
+
+                    // If rerank URL is set, send BM25 candidates to ColBERT for reranking
+                    if let Some(ref url) = rerank_url {
+                        let rerank_endpoint = format!("{url}/rerank");
+                        let docs_json: Vec<serde_json::Value> = hits.iter().map(|h| {
+                            serde_json::json!({
+                                "docid": h.docid,
+                                "text": h.snippet.as_deref().unwrap_or(""),
+                            })
+                        }).collect();
+                        let client = reqwest::Client::new();
+                        match client.post(&rerank_endpoint)
+                            .json(&serde_json::json!({
+                                "query": query_str,
+                                "documents": docs_json,
+                                "k": k,
+                            }))
+                            .send()
+                            .await
+                        {
+                            Ok(resp) if resp.status().is_success() => {
+                                if let Ok(reranked) = resp.json::<Vec<serde_json::Value>>().await {
+                                    hits = reranked.iter().map(|r| SearchHit {
+                                        docid: r["docid"].as_str().unwrap_or("").to_string(),
+                                        score: r["score"].as_f64(),
+                                        snippet: r["text"].as_str().map(|s| s.to_string()),
+                                    }).collect();
+                                }
+                            }
+                            Ok(resp) => {
+                                tracing::warn!(status = %resp.status(), "Rerank server error, using BM25 order");
+                                hits.truncate(k);
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Rerank server unreachable, using BM25 order");
+                                hits.truncate(k);
+                            }
+                        }
+                    }
+
                     Ok::<_, AgentError>((hits, embed_ms, vector_ms, bm25_ms))
                 })?;
                 self.timing_embed_ms += embed_ms;
@@ -1538,6 +1583,10 @@ struct Cli {
     #[arg(long, default_value = "bm25")]
     search_mode: String,
 
+    /// ColBERT rerank server URL (for native backend). BM25 retrieves top-50, reranker refines to top-k.
+    #[arg(long)]
+    rerank_url: Option<String>,
+
     /// Path to tantivy corpus index (for native backend)
     #[arg(long, default_value = "data/tantivy-corpus/")]
     tantivy_index: String,
@@ -1617,6 +1666,7 @@ fn run_single_query(
         backend,
         cli.k,
         cli.search_mode.clone(),
+        cli.rerank_url.clone(),
         llm.clone(),
         cli.model.clone(),
         rt.clone(),
