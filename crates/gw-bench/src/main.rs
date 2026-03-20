@@ -574,6 +574,7 @@ const SYSTEM_PROMPT: &str = r#"You are tasked with answering a query by searchin
 TOOLS AVAILABLE:
 - `context` — pre-loaded list of {docid, snippet} dicts from initial searches
 - `question` — the query string you need to answer
+- `answer_type` — expected answer type (person, place, date, number, title, etc.)
 - `search(query)` — BM25 keyword search. Use 2-5 specific nouns/names/numbers. Returns list of {docid, snippet} dicts
 - `get_document(docid)` — retrieve full document text. ALWAYS READ FULL DOCUMENTS before answering.
 - `llm_query(prompt)` — sub-LLM analysis (~10K char context). YOUR MOST POWERFUL TOOL for extracting specific facts.
@@ -862,6 +863,38 @@ fn backend_search(
                     vec![]
                 }
             }
+        }
+    }
+}
+
+/// Classify the expected answer type for a query.
+/// Returns (answer_type_string, input_tokens, output_tokens).
+fn classify_answer_type(
+    llm: &OllamaClient,
+    model: &str,
+    query: &str,
+    rt: &tokio::runtime::Handle,
+) -> (String, u32, u32) {
+    let prompt = format!(
+        "What type of answer does this question expect? Reply with ONLY one of: person, place, date, number, title, organization, event, other\n\nQuestion: {query}\n\nAnswer type:"
+    );
+    let messages = vec![Message {
+        role: "user".into(),
+        content: prompt,
+    }];
+    match rt.block_on(async { llm.chat_with_options(&messages, Some(model), Some(false)).await }) {
+        Ok(resp) => {
+            let answer = strip_think_tags(resp.content.trim()).to_lowercase();
+            // Extract just the type word
+            let atype = answer.split_whitespace().next().unwrap_or("other").to_string();
+            let input = resp.input_tokens.unwrap_or(0);
+            let output = resp.output_tokens.unwrap_or(0);
+            info!(answer_type = %atype, "Classified answer type");
+            (atype, input, output)
+        }
+        Err(e) => {
+            warn!(error = %e, "Answer type classification failed");
+            ("other".into(), 0, 0)
         }
     }
 }
@@ -1602,9 +1635,15 @@ fn run_single_query(
         pre_search(llm, &cli.model, query_text, &pre_search_backend, cli.k, rt);
     let pre_search_ms = pre_search_start.elapsed().as_millis() as u64;
 
+    // Classify expected answer type (cheap — one short LLM call)
+    let (answer_type, at_input, at_output) = classify_answer_type(llm, &cli.model, query_text, rt);
+    let pre_input = pre_input + at_input;
+    let pre_output = pre_output + at_output;
+
     // Inject context as ouros variable (list of {docid, snippet} dicts)
     let context_obj = json_to_object(serde_json::Value::Array(context_hits));
     agent.set_variable("context", context_obj).ok();
+    agent.set_variable("answer_type", Object::String(answer_type.clone())).ok();
 
     let rlm_start = std::time::Instant::now();
     let (status, result_entries, input_tokens, output_tokens, trajectory) =
