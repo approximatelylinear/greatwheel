@@ -56,3 +56,8 @@ f6d4868-repro	0.3000	~12	152215	keep	Reproducibility run of f6d4868. 9/30 (varia
 ablate-nohyde	0.3667	~12	168311	keep	Ablation: no HyDE (boosted BM25 + PRF only). 11/30 — HyDE not contributing
 ablate-noprf	0.3000	~12	150822	keep	Ablation: no PRF (boosted BM25 + HyDE only). 9/30 — PRF provides ~1-2 query lift
 ablate-noboosted	0.2667	~12	135541	keep	Ablation: naive BM25 (HyDE + PRF only). 8/30 — boosted BM25 is the biggest contributor
+mar19-baseline	0.1000	~12	43381	keep	mar19 baseline (unchanged code, native BM25, k=10, 12 turns). 3/30 (qwen2.5:7b)
+488fa6a	0.1333	~12	68494	keep	Remove vector_search, fix example to use question var + batch_llm_query. 4/30 (qwen2.5:7b)
+1e40c6c	0.1333	~12	62768	keep	Fix FINAL() extraction — skip code blocks, require quoted strings. 4/30 (qwen2.5:7b)
+1e40c6c-9b	0.2667	~12	124705	keep	Same code, qwen3.5:9b. 8/30: 175+191+464+469+643+797+893+1034
+0b7da23-9b	0.1333	~12	139257	discard	Fuzzy term matching (edit distance 1, boost 0.5). 4/30 — fuzzy noise hurts retrieval

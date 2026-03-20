@@ -57,6 +57,7 @@ def reciprocal_rank_fusion(result_lists, k=60):
 class SearchHandler(BaseHTTPRequestHandler):
     bm25_searcher: BM25sSearcher = None
     lance_searcher = None  # Optional LanceDBSearcher
+    colbert_reranker = None  # Optional ColBERTReranker
 
     def log_message(self, format, *args):
         pass  # silence request logs
@@ -70,7 +71,11 @@ class SearchHandler(BaseHTTPRequestHandler):
             k = body.get("k", 5)
             mode = body.get("mode", "hybrid")  # "bm25", "vector", or "hybrid"
 
-            if mode == "vector" and self.lance_searcher is not None:
+            if mode == "rerank" and self.colbert_reranker is not None:
+                # BM25 top-50 → ColBERT rerank → top-k
+                bm25_candidates = self.bm25_searcher.search(query, k=50)
+                results = self.colbert_reranker.rerank(query, bm25_candidates, k=k)
+            elif mode == "vector" and self.lance_searcher is not None:
                 # Vector-only search
                 try:
                     results = self.lance_searcher.search(query, k=k)
@@ -151,13 +156,23 @@ def main():
         default=os.getenv("GW_EMBED_MODEL", "nomic-embed-text"),
         help="Embedding model (used with --lancedb-path)",
     )
+    parser.add_argument(
+        "--colbert-model",
+        default=None,
+        help="ColBERT model for reranking (e.g. lightonai/Reason-ModernColBERT-v1)",
+    )
     args = parser.parse_args()
 
     print(f"Loading BM25s index from {args.index_path} ...", flush=True)
     searcher = BM25sSearcher(args)
     SearchHandler.bm25_searcher = searcher
 
-    if args.lancedb_path:
+    if args.colbert_model:
+        from colbert_reranker import ColBERTReranker
+        print(f"Loading ColBERT reranker: {args.colbert_model} ...", flush=True)
+        SearchHandler.colbert_reranker = ColBERTReranker(args.colbert_model)
+        mode = f"BM25 + ColBERT rerank ({args.colbert_model})"
+    elif args.lancedb_path:
         from lancedb_searcher import LanceDBSearcher
         lance_args = argparse.Namespace(
             db_path=args.lancedb_path,

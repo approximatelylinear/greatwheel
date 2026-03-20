@@ -119,6 +119,7 @@ enum SearchBackend {
 struct BrowseCompBridge {
     backend: SearchBackend,
     k: u32,
+    search_mode: String, // mode string sent to HTTP backend ("bm25", "rerank", etc.)
     llm: OllamaClient,
     model: String,
     rt: tokio::runtime::Handle,
@@ -144,6 +145,7 @@ impl BrowseCompBridge {
     fn new(
         backend: SearchBackend,
         k: u32,
+        search_mode: String,
         llm: OllamaClient,
         model: String,
         rt: tokio::runtime::Handle,
@@ -151,6 +153,7 @@ impl BrowseCompBridge {
         Self {
             backend,
             k,
+            search_mode,
             llm,
             model,
             rt,
@@ -316,7 +319,8 @@ impl BrowseCompBridge {
     }
 
     fn search(&mut self, query: &str) -> Result<Object, AgentError> {
-        self.search_with_mode(query, "bm25")
+        let mode = self.search_mode.clone();
+        self.search_with_mode(query, &mode)
     }
 
     fn vector_search(&mut self, query: &str) -> Result<Object, AgentError> {
@@ -1530,6 +1534,10 @@ struct Cli {
     #[arg(long, default_value = "http://localhost:8000")]
     search_url: String,
 
+    /// Search mode sent to HTTP backend (e.g. "bm25", "rerank", "hybrid")
+    #[arg(long, default_value = "bm25")]
+    search_mode: String,
+
     /// Path to tantivy corpus index (for native backend)
     #[arg(long, default_value = "data/tantivy-corpus/")]
     tantivy_index: String,
@@ -1608,6 +1616,7 @@ fn run_single_query(
     let bridge = BrowseCompBridge::new(
         backend,
         cli.k,
+        cli.search_mode.clone(),
         llm.clone(),
         cli.model.clone(),
         rt.clone(),
