@@ -1,13 +1,14 @@
 # BrowseComp-Plus Experiment Designs
 
-## Current Best: 36.7% (11/30) — commit f6d4868
+## Current Best: 40.0% (12/30) — commit 7f431fc
 
-Boosted BM25 (phrase+AND+OR) + PRF + doc-grounded prompts.
-Reproducibility range: 9-11/30 across runs (mean ~10).
+Native boosted BM25 top-200 → Reason-ModernColBERT rerank → top-10.
+Previous best: 36.7% (11/30, commit f6d4868) with boosted BM25 + PRF only.
 
 ## What We've Learned
 
 ### Things that help
+- **ColBERT reranking** (Reason-ModernColBERT on BM25 top-200): **New best.** BM25 retrieves top-200, ColBERT reranks to top-10. Right documents were buried at ranks 50-200 in BM25; ColBERT surfaces them. Sweet spot is top-200 — top-50 is too narrow, top-500 adds noise.
 - **Boosted BM25** (phrase match 4x, slop 2x, AND 1.5x, OR 1x): Biggest single contributor per ablation (+2-3 queries vs naive BM25)
 - **Pseudo-relevance feedback (PRF)**: Extract distinctive terms from round-1 snippets, use as additional queries (~1-2 query lift)
 - **Doc-grounded prompts**: Force get_document()+llm_query(), emphasize corpus-only answers
@@ -31,6 +32,9 @@ Reproducibility range: 9-11/30 across runs (mean ~10).
 - **Best-of-N majority voting**: Wrong answers agree more than correct ones (3x cost, same accuracy)
 - **Search query coaching in prompt**: No measurable benefit over baseline
 - **Wider pre-search (8+5 queries, full k)**: Too many context docs overwhelm model
+- **Fuzzy BM25 matching** (edit distance 1, boost 0.5): Adds noise, regression to 4/30
+- **Answer type classification**: One LLM call to classify expected type (person/place/date). Within variance, no clear benefit
+- **ColBERT reranking of BM25 top-500**: Too wide a candidate pool — noise dilutes ColBERT precision (9/30 vs 12/30 at top-200)
 
 ### Vector Search Findings (mar16-mar19)
 
@@ -73,12 +77,33 @@ Per-query timing breakdown (avg across 30 queries, V1-V4 prefixed run):
 
 The bottleneck is LLM inference in the rLM loop, not search latency.
 
+### ColBERT Reranking Findings (mar21)
+
+ColBERT (Reason-ModernColBERT, 149M params) as a reranker on BM25 results is the first retrieval improvement to beat the BM25-only baseline.
+
+**Architecture:** Rust native boosted BM25 retrieves top-N candidates → Python sidecar (`rerank_server.py`) scores them with ColBERT MaxSim → returns top-10 to the agent. BM25 search stays in Rust; only reranking uses Python.
+
+| BM25 pool | ColBERT → top-10 | Notes |
+|---|---|---|
+| Top-50 | 7/30 | No improvement — too narrow, right docs not in pool |
+| Top-100 | 10/30 | Ties previous best (11/30) |
+| **Top-200** | **12/30** | **New all-time best (40%)** |
+| Top-500 | 9/30 | Too wide — noise dilutes ColBERT precision |
+
+**Why ColBERT works where vector search failed:**
+- Dense vector search (nomic-embed-text) compresses documents into a single embedding — too lossy for entity-heavy queries
+- ColBERT computes token-level MaxSim scores, preserving fine-grained keyword matching
+- As a reranker (not first-stage retriever), it refines BM25's candidate set rather than replacing it
+- The right documents *are* in BM25's top-200, just not ranked highly enough — ColBERT surfaces them
+
+**Model note:** qwen3.5:9b is required for competitive results. qwen2.5:7b scores ~3x worse (3-4/30 vs 8-12/30) with identical code.
+
 ### Key insight
-86% of failures are **retrieval** (right documents never found), not extraction. The 9B model reasons well once it has the right documents. However, vector search doesn't help with retrieval on this benchmark — the missing documents lack keyword overlap AND semantic overlap with the queries.
+86% of failures are **retrieval** (right documents never found), not extraction. The 9B model reasons well once it has the right documents. Dense vector search doesn't help — but ColBERT reranking of a wider BM25 pool does, because the right documents are often in BM25's top-200 but ranked too low for the agent to see.
 
 ---
 
-## Completed Experiments (mar16-mar19)
+## Completed Experiments (mar16-mar21)
 
 ### Retrieval (Rust: gw-memory, gw-bench)
 - [x] **Boosted BM25** — phrase match (4x), slop phrase (2x), AND'd terms (1.5x), OR'd terms (1x). **Biggest contributor.**
@@ -86,15 +111,20 @@ The bottleneck is LLM inference in the rLM loop, not search latency.
 - [x] **HyDE** — hypothetical answer passage as BM25 query. **Ablated out: no benefit.**
 - [x] **Vector search (6 variants)** — all showed no improvement. See table above.
 - [x] **Wider pre-search** — 8+5 queries overwhelm model with context.
+- [x] **Fuzzy BM25 matching** — edit distance 1, boost 0.5. **Regression — noise hurts.**
+- [x] **ColBERT reranking** — BM25 top-N → Reason-ModernColBERT rerank. **New best at top-200 (12/30).** See ColBERT findings above.
 
 ### Prompts (Rust: gw-bench)
 - [x] **Doc-grounded prompts** — force document reading + verification. Matches best.
 - [x] **Early-submit prompts** — nudge when evidence found. Slight regression.
 - [x] **Search query coaching** — BM25 formulation advice. No benefit.
+- [x] **Answer type classification** — classify expected answer type before REPL loop. Within variance, no clear benefit.
 
 ### Infrastructure
 - [x] **Per-query timing breakdown** — pre_search_ms, rlm_loop_ms, bridge component timers
 - [x] **Re-embedded LanceDB index** — `browsecomp_docs_prefixed` with `search_document:` prefix (100K docs, 37 min)
+- [x] **ColBERT rerank server** — `bench/browsecomp/rerank_server.py` + `colbert_reranker.py`. Python sidecar, Rust calls via HTTP.
+- [x] **FINAL() extraction fix** — skip code blocks, require quoted strings (prevents variable names as answers)
 
 ---
 
@@ -102,25 +132,22 @@ The bottleneck is LLM inference in the rLM loop, not search latency.
 
 ### BM25 Refinements
 
-#### B1. Fuzzy term matching (5th signal)
-- **Where:** `crates/gw-memory/src/corpus.rs` — `search_bm25_boosted()`
-- **What:** Add FuzzyTermQuery with edit distance 1 (boost 0.5) as 5th signal. Catches typos and morphological variants.
-- **Effort:** Small — tantivy has `FuzzyTermQuery`
-- **Expected impact:** Low — may help with name misspellings
-- **Status:** Ready to implement
+#### B1. Fuzzy term matching (5th signal) — DONE, no benefit
+- **Result:** Regression to 4/30. Fuzzy matching adds noise that overwhelms the signal.
 
 #### B2. Document field boosting (BM25f)
 - **Where:** `crates/gw-memory/src/corpus.rs` — index schema + search
 - **What:** Extract title/heading from web documents at index time. Add separate tantivy fields with higher boost.
 - **Effort:** Large — requires corpus analysis + re-indexing
 - **Expected impact:** Medium — titles are high-signal for entity matching
-- **Status:** Needs corpus structure analysis
+- **Status:** Deprioritized — ColBERT reranking addresses ranking quality more directly
 
 #### B3. Query expansion via LLM
 - **Where:** `crates/gw-bench/src/main.rs` — pre_search or bridge
-- **What:** Before each BM25 search, expand the query with synonyms/related terms via a fast LLM call. Different from HyDE — this targets keyword expansion, not passage generation.
+- **What:** Before each BM25 search, expand the query with synonyms/related terms via a fast LLM call.
 - **Effort:** Medium
-- **Expected impact:** Low-medium — addresses vocabulary mismatch
+- **Expected impact:** Low-medium — could widen BM25 recall, benefiting ColBERT reranking
+- **Status:** Worth revisiting now that ColBERT reranking is in place
 
 ### Agent/Prompt Improvements
 
@@ -130,16 +157,14 @@ The bottleneck is LLM inference in the rLM loop, not search latency.
 - **Effort:** Medium
 - **Expected impact:** Low-medium — addresses under-searching
 
-#### A2. Answer type classification
-- **What:** Classify expected answer type (person, place, date, number, etc.) before REPL loop. Inject into prompt.
-- **Effort:** Low — one LLM call
-- **Expected impact:** Low-medium — focuses extraction
+#### A2. Answer type classification — DONE, no benefit
+- **Result:** Within variance (7/30 vs 8/30 baseline). No clear benefit.
 
 #### A3. Larger model for main loop
 - **What:** Use qwen2.5:32b or qwen3.5:32b for main rLM loop (keep 9B for utility calls).
 - **Effort:** Small config change, large latency increase (~4x slower)
 - **Expected impact:** High — better reasoning → better queries + extraction
-- **Status:** Requires GPU memory assessment
+- **Status:** Deprioritized per user preference
 
 #### A4. Config-diverse ensemble with union scoring
 - **What:** Run 2-3 diverse configurations per query, take union of correct answers.
@@ -147,36 +172,30 @@ The bottleneck is LLM inference in the rLM loop, not search latency.
 - **Cost:** 2-3x compute
 - **Status:** Needs orchestration code
 
+#### A5. Harness reliability fixes
+- **What:** Two bugs identified in the rLM loop:
+  1. Fallback extraction trajectory uses `role: "system"` — should be `"assistant"`
+  2. Final iteration prompt sometimes sent without getting/recording an LLM response
+- **Where:** `crates/gw-bench/src/main.rs` — `run_rlm_loop()` and `fallback_extract()`
+- **Effort:** Small
+- **Expected impact:** Low — fixes edge cases, may recover 1-2 answers
+
 ### Alternative Retrieval
 
-#### R1. Different embedding model
-- **What:** Try a stronger embedding model (e.g., bge-large, e5-mistral) instead of nomic-embed-text
-- **Effort:** Medium — need to re-embed 100K docs
-- **Expected impact:** Unknown — vector search may benefit from better embeddings, but BrowseComp's entity-heavy nature favors BM25
-- **Status:** Deprioritized given vector search findings
+#### R1. Different embedding model — Deprioritized
+- **Status:** Dense vector search doesn't help on this benchmark regardless of embedding model.
 
-#### R2. ColBERT reranker on BM25 results
-- **What:** After boosted BM25 retrieves top-k candidates, rerank them with a ColBERT cross-encoder before feeding to the agent. ColBERT computes fine-grained token-level similarity between query and document — much more precise than BM25 scores for ranking.
-- **Where:** Two implementation paths:
-  1. **Python sidecar (fastest to test):** Add a reranking step in `lancedb_searcher.py` or a new `reranker.py` that the Rust bridge calls via HTTP. LanceDB's Python client has built-in support: `tbl.search(query, query_type="fts").rerank(reranker=ColbertReranker()).to_list()`
-  2. **Rust-native (production path):** Run the ColBERT model via ONNX runtime in Rust, or call Ollama/a local model server for reranking scores.
-- **Models:** `colbert-ir/colbertv2.0` (default) or `answerdotai/answerai-colbert-small-v1` (lighter). Both auto-download on first use via HuggingFace.
-- **Integration with current pipeline:**
-  - Pre-search: BM25 retrieves k=20-30 candidates → ColBERT reranks → top 10 go into `context`
-  - REPL search: Each `search()` call retrieves k=20 → ColBERT reranks → top 10 returned to agent
-  - This is different from vector search (which failed) because ColBERT scores query-document **pairs** rather than comparing independent embeddings
-- **LanceDB Python API:**
-  ```python
-  from lancedb.rerankers import ColbertReranker
-  reranker = ColbertReranker()  # or model_name="answerdotai/answerai-colbert-small-v1"
-  results = tbl.search("query", query_type="fts").rerank(reranker=reranker).to_list()
-  ```
-  Also works with hybrid search: `query_type="hybrid"` (with `return_score="relevance"`)
-- **Effort:** Medium — Python sidecar is straightforward; Rust-native is larger
-- **Expected impact:** Medium-high — cross-encoders consistently outperform bi-encoders and BM25 for precision. Our failure analysis showed the right document is often in the top-20 BM25 results but not top-10 — reranking could surface it.
-- **Latency:** ColBERT reranking of 20-30 documents per query adds ~100-500ms per search call on GPU. The `device` parameter auto-selects CUDA if available, or can be forced with `device="cuda"`. ColBERT v2.0 is ~400MB VRAM; the small variant is lighter. With qwen3.5:9b at ~6-7GB, a 24GB GPU has room for both.
-- **Risk:** Python sidecar adds HTTP round-trip overhead. GPU memory contention with Ollama during concurrent LLM + reranking calls. Could limit reranking to pre-search only if per-call latency is too high.
-- **Status:** Ready to prototype (Python sidecar path)
+#### R2. ColBERT reranker on BM25 results — DONE, new best
+- **Result:** BM25 top-200 → Reason-ModernColBERT rerank → top-10 achieves **12/30 (40%)**, new all-time best.
+- **Implementation:** Python sidecar (`rerank_server.py`) called via HTTP from Rust native backend.
+- **Key finding:** Sweet spot is top-200. Top-50 too narrow (7/30), top-500 too noisy (9/30).
+- **See:** ColBERT Reranking Findings section above for full details.
+
+#### R2b. Reason-ModernColBERT as first-stage retriever
+- **What:** Build a multi-vector ColBERT index over 100K docs. Use ColBERT as the primary retriever (not just reranker), potentially finding documents BM25 misses entirely.
+- **Effort:** Large — requires multi-vector index build (hours), RAGatouille/NextPlaid integration
+- **Expected impact:** High — addresses the fundamental retrieval gap (docs not in BM25 top-200 at all)
+- **Status:** Design doc at `DESIGN-reason-colbert.md`. R2 (reranker) results suggest ColBERT quality is good — the question is whether first-stage retrieval finds different docs than BM25.
 
 #### R3. Learned sparse retrieval (SPLADE-style)
 - **What:** Use a learned sparse model that outputs weighted term expansions. Combines BM25-style matching with learned term importance.
@@ -186,17 +205,19 @@ The bottleneck is LLM inference in the rLM loop, not search latency.
 
 ---
 
-## Priority Ranking
+## Priority Ranking (updated mar21)
 
 | Priority | Experiment | Expected Impact | Effort | Rationale |
 |----------|-----------|----------------|--------|-----------|
-| **1** | A3. Larger model | High | Small | Biggest ceiling lift, bottleneck is LLM reasoning |
-| **2** | R2. ColBERT reranker | Medium-High | Medium | Cross-encoders beat BM25 for precision; right docs may be in top-20 but not top-10 |
+| **1** | R2b. ColBERT first-stage retriever | High | Large | Only way to find docs BM25 misses entirely; reranker validated ColBERT quality |
+| **2** | A5. Harness reliability fixes | Low | Small | Quick wins — may recover 1-2 answers from edge cases |
 | **3** | A4. Ensemble | High | Medium | Guaranteed from known correct set diversity |
-| **4** | B2. Field boosting | Medium | Large | Titles are high-signal for entity queries |
-| **5** | B1. Fuzzy matching | Low | Small | Easy marginal gain |
-| **6** | A2. Answer type | Low-Medium | Low | Cheap, may focus extraction |
-| **7** | A1. Search budget | Low-Medium | Medium | Addresses under-searching |
-| **8** | B3. Query expansion | Low-Medium | Medium | Vocabulary mismatch |
-| **9** | R3. SPLADE | Medium-High | Large | Best-of-both-worlds retrieval |
-| **10** | R1. Different embeddings | Unknown | Medium | Deprioritized — vector search doesn't help |
+| **4** | B3. Query expansion + reranking | Medium | Medium | LLM query expansion widens BM25 recall, ColBERT reranking cleans it up |
+| **5** | A1. Search budget | Low-Medium | Medium | Addresses under-searching |
+| **6** | R3. SPLADE | Medium-High | Large | Best-of-both-worlds retrieval |
+| ~~done~~ | ~~R2. ColBERT reranker~~ | ~~Medium-High~~ | ~~Medium~~ | **Done — 12/30 (40%), new best** |
+| ~~done~~ | ~~B1. Fuzzy matching~~ | ~~Low~~ | ~~Small~~ | **Done — regression, noise hurts** |
+| ~~done~~ | ~~A2. Answer type~~ | ~~Low-Medium~~ | ~~Low~~ | **Done — no benefit** |
+| ~~skip~~ | ~~A3. Larger model~~ | ~~High~~ | ~~Small~~ | Deprioritized per user preference |
+| ~~skip~~ | ~~R1. Different embeddings~~ | ~~Unknown~~ | ~~Medium~~ | Dense vector search doesn't help |
+| ~~skip~~ | ~~B2. Field boosting~~ | ~~Medium~~ | ~~Large~~ | ColBERT reranking addresses ranking more directly |
