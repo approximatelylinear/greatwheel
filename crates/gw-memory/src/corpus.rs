@@ -5,10 +5,8 @@
 
 use std::io::BufRead;
 use std::path::Path;
-use std::sync::Arc;
 
-use arrow_array::{Array, FixedSizeListArray, Float32Array, StringArray};
-use arrow_schema::{DataType, Field as ArrowField};
+use arrow_array::{Array, Float32Array, StringArray};
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use tantivy::collector::TopDocs;
@@ -434,39 +432,15 @@ impl CorpusSearcher {
             return Ok(vec![]);
         }
 
-        let dim = query_token_vecs[0].len() as i32; // 128
-
-        // Build a FixedSizeListArray from query token vectors.
-        // LanceDB detects the multi-vector column type (List(FixedSizeList)) and
-        // routes multiple query vectors to MaxSim aggregation.
-        let flat_values: Vec<f32> = query_token_vecs.iter().flat_map(|v| v.iter().copied()).collect();
-        let values_array = Float32Array::from(flat_values);
-        let field = Arc::new(ArrowField::new("item", DataType::Float32, true));
-        let first_token = FixedSizeListArray::try_new(
-            field,
-            dim,
-            Arc::new(values_array.slice(0, dim as usize)),
-            None,
-        ).map_err(|e| MemoryError::Embedding(format!("Arrow error: {e}")))?;
-
-        // Start with the first token vector, then add the rest
-        let query_vec: Arc<dyn Array> = Arc::new(first_token);
+        // For multi-vector search, pass each token vector as a flat Vec<f32>.
+        // LanceDB detects the column is List(FixedSizeList) and routes to MaxSim.
+        // First token goes to vector_search(), rest via add_query_vector().
         let mut vq = table
-            .vector_search(query_vec)
+            .vector_search(query_token_vecs[0].clone())
             .map_err(|e| MemoryError::Embedding(format!("ColBERT search error: {e}")))?;
 
-        // Add remaining query token vectors
         for token_vec in query_token_vecs.iter().skip(1) {
-            let values = Float32Array::from(token_vec.clone());
-            let field = Arc::new(ArrowField::new("item", DataType::Float32, true));
-            let fsl = FixedSizeListArray::try_new(
-                field,
-                dim,
-                Arc::new(values),
-                None,
-            ).map_err(|e| MemoryError::Embedding(format!("Arrow error: {e}")))?;
-            let arr: Arc<dyn Array> = Arc::new(fsl);
-            vq = vq.add_query_vector(arr)
+            vq = vq.add_query_vector(token_vec.clone())
                 .map_err(|e| MemoryError::Embedding(format!("ColBERT add_query_vector error: {e}")))?;
         }
 

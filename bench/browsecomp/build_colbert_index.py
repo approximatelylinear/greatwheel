@@ -125,13 +125,12 @@ def build_index(
     print(f"  {num_rows} rows, ~{est_vectors} token vectors, {num_partitions} partitions", flush=True)
 
     table.create_index(
-        "vector",
-        config=lancedb.index.IvfPq(
-            distance_type="cosine",
-            num_partitions=num_partitions,
-            num_sub_vectors=8,   # 128 / 16 = 8
-            num_bits=8,
-        ),
+        metric="cosine",
+        num_partitions=num_partitions,
+        num_sub_vectors=8,   # 128 / 16 = 8
+        num_bits=8,
+        vector_column_name="vector",
+        index_type="IVF_PQ",
         replace=True,
     )
     print("Index created successfully!", flush=True)
