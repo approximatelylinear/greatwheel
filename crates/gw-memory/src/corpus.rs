@@ -486,7 +486,11 @@ impl CorpusSearcher {
         Ok(hits)
     }
 
-    /// Hybrid search: BM25 + ColBERT, merged with RRF.
+    /// Hybrid search: BM25-first with ColBERT augmentation.
+    ///
+    /// BM25 results maintain their order. ColBERT-unique documents (not in BM25
+    /// top-k) are appended at the end. This preserves BM25 precision while
+    /// adding retrieval diversity from ColBERT's reasoning-trained embeddings.
     pub async fn search_hybrid_colbert(
         &self,
         query: &str,
@@ -496,38 +500,21 @@ impl CorpusSearcher {
         let bm25_hits = self.search_bm25_boosted(query, k)?;
         let colbert_hits = self.search_colbert(query_token_vecs, k).await?;
 
-        let bm25_keys: Vec<ScoredKey> = bm25_hits
-            .iter()
-            .map(|h| ScoredKey {
-                key: h.docid.clone(),
-                score: h.score,
-            })
-            .collect();
-        let colbert_keys: Vec<ScoredKey> = colbert_hits
-            .iter()
-            .map(|h| ScoredKey {
-                key: h.docid.clone(),
-                score: h.score,
-            })
-            .collect();
+        // BM25 results first, in original order
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut results: Vec<CorpusHit> = Vec::with_capacity(k * 2);
 
-        let fused = reciprocal_rank_fusion(&[bm25_keys, colbert_keys], 60);
-
-        // Build text lookup from both result sets
-        let mut text_map = std::collections::HashMap::new();
-        for h in bm25_hits.iter().chain(colbert_hits.iter()) {
-            text_map.entry(h.docid.clone()).or_insert_with(|| h.text.clone());
+        for h in &bm25_hits {
+            seen.insert(h.docid.clone());
+            results.push(h.clone());
         }
 
-        let results: Vec<CorpusHit> = fused
-            .into_iter()
-            .take(k)
-            .map(|(docid, score)| CorpusHit {
-                text: text_map.remove(&docid).unwrap_or_default(),
-                docid,
-                score,
-            })
-            .collect();
+        // Append ColBERT-unique docs (not already in BM25 results)
+        for h in &colbert_hits {
+            if seen.insert(h.docid.clone()) {
+                results.push(h.clone());
+            }
+        }
 
         Ok(results)
     }
