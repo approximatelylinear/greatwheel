@@ -19,6 +19,8 @@ bm25 = ["pyserini>=1.2.0"]
 # LanceDB retrieval
 lancedb = ["lancedb>=0.26", "pyarrow>=17.0.0"]
 # ColBERT reranking (Reason-ModernColBERT via transformers)
-colbert = ["torch>=2.0", "transformers>=4.40"]
+colbert = ["torch>=2.0", "transformers>=4.40", "safetensors>=0.4"]
+# ColBERT LanceDB index building (one-time, needs GPU)
+colbert-index = ["torch>=2.0", "transformers>=4.40", "safetensors>=0.4", "lancedb>=0.26", "pyarrow>=17.0.0"]
 # Full BrowseComp-Plus eval (needs vLLM + Qwen3-32B)
 eval = ["vllm>=0.9.0", "numpy>=1.26.0"]

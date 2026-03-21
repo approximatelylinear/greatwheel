@@ -120,7 +120,8 @@ struct BrowseCompBridge {
     backend: SearchBackend,
     k: u32,
     search_mode: String, // mode string sent to HTTP backend ("bm25", "rerank", etc.)
-    rerank_url: Option<String>, // Optional rerank server URL (for native backend + ColBERT)
+    rerank_url: Option<String>, // Optional rerank server URL (for native backend + ColBERT reranking)
+    colbert_encode_url: Option<String>, // Optional ColBERT encode server URL (for multi-vector search)
     llm: OllamaClient,
     model: String,
     rt: tokio::runtime::Handle,
@@ -148,6 +149,7 @@ impl BrowseCompBridge {
         k: u32,
         search_mode: String,
         rerank_url: Option<String>,
+        colbert_encode_url: Option<String>,
         llm: OllamaClient,
         model: String,
         rt: tokio::runtime::Handle,
@@ -157,6 +159,7 @@ impl BrowseCompBridge {
             k,
             search_mode,
             rerank_url,
+            colbert_encode_url,
             llm,
             model,
             rt,
@@ -272,6 +275,41 @@ impl BrowseCompBridge {
                             })?;
                             // hybrid internally does BM25 + vector, but we measure the whole thing
                             vector_ms = t1.elapsed().as_millis() as u64;
+                            hits
+                        }
+                        "colbert" => {
+                            // ColBERT-only: encode query tokens, then LanceDB MaxSim search
+                            let colbert_url = self.colbert_encode_url.clone();
+                            let token_vecs = encode_colbert_query(&colbert_url, &query_str).await
+                                .map_err(|e| AgentError::HostFunction {
+                                    function: "search".into(),
+                                    message: format!("ColBERT encode error: {e}"),
+                                })?;
+                            let t1 = std::time::Instant::now();
+                            let hits = searcher.search_colbert(&token_vecs, k).await
+                                .map_err(|e| AgentError::HostFunction {
+                                    function: "search".into(),
+                                    message: format!("ColBERT search error: {e}"),
+                                })?;
+                            vector_ms = t1.elapsed().as_millis() as u64;
+                            hits
+                        }
+                        "hybrid_colbert" => {
+                            // BM25 + ColBERT fusion via RRF
+                            let colbert_url = self.colbert_encode_url.clone();
+                            let token_vecs = encode_colbert_query(&colbert_url, &query_str).await
+                                .map_err(|e| AgentError::HostFunction {
+                                    function: "search".into(),
+                                    message: format!("ColBERT encode error: {e}"),
+                                })?;
+                            let t1 = std::time::Instant::now();
+                            let hits = searcher.search_hybrid_colbert(&query_str, &token_vecs, k).await
+                                .map_err(|e| AgentError::HostFunction {
+                                    function: "search".into(),
+                                    message: format!("ColBERT hybrid search error: {e}"),
+                                })?;
+                            // Hybrid has both BM25 and vector time mixed
+                            bm25_ms = t1.elapsed().as_millis() as u64;
                             hits
                         }
                         _ => {
@@ -870,6 +908,50 @@ fn strip_think_tags(text: &str) -> String {
 }
 
 const QUERY_TIMEOUT_SECS: u64 = 180; // 3 minutes max per query (more iterations need more time)
+
+/// Encode a query into ColBERT token vectors via the encode server.
+async fn encode_colbert_query(
+    url: &Option<String>,
+    query: &str,
+) -> Result<Vec<Vec<f32>>, String> {
+    let url = url.as_ref().ok_or_else(|| {
+        "--colbert-encode-url required for ColBERT search".to_string()
+    })?;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{url}/encode"))
+        .json(&serde_json::json!({"text": query}))
+        .send()
+        .await
+        .map_err(|e| format!("ColBERT encode request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("ColBERT encode server error: {body}"));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("ColBERT encode parse error: {e}"))?;
+
+    let tokens = body["tokens"]
+        .as_array()
+        .ok_or_else(|| "ColBERT response missing 'tokens' array".to_string())?;
+
+    let token_vecs: Vec<Vec<f32>> = tokens
+        .iter()
+        .map(|t| {
+            t.as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect()
+        })
+        .collect();
+
+    Ok(token_vecs)
+}
 
 /// Run a BM25 search via the backend, returning SearchHit results.
 fn backend_search(
@@ -1587,6 +1669,18 @@ struct Cli {
     #[arg(long)]
     rerank_url: Option<String>,
 
+    /// Path to ColBERT LanceDB database (for native backend ColBERT search)
+    #[arg(long)]
+    colbert_lance: Option<String>,
+
+    /// ColBERT LanceDB table name
+    #[arg(long, default_value = "colbert_docs")]
+    colbert_table: String,
+
+    /// ColBERT encode server URL (for query-time token encoding)
+    #[arg(long)]
+    colbert_encode_url: Option<String>,
+
     /// Path to tantivy corpus index (for native backend)
     #[arg(long, default_value = "data/tantivy-corpus/")]
     tantivy_index: String,
@@ -1667,6 +1761,7 @@ fn run_single_query(
         cli.k,
         cli.search_mode.clone(),
         cli.rerank_url.clone(),
+        cli.colbert_encode_url.clone(),
         llm.clone(),
         cli.model.clone(),
         rt.clone(),
@@ -1921,6 +2016,8 @@ async fn main() {
             &tantivy_path,
             cli.lancedb_path.as_deref(),
             Some(&cli.lancedb_table),
+            cli.colbert_lance.as_deref(),
+            Some(&cli.colbert_table),
         )
         .await
         .expect("Failed to open CorpusSearcher");

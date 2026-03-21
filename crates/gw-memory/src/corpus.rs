@@ -5,8 +5,10 @@
 
 use std::io::BufRead;
 use std::path::Path;
+use std::sync::Arc;
 
-use arrow_array::{Array, Float32Array, StringArray};
+use arrow_array::{Array, FixedSizeListArray, Float32Array, StringArray};
+use arrow_schema::{DataType, Field as ArrowField};
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use tantivy::collector::TopDocs;
@@ -60,16 +62,20 @@ pub struct CorpusSearcher {
     reader: IndexReader,
     f_docid: Field,
     f_text: Field,
-    // optional LanceDB vector table
+    // optional LanceDB single-vector table (nomic-embed-text)
     lance_table: Option<lancedb::Table>,
+    // optional LanceDB multi-vector table (ColBERT)
+    colbert_table: Option<lancedb::Table>,
 }
 
 impl CorpusSearcher {
-    /// Open existing tantivy index (read-only) with optional LanceDB table.
+    /// Open existing tantivy index (read-only) with optional LanceDB tables.
     pub async fn open(
         tantivy_path: &Path,
         lance_db_path: Option<&str>,
         lance_table_name: Option<&str>,
+        colbert_lance_path: Option<&str>,
+        colbert_table_name: Option<&str>,
     ) -> Result<Self, MemoryError> {
         // Open tantivy index
         let index = Index::open_in_dir(tantivy_path)
@@ -111,9 +117,28 @@ impl CorpusSearcher {
             None
         };
 
+        // Optionally open ColBERT multi-vector LanceDB table
+        let colbert_table = if let Some(db_path) = colbert_lance_path {
+            let table_name = colbert_table_name.unwrap_or("colbert_docs");
+            let conn = lancedb::connect(db_path).execute().await?;
+            match conn.open_table(table_name).execute().await {
+                Ok(table) => {
+                    tracing::info!(table = table_name, "Opened ColBERT LanceDB table");
+                    Some(table)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, table = table_name, "Failed to open ColBERT table, ColBERT search disabled");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         tracing::info!(
             tantivy_path = %tantivy_path.display(),
             has_lance = lance_table.is_some(),
+            has_colbert = colbert_table.is_some(),
             "CorpusSearcher opened"
         );
 
@@ -123,6 +148,7 @@ impl CorpusSearcher {
             f_docid,
             f_text,
             lance_table,
+            colbert_table,
         })
     }
 
@@ -370,6 +396,152 @@ impl CorpusSearcher {
         // Build a lookup of docid -> text from both result sets
         let mut text_map = std::collections::HashMap::new();
         for h in bm25_hits.iter().chain(vec_hits.iter()) {
+            text_map.entry(h.docid.clone()).or_insert_with(|| h.text.clone());
+        }
+
+        let results: Vec<CorpusHit> = fused
+            .into_iter()
+            .take(k)
+            .map(|(docid, score)| CorpusHit {
+                text: text_map.remove(&docid).unwrap_or_default(),
+                docid,
+                score,
+            })
+            .collect();
+
+        Ok(results)
+    }
+
+    /// ColBERT multi-vector search using LanceDB native MaxSim.
+    ///
+    /// `query_token_vecs` is a list of 128-dim token embeddings from the ColBERT encoder.
+    /// LanceDB computes MaxSim (sum of per-query-token max similarities) natively.
+    pub async fn search_colbert(
+        &self,
+        query_token_vecs: &[Vec<f32>],
+        k: usize,
+    ) -> Result<Vec<CorpusHit>, MemoryError> {
+        let table = match &self.colbert_table {
+            Some(t) => t,
+            None => {
+                return Err(MemoryError::Embedding(
+                    "ColBERT LanceDB table not configured".into(),
+                ))
+            }
+        };
+
+        if query_token_vecs.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let dim = query_token_vecs[0].len() as i32; // 128
+
+        // Build a FixedSizeListArray from query token vectors.
+        // LanceDB detects the multi-vector column type (List(FixedSizeList)) and
+        // routes multiple query vectors to MaxSim aggregation.
+        let flat_values: Vec<f32> = query_token_vecs.iter().flat_map(|v| v.iter().copied()).collect();
+        let values_array = Float32Array::from(flat_values);
+        let field = Arc::new(ArrowField::new("item", DataType::Float32, true));
+        let first_token = FixedSizeListArray::try_new(
+            field,
+            dim,
+            Arc::new(values_array.slice(0, dim as usize)),
+            None,
+        ).map_err(|e| MemoryError::Embedding(format!("Arrow error: {e}")))?;
+
+        // Start with the first token vector, then add the rest
+        let query_vec: Arc<dyn Array> = Arc::new(first_token);
+        let mut vq = table
+            .vector_search(query_vec)
+            .map_err(|e| MemoryError::Embedding(format!("ColBERT search error: {e}")))?;
+
+        // Add remaining query token vectors
+        for token_vec in query_token_vecs.iter().skip(1) {
+            let values = Float32Array::from(token_vec.clone());
+            let field = Arc::new(ArrowField::new("item", DataType::Float32, true));
+            let fsl = FixedSizeListArray::try_new(
+                field,
+                dim,
+                Arc::new(values),
+                None,
+            ).map_err(|e| MemoryError::Embedding(format!("Arrow error: {e}")))?;
+            let arr: Arc<dyn Array> = Arc::new(fsl);
+            vq = vq.add_query_vector(arr)
+                .map_err(|e| MemoryError::Embedding(format!("ColBERT add_query_vector error: {e}")))?;
+        }
+
+        let mut stream = vq
+            .column("vector")
+            .limit(k)
+            .execute()
+            .await?;
+
+        let mut hits = Vec::new();
+        while let Some(batch) = stream.try_next().await.map_err(|e| {
+            MemoryError::Embedding(format!("error reading ColBERT results: {e}"))
+        })? {
+            let docid_col = batch.column_by_name("docid");
+            let dist_col = batch.column_by_name("_distance");
+
+            if let (Some(docids), Some(dists)) = (docid_col, dist_col) {
+                let docids = docids.as_any().downcast_ref::<StringArray>();
+                let dists = dists.as_any().downcast_ref::<Float32Array>();
+
+                if let (Some(docids), Some(dists)) = (docids, dists) {
+                    for i in 0..docids.len() {
+                        let docid = docids.value(i).to_string();
+                        let distance = dists.value(i);
+                        // MaxSim returns negative distance (higher = better)
+                        let score = -distance;
+
+                        // Look up text from tantivy (ColBERT table may not store text)
+                        let text = self.get_document(&docid)?
+                            .map(|t| t.chars().take(3000).collect::<String>())
+                            .unwrap_or_default();
+
+                        hits.push(CorpusHit {
+                            docid,
+                            text,
+                            score,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(hits)
+    }
+
+    /// Hybrid search: BM25 + ColBERT, merged with RRF.
+    pub async fn search_hybrid_colbert(
+        &self,
+        query: &str,
+        query_token_vecs: &[Vec<f32>],
+        k: usize,
+    ) -> Result<Vec<CorpusHit>, MemoryError> {
+        let bm25_hits = self.search_bm25_boosted(query, k)?;
+        let colbert_hits = self.search_colbert(query_token_vecs, k).await?;
+
+        let bm25_keys: Vec<ScoredKey> = bm25_hits
+            .iter()
+            .map(|h| ScoredKey {
+                key: h.docid.clone(),
+                score: h.score,
+            })
+            .collect();
+        let colbert_keys: Vec<ScoredKey> = colbert_hits
+            .iter()
+            .map(|h| ScoredKey {
+                key: h.docid.clone(),
+                score: h.score,
+            })
+            .collect();
+
+        let fused = reciprocal_rank_fusion(&[bm25_keys, colbert_keys], 60);
+
+        // Build text lookup from both result sets
+        let mut text_map = std::collections::HashMap::new();
+        for h in bm25_hits.iter().chain(colbert_hits.iter()) {
             text_map.entry(h.docid.clone()).or_insert_with(|| h.text.clone());
         }
 
