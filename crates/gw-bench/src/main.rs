@@ -276,7 +276,7 @@ impl BrowseCompBridge {
                         }
                         _ => {
                             // Default to boosted BM25 — retrieve more if reranking
-                            let retrieve_k = if rerank_url.is_some() { std::cmp::max(k, 50) } else { k };
+                            let retrieve_k = if rerank_url.is_some() { std::cmp::max(k, 100) } else { k };
                             let t0 = std::time::Instant::now();
                             let hits = searcher.search_bm25_boosted(&query_str, retrieve_k).map_err(|e| {
                                 AgentError::HostFunction {
