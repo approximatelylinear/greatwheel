@@ -1,0 +1,2 @@
+# Config that loads system prompt from external file
+system_prompt_path = "bench/browsecomp/configs/system_prompt.txt"

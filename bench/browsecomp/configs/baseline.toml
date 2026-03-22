@@ -1,0 +1,43 @@
+# Baseline BenchConfig — matches all hardcoded defaults.
+# Use as a starting point for optimization experiments.
+
+# --- Prompts ---
+# Path to system prompt text file. Empty = use built-in SYSTEM_PROMPT const.
+system_prompt_path = ""
+
+# --- Pre-search ---
+n_presearch_queries = 5     # LLM-generated initial search queries
+presearch_k = 5             # Max results per sub-query
+prf_top_n = 5               # Top snippets for PRF term extraction
+prf_term_count = 5          # Distinctive PRF terms to extract
+prf_min_word_len = 4        # Min word length for PRF
+prf_max_word_len = 20       # Max word length for PRF
+prf_k = 3                   # Results per PRF query
+round2_keep_max = 15        # Max docs kept from round 1
+round2_new_queries = 3      # New queries in refinement round
+round2_k = 5                # Results per round-2 sub-query
+round1_preview_limit = 25   # Max round-1 results shown for refinement
+round1_preview_chars = 200  # Chars per snippet in refinement preview
+context_snippet_chars = 300 # Chars per snippet in context injection
+
+# --- BM25 boost weights ---
+bm25_phrase_boost = 4.0     # Exact phrase match
+bm25_slop_boost = 2.0       # Phrase with slop
+bm25_slop = 2               # Slop parameter (max term distance)
+bm25_and_boost = 1.5        # All terms AND'd
+bm25_or_boost = 1.0         # Individual terms OR'd
+
+# --- rLM loop ---
+query_timeout_secs = 180    # Per-query timeout
+max_llm_calls = 25          # Max LLM calls within REPL
+max_search_calls = 20       # Max search calls within REPL
+bridge_timeout_secs = 150   # Bridge session timeout
+
+# --- Output truncation ---
+repl_output_max_chars = 8000    # Max chars from REPL execution
+fallback_history_max_chars = 15000  # Max chars in fallback extraction
+fallback_msg_max_chars = 2000   # Max chars per message in fallback
+
+# --- Iteration prompts ---
+nudge_reminder_start = 3    # Iteration at which early reminder kicks in
+max_answer_length = 100     # Max answer length before rejected as refusal

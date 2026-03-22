@@ -102,6 +102,136 @@ struct SearchHit {
 }
 
 // -------------------------------------------------------------------------- //
+// Benchmark configuration (GEPA Phase 2)
+// -------------------------------------------------------------------------- //
+
+/// All tunable parameters for the benchmark pipeline.
+/// Loaded from TOML via `--config`, falls back to hardcoded defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct BenchConfig {
+    // --- Prompts ---
+    /// Path to system prompt text file. If empty, uses the built-in SYSTEM_PROMPT.
+    pub system_prompt_path: String,
+
+    // --- Pre-search ---
+    /// Number of initial LLM-generated search queries
+    pub n_presearch_queries: usize,
+    /// Max results per pre-search sub-query
+    pub presearch_k: usize,
+    /// Number of top snippets to analyze for PRF terms
+    pub prf_top_n: usize,
+    /// Number of distinctive PRF terms to extract
+    pub prf_term_count: usize,
+    /// Minimum word length for PRF term extraction
+    pub prf_min_word_len: usize,
+    /// Max word length for PRF term extraction
+    pub prf_max_word_len: usize,
+    /// Max results per PRF query
+    pub prf_k: usize,
+    /// Max documents to keep from round 1 refinement
+    pub round2_keep_max: usize,
+    /// Number of new queries in refinement round
+    pub round2_new_queries: usize,
+    /// Max results per round-2 sub-query
+    pub round2_k: usize,
+    /// Max round-1 results shown to LLM for refinement
+    pub round1_preview_limit: usize,
+    /// Chars per snippet in refinement preview
+    pub round1_preview_chars: usize,
+    /// Chars per snippet in context injection
+    pub context_snippet_chars: usize,
+
+    // --- BM25 boost weights ---
+    pub bm25_phrase_boost: f32,
+    pub bm25_slop_boost: f32,
+    pub bm25_slop: u32,
+    pub bm25_and_boost: f32,
+    pub bm25_or_boost: f32,
+
+    // --- rLM loop ---
+    /// Per-query timeout in seconds
+    pub query_timeout_secs: u64,
+    /// Max LLM calls within the REPL
+    pub max_llm_calls: u32,
+    /// Max search calls within the REPL
+    pub max_search_calls: u32,
+    /// Bridge timeout in seconds
+    pub bridge_timeout_secs: u64,
+
+    // --- Output truncation ---
+    /// Max chars from REPL code block execution
+    pub repl_output_max_chars: usize,
+    /// Max chars in fallback extraction history
+    pub fallback_history_max_chars: usize,
+    /// Max chars per message in fallback history
+    pub fallback_msg_max_chars: usize,
+
+    // --- Iteration prompts ---
+    /// Iteration at which the early reminder kicks in
+    pub nudge_reminder_start: usize,
+    /// Max answer length before it's rejected as a refusal
+    pub max_answer_length: usize,
+}
+
+impl Default for BenchConfig {
+    fn default() -> Self {
+        Self {
+            system_prompt_path: String::new(),
+            n_presearch_queries: 5,
+            presearch_k: 5,
+            prf_top_n: 5,
+            prf_term_count: 5,
+            prf_min_word_len: 4,
+            prf_max_word_len: 20,
+            prf_k: 3,
+            round2_keep_max: 15,
+            round2_new_queries: 3,
+            round2_k: 5,
+            round1_preview_limit: 25,
+            round1_preview_chars: 200,
+            context_snippet_chars: 300,
+            bm25_phrase_boost: 4.0,
+            bm25_slop_boost: 2.0,
+            bm25_slop: 2,
+            bm25_and_boost: 1.5,
+            bm25_or_boost: 1.0,
+            query_timeout_secs: 180,
+            max_llm_calls: 25,
+            max_search_calls: 20,
+            bridge_timeout_secs: 150,
+            repl_output_max_chars: 8000,
+            fallback_history_max_chars: 15000,
+            fallback_msg_max_chars: 2000,
+            nudge_reminder_start: 3,
+            max_answer_length: 100,
+        }
+    }
+}
+
+impl BenchConfig {
+    fn load(path: &str) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read config {path}: {e}"))?;
+        toml::from_str(&content)
+            .map_err(|e| format!("Failed to parse config {path}: {e}"))
+    }
+
+    fn system_prompt(&self) -> String {
+        if self.system_prompt_path.is_empty() {
+            return SYSTEM_PROMPT.to_string();
+        }
+        match std::fs::read_to_string(&self.system_prompt_path) {
+            Ok(content) => content,
+            Err(e) => {
+                warn!(path = self.system_prompt_path.as_str(), error = %e, "Failed to load system prompt, using default");
+                SYSTEM_PROMPT.to_string()
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------------------------- //
 // BrowseComp host bridge
 // -------------------------------------------------------------------------- //
 
@@ -168,10 +298,10 @@ impl BrowseCompBridge {
             all_docids: docid_tracker,
             total_input_tokens: 0,
             total_output_tokens: 0,
-            max_llm_calls: 25,
-            max_search_calls: 20,
+            max_llm_calls: 25,   // overridden by BenchConfig when used
+            max_search_calls: 20, // overridden by BenchConfig when used
             start_time: std::time::Instant::now(),
-            timeout_secs: 150,
+            timeout_secs: 150,    // overridden by BenchConfig when used
             timing_bm25_ms: 0,
             timing_embed_ms: 0,
             timing_vector_ms: 0,
@@ -921,7 +1051,8 @@ fn strip_think_tags(text: &str) -> String {
 /// Check if an answer is a refusal/hedge that should be rejected.
 fn is_refusal_answer(answer: &str) -> bool {
     let lower = answer.to_lowercase();
-    // Reject if answer is too long (>100 chars) — real answers are short
+    // Reject if answer is too long — real answers are short
+    // Note: threshold configurable via BenchConfig.max_answer_length (default 100)
     if answer.len() > 100 {
         return true;
     }
@@ -1329,15 +1460,17 @@ fn run_rlm_loop(
     max_iterations: u32,
     rt: &tokio::runtime::Handle,
     pre_search_context: &str,
+    bench_config: &BenchConfig,
 ) -> (String, Vec<ResultEntry>, u32, u32, Vec<TrajectoryMessage>) {
     let start_time = std::time::Instant::now();
+    let system_prompt = bench_config.system_prompt();
     let mut messages: Vec<Message> = vec![Message {
         role: "system".into(),
-        content: SYSTEM_PROMPT.to_string(),
+        content: system_prompt.clone(),
     }];
     let mut trajectory: Vec<TrajectoryMessage> = vec![TrajectoryMessage {
         role: "system".into(),
-        content: SYSTEM_PROMPT.to_string(),
+        content: system_prompt,
         code_blocks: vec![],
         repl_output: None,
     }];
@@ -1349,7 +1482,7 @@ fn run_rlm_loop(
     for iteration in 0..max_iterations {
         let _iter_span = info_span!("rlm.iteration", n = iteration + 1).entered();
         // Check timeout
-        if start_time.elapsed().as_secs() > QUERY_TIMEOUT_SECS {
+        if start_time.elapsed().as_secs() > bench_config.query_timeout_secs {
             warn!("Query timeout after {}s", start_time.elapsed().as_secs());
             break;
         }
@@ -1518,9 +1651,10 @@ fn run_rlm_loop(
                         }
                     }
 
-                    // Truncate to prevent context explosion (DSPy uses 10K, we use 8K)
-                    let truncated = if block_output.len() > 8000 {
-                        let trunc: String = block_output.chars().take(8000).collect();
+                    // Truncate to prevent context explosion
+                    let max_output = bench_config.repl_output_max_chars;
+                    let truncated = if block_output.len() > max_output {
+                        let trunc: String = block_output.chars().take(max_output).collect();
                         format!("{}...\n[truncated]", trunc)
                     } else {
                         block_output.clone()
@@ -1756,6 +1890,10 @@ struct Cli {
     #[arg(long)]
     corpus_jsonl: Option<String>,
 
+    /// Benchmark config TOML file (overrides hardcoded defaults for all pipeline parameters)
+    #[arg(long)]
+    config: Option<String>,
+
     /// Number of search results per query
     #[arg(long, default_value_t = 10)]
     k: u32,
@@ -1781,6 +1919,7 @@ struct Cli {
 fn run_single_query(
     llm: &OllamaClient,
     cli: &Cli,
+    bench_config: &BenchConfig,
     query_text: &str,
     query_id: Option<&str>,
     rt: &tokio::runtime::Handle,
@@ -1812,7 +1951,7 @@ fn run_single_query(
     let query_start = std::time::Instant::now();
 
     let docid_tracker: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let bridge = BrowseCompBridge::new(
+    let mut bridge = BrowseCompBridge::new(
         backend,
         cli.k,
         cli.search_mode.clone(),
@@ -1823,6 +1962,10 @@ fn run_single_query(
         rt.clone(),
         docid_tracker.clone(),
     );
+    // Apply config overrides
+    bridge.max_llm_calls = bench_config.max_llm_calls;
+    bridge.max_search_calls = bench_config.max_search_calls;
+    bridge.timeout_secs = bench_config.bridge_timeout_secs;
 
     let external_fns = vec![
         "search".to_string(),
@@ -1858,7 +2001,7 @@ fn run_single_query(
 
     let rlm_start = std::time::Instant::now();
     let (status, result_entries, input_tokens, output_tokens, trajectory) =
-        run_rlm_loop(llm, &cli.model, &mut agent, query_text, cli.max_turns, rt, &context_text);
+        run_rlm_loop(llm, &cli.model, &mut agent, query_text, cli.max_turns, rt, &context_text, bench_config);
     let rlm_ms = rlm_start.elapsed().as_millis() as u64;
     let total_ms = query_start.elapsed().as_millis() as u64;
     let input_tokens = input_tokens + pre_input;
@@ -1966,6 +2109,7 @@ fn majority_vote(answers: &[String]) -> String {
 fn run_with_voting(
     llm: &OllamaClient,
     cli: &Cli,
+    bench_config: &BenchConfig,
     query_text: &str,
     query_id: Option<&str>,
     rt: &tokio::runtime::Handle,
@@ -1973,7 +2117,7 @@ fn run_with_voting(
     native_searcher: Option<&Arc<CorpusSearcher>>,
 ) -> RunRecord {
     if n_runs <= 1 {
-        return run_single_query(llm, cli, query_text, query_id, rt, native_searcher);
+        return run_single_query(llm, cli, bench_config, query_text, query_id, rt, native_searcher);
     }
 
     let mut records: Vec<RunRecord> = Vec::with_capacity(n_runs as usize);
@@ -1981,7 +2125,7 @@ fn run_with_voting(
 
     for run_idx in 0..n_runs {
         info!(run = run_idx + 1, total_runs = n_runs, "Best-of-N run");
-        let record = run_single_query(llm, cli, query_text, query_id, rt, native_searcher);
+        let record = run_single_query(llm, cli, bench_config, query_text, query_id, rt, native_searcher);
         if let Some(answer) = extract_answer(&record) {
             answers.push(answer);
         }
@@ -2049,6 +2193,14 @@ async fn main() {
         .expect("Failed to initialize tracing");
 
     let cli = Cli::parse();
+
+    // Load bench config from TOML or use defaults
+    let bench_config = if let Some(ref config_path) = cli.config {
+        BenchConfig::load(config_path).expect("Failed to load config")
+    } else {
+        BenchConfig::default()
+    };
+    info!(config = ?cli.config, "Loaded bench config");
     let rt = tokio::runtime::Handle::current();
 
     // Handle --build-index: build tantivy corpus index and exit
@@ -2116,7 +2268,7 @@ async fn main() {
             );
 
             let record = tokio::task::block_in_place(|| {
-                run_with_voting(&llm, &cli, query_text, Some(qid), &rt, cli.runs, native_ref)
+                run_with_voting(&llm, &cli, &bench_config, query_text, Some(qid), &rt, cli.runs, native_ref)
             });
 
             let ts = Utc::now().format("%Y%m%dT%H%M%SZ");
@@ -2132,7 +2284,7 @@ async fn main() {
         }
     } else {
         let record = tokio::task::block_in_place(|| {
-            run_with_voting(&llm, &cli, &cli.query, None, &rt, cli.runs, native_ref)
+            run_with_voting(&llm, &cli, &bench_config, &cli.query, None, &rt, cli.runs, native_ref)
         });
 
         let ts = Utc::now().format("%Y%m%dT%H%M%SZ");
