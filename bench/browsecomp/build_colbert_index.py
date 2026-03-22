@@ -127,10 +127,10 @@ def build_index(
     table.create_index(
         metric="cosine",
         num_partitions=num_partitions,
-        num_sub_vectors=8,   # 128 / 16 = 8
-        num_bits=8,
         vector_column_name="vector",
-        index_type="IVF_PQ",
+        index_type="IVF_HNSW_SQ",
+        m=20,
+        ef_construction=300,
         replace=True,
     )
     print("Index created successfully!", flush=True)
