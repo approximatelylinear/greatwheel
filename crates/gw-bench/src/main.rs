@@ -918,18 +918,25 @@ fn strip_think_tags(text: &str) -> String {
 /// Check if an answer is a refusal/hedge that should be rejected.
 fn is_refusal_answer(answer: &str) -> bool {
     let lower = answer.to_lowercase();
+    // Reject if answer is too long (>100 chars) — real answers are short
+    if answer.len() > 100 {
+        return true;
+    }
     let refusal_phrases = [
-        "unable to determine",
-        "unable to find",
+        "unable to",
         "not found",
-        "insufficient evidence",
+        "insufficient",
         "cannot determine",
         "could not find",
+        "could not determine",
         "no exact match",
         "no specific",
+        "no matching",
         "not enough information",
         "based on the research",
         "based on the provided",
+        "n/a",
+        "best candidate based on",
     ];
     refusal_phrases.iter().any(|phrase| lower.contains(phrase))
 }
