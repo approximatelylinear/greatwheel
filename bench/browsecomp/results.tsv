@@ -61,3 +61,9 @@ mar19-baseline	0.1000	~12	43381	keep	mar19 baseline (unchanged code, native BM25
 1e40c6c	0.1333	~12	62768	keep	Fix FINAL() extraction — skip code blocks, require quoted strings. 4/30 (qwen2.5:7b)
 1e40c6c-9b	0.2667	~12	124705	keep	Same code, qwen3.5:9b. 8/30: 175+191+464+469+643+797+893+1034
 0b7da23-9b	0.1333	~12	139257	discard	Fuzzy term matching (edit distance 1, boost 0.5). 4/30 — fuzzy noise hurts retrieval
+adae6c3	0.1667	~12	98788	keep	Hybrid BM25+ColBERT (RRF fusion), first-stage ColBERT via LanceDB multi-vector MaxSim
+a6d682c	0.3667	~12	119399	keep	Hybrid BM25-first + ColBERT augment (ColBERT-unique docs appended). Ties BM25 best
+a6d682c-colbert	0.2667	~12	115047	keep	ColBERT-only search (Mode A). 8/30 — worse than boosted BM25 (11/30)
+2db8944	0.2333	~12	114536	discard	Hybrid BM25+ColBERT augment with [Q]/[D] prefix fix + IVF-HNSW-SQ. 7/30 — regression
+46933fe	0.3000	~12	121633	keep	Aggressive FINAL() prompts. 28/30 completed (was 12/30). 9/30 correct. New: 1128+1144+572+689. Lost: 175+853(near-miss)
+8414fef	0.2667	~12	120902	keep	Refusal filter v1. 26/30 completed, 1 refusal rejected. New: Q894+Q1106. 8/30
