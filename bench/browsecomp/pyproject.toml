@@ -10,6 +10,7 @@ dependencies = [
     "rich>=14.0.0",
     "python-dotenv>=1.1.0",
     "gepa>=0.1.1",
+    "litellm>=1.82.6",
 ]
 
 [project.optional-dependencies]

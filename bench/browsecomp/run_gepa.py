@@ -91,8 +91,8 @@ def build_evaluator_fn(evaluator: BrowseCompEvaluator, examples: list[dict]):
             mode = q["failure_mode"]
             failure_dist[mode] = failure_dist.get(mode, 0) + 1
 
-        correct_ids = [q["query_id"] for q in per_query if q["correct"]]
-        wrong_queries = [q for q in per_query if not q["correct"]]
+        correct_ids = [q["query_id"] for q in per_query if q.get("correct", False)]
+        wrong_queries = [q for q in per_query if not q.get("correct", False)]
 
         # Build concise feedback string for reflection
         feedback_lines = [
@@ -103,12 +103,13 @@ def build_evaluator_fn(evaluator: BrowseCompEvaluator, examples: list[dict]):
         ]
         for q in wrong_queries[:5]:  # Show up to 5 failures in detail
             feedback_lines.append(
-                f"Q{q['query_id']} [{q['failure_mode']}]: "
-                f"expected '{q['expected_answer'][:50]}', "
-                f"got '{q['final_answer'][:50]}'"
+                f"Q{q.get('query_id', '?')} [{q.get('failure_mode', '?')}]: "
+                f"expected '{q.get('expected_answer', '?')[:50]}', "
+                f"got '{q.get('final_answer', '?')[:50]}'"
             )
-            if q["searches_issued"]:
-                feedback_lines.append(f"  searches: {q['searches_issued'][:3]}")
+            searches = q.get("searches_issued", [])
+            if searches:
+                feedback_lines.append(f"  searches: {searches[:3]}")
 
         side_info = {
             "accuracy": accuracy,
