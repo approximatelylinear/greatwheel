@@ -729,6 +729,8 @@ RULES:
 - NEVER repeat a search query. Each search must use different keywords.
 - ALWAYS read at least 2 full documents before submitting an answer.
 - Store evidence in variables; don't repeat work.
+- You MUST call FINAL("answer") before running out of iterations. A wrong answer is better than no answer.
+- After iteration 4, you should have a candidate. Call FINAL() as soon as you do.
 
 /no_think"#;
 
@@ -750,26 +752,26 @@ fn iteration_prompt(query: &str, iteration: usize, max_iterations: usize, variab
         } else {
             format!("\n\nVariables in scope:\n{variables_info}\n")
         };
-        let nudge = if iteration >= 6 {
-            "\nHINT: You're running low on iterations. If you have a candidate answer, \
-             VERIFY it by searching for it by name. If not, pick the BEST answer from the \
-             evidence you've gathered so far and submit with FINAL()."
-        } else if iteration >= 4 {
-            "\nHINT: If stuck, try a COMPLETELY DIFFERENT search angle. \
-             Search for entities you DISCOVERED in documents (not just from the query). \
-             Use llm_query() to carefully analyze documents — don't skim snippets."
-        } else if iteration >= 2 {
-            "\nREMINDER: Have you read full documents with get_document()? \
-             Snippets are NOT enough. Load documents and use llm_query() to extract facts."
+        let nudge = if iteration >= max_iterations - 2 {
+            "\n⚠️ LAST CHANCE — you MUST call FINAL(\"answer\") in this code block. \
+             Pick your best candidate from the evidence so far. Do NOT search again. \
+             Do NOT say unable to determine. Submit your best guess NOW with FINAL()."
+        } else if iteration >= max_iterations / 2 {
+            "\n⚠️ HALFWAY — you should have a candidate answer by now. \
+             If you do, call FINAL(\"answer\") immediately. \
+             If not, do ONE more targeted search, then FINAL() in the next iteration. \
+             Do NOT waste iterations — submit as soon as you have any plausible answer."
+        } else if iteration >= 3 {
+            "\nREMINDER: Each iteration is expensive. If you've found a plausible answer, \
+             call FINAL(\"answer\") now. Don't over-research — a good guess beats no answer."
         } else {
             ""
         };
         format!(
-            "{counter} Continue investigating to answer: \"{query}\"\n\
+            "{counter} Continue investigating: \"{query}\"\n\
              {vars_section}\n\
-             Think: which sub-facts have you established? Which are still unknown? \
-             Read more documents with get_document() and extract facts with llm_query(). \
-             Search with DIFFERENT keywords targeting unknown facts.{nudge}\n\n\
+             What is your current best candidate answer? If you have one, call FINAL(\"answer\"). \
+             Otherwise, do ONE focused search or document read, then submit.{nudge}\n\n\
              Write a ```repl``` code block:"
         )
     }
@@ -782,12 +784,15 @@ fn final_prompt(query: &str, variables_info: &str) -> String {
         format!("\n\nVariables in scope:\n{variables_info}\n")
     };
     format!(
-        "[FINAL ITERATION] You MUST submit your answer NOW.\n\n\
+        "[FINAL ITERATION] You MUST call FINAL() NOW. No more searching.\n\n\
          Query: \"{query}\"\n\
          {vars_section}\n\
-         Based on ALL evidence gathered, provide your best answer. \
-         NEVER say 'Unable to determine'. Give your BEST GUESS even if uncertain.\n\n\
-         Write a ```repl``` block ending with FINAL(\"your answer\"):"
+         Write ONLY this:\n\
+         ```repl\n\
+         FINAL(\"your best answer\")\n\
+         ```\n\
+         Replace \"your best answer\" with a specific name, number, date, or short phrase. \
+         NEVER say unable to determine. Give your BEST GUESS."
     )
 }
 
