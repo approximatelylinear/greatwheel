@@ -860,12 +860,15 @@ fn fallback_extract(
     let history: String = history.chars().take(15000).collect();
 
     let extract_prompt = format!(
-        "You are extracting a final answer from a research session. The researcher was investigating this query but ran out of iterations.\n\n\
+        "Extract the answer from this research session.\n\n\
          Query: \"{query}\"\n\n\
          Research history:\n{history}\n\n\
-         Based on ALL evidence found during the research, what is the BEST answer to the query?\n\
-         Give ONLY the answer — a specific name, number, date, or short phrase. No explanation.\n\
-         NEVER say 'Unable to determine'. Give your best guess.\n\n/no_think"
+         Reply with ONLY the answer — a specific name, number, date, or short phrase.\n\
+         Rules:\n\
+         - ONE answer only, no explanation\n\
+         - NEVER say \"unable to determine\", \"not found\", \"insufficient\", or similar\n\
+         - If unsure, pick the MOST LIKELY candidate mentioned in the research\n\
+         - The answer is a short factual phrase (1-5 words)\n\n/no_think"
     );
 
     let msgs = vec![Message {
@@ -910,6 +913,25 @@ fn strip_think_tags(text: &str) -> String {
     }
     result.push_str(rest);
     result.trim().to_string()
+}
+
+/// Check if an answer is a refusal/hedge that should be rejected.
+fn is_refusal_answer(answer: &str) -> bool {
+    let lower = answer.to_lowercase();
+    let refusal_phrases = [
+        "unable to determine",
+        "unable to find",
+        "not found",
+        "insufficient evidence",
+        "cannot determine",
+        "could not find",
+        "no exact match",
+        "no specific",
+        "not enough information",
+        "based on the research",
+        "based on the provided",
+    ];
+    refusal_phrases.iter().any(|phrase| lower.contains(phrase))
 }
 
 const QUERY_TIMEOUT_SECS: u64 = 180; // 3 minutes max per query (more iterations need more time)
@@ -1386,6 +1408,18 @@ fn run_rlm_loop(
 
         // Check for FINAL() in plain text (outside code blocks)
         if let Some(answer) = extract_final_answer(&content) {
+            // Reject refusal answers — force the model to keep trying
+            if is_refusal_answer(&answer) {
+                info!(iteration, answer = answer.as_str(), "Rejected refusal answer, continuing");
+                messages.push(Message {
+                    role: "user".into(),
+                    content: "Your answer was a refusal (\"unable to determine\" etc). This is NOT allowed. \
+                              You MUST give a specific name, number, date, or phrase. \
+                              Pick your BEST GUESS from the documents you've read. \
+                              Write a ```repl``` block ending with FINAL(\"your concrete answer\"):".to_string(),
+                });
+                continue;
+            }
             trajectory.push(TrajectoryMessage {
                 role: "assistant".into(),
                 content: content.clone(),
@@ -1497,21 +1531,27 @@ fn run_rlm_loop(
                                 serde_json::Value::String(s) => s.clone(),
                                 other => other.to_string(),
                             };
-                            result_entries.push(ResultEntry {
-                                entry_type: "output_text".into(),
-                                tool_name: None,
-                                arguments: None,
-                                output: Some(serde_json::Value::String(format!(
-                                    "Exact Answer: {answer}"
-                                ))),
-                            });
-                            return (
-                                "completed".into(),
-                                result_entries,
-                                total_input,
-                                total_output,
-                                trajectory,
-                            );
+                            // Reject refusal answers from code too
+                            if is_refusal_answer(&answer) {
+                                info!(iteration, answer = answer.as_str(), "Rejected refusal FINAL from code");
+                                exec_output.push_str("[Your answer was rejected because it was a refusal. Give a specific answer.]\n");
+                            } else {
+                                result_entries.push(ResultEntry {
+                                    entry_type: "output_text".into(),
+                                    tool_name: None,
+                                    arguments: None,
+                                    output: Some(serde_json::Value::String(format!(
+                                        "Exact Answer: {answer}"
+                                    ))),
+                                });
+                                return (
+                                    "completed".into(),
+                                    result_entries,
+                                    total_input,
+                                    total_output,
+                                    trajectory,
+                                );
+                            }
                         }
                     }
                 }
