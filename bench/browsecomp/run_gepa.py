@@ -229,21 +229,32 @@ def main():
     print("\n" + "=" * 60)
     print("GEPA Optimization Complete")
     print("=" * 60)
-    print(f"Best score: {result.best_score:.4f}")
-    print(f"Best candidate length: {len(result.best_candidate)} chars")
+    best = result.best_candidate
+    if isinstance(best, dict):
+        best_text = best.get("system_prompt", str(best))
+    else:
+        best_text = str(best)
+    print(f"Best candidate index: {result.best_idx}")
+    print(f"Best candidate length: {len(best_text)} chars")
+    print(f"Total metric calls: {result.total_metric_calls}")
 
     # Save best prompt
     best_path = Path(run_dir) / "best_prompt.txt"
     best_path.parent.mkdir(parents=True, exist_ok=True)
-    best_path.write_text(result.best_candidate)
+    best_path.write_text(best_text)
     print(f"Best prompt saved to: {best_path}")
+
+    # Save full result
+    result_path = Path(run_dir) / "result.json"
+    result_path.write_text(json.dumps(result.to_dict(), indent=2, default=str))
+    print(f"Full result saved to: {result_path}")
 
     # Evaluate best on full sample30 if we used a subset
     if args.subset > 0:
         print(f"\nValidating best prompt on full sample30...")
         all_examples = load_sample30()
         full_eval = build_evaluator_fn(bench_evaluator, all_examples)
-        full_score, full_info = full_eval(result.best_candidate)
+        full_score, full_info = full_eval(best_text)
         print(f"Full sample30 accuracy: {full_info['n_correct']}/{full_info['n_total']} ({full_score:.1%})")
         print(f"Failures: {full_info['failure_distribution']}")
 
