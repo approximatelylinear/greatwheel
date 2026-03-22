@@ -84,7 +84,18 @@ def is_hedge(answer: str) -> bool:
 
 
 def extract_retrieved_docids(data: dict) -> set[str]:
-    """Extract all docids the agent encountered during the run."""
+    """Extract all docids the agent encountered during the run.
+
+    Prefers the `retrieved_docids` field populated by Rust (via Arc<Mutex>
+    tracking in BrowseCompBridge). Falls back to parsing trajectory text
+    for older run files that don't have this field populated.
+    """
+    # Primary: use the tracked field from gw-bench
+    tracked = data.get("retrieved_docids", [])
+    if tracked:
+        return set(str(d) for d in tracked)
+
+    # Fallback: parse from trajectory
     docids = set()
 
     for t in data.get("trajectory", []):
@@ -95,7 +106,6 @@ def extract_retrieved_docids(data: dict) -> set[str]:
 
         # From REPL output: printed docids
         output = t.get("repl_output") or ""
-        # Patterns: "0: 69893 —", "docid=69893", "'docid': '69893'"
         for m in re.finditer(r"(?:^\d+:\s+|docid[=:\s]+['\"]?)(\d{3,6})", output, re.MULTILINE):
             docids.add(m.group(1))
         for m in re.finditer(r"['\"]docid['\"]:\s*['\"](\d+)['\"]", output):

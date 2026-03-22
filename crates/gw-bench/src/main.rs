@@ -127,7 +127,7 @@ struct BrowseCompBridge {
     rt: tokio::runtime::Handle,
     // Tracking
     tool_counts: HashMap<String, u32>,
-    all_docids: Vec<String>,
+    all_docids: Arc<std::sync::Mutex<Vec<String>>>,
     total_input_tokens: u32,
     total_output_tokens: u32,
     // Limits
@@ -153,6 +153,7 @@ impl BrowseCompBridge {
         llm: OllamaClient,
         model: String,
         rt: tokio::runtime::Handle,
+        docid_tracker: Arc<std::sync::Mutex<Vec<String>>>,
     ) -> Self {
         Self {
             backend,
@@ -164,7 +165,7 @@ impl BrowseCompBridge {
             model,
             rt,
             tool_counts: HashMap::new(),
-            all_docids: Vec::new(),
+            all_docids: docid_tracker,
             total_input_tokens: 0,
             total_output_tokens: 0,
             max_llm_calls: 25,
@@ -385,7 +386,9 @@ impl BrowseCompBridge {
 
         tracing::Span::current().record("gw.hits", hits.len() as u64);
         for hit in &hits {
-            self.all_docids.push(hit.docid.clone());
+            if let Ok(mut docids) = self.all_docids.lock() {
+                docids.push(hit.docid.clone());
+            }
         }
 
         let results: Vec<serde_json::Value> = hits
@@ -1808,6 +1811,7 @@ fn run_single_query(
 
     let query_start = std::time::Instant::now();
 
+    let docid_tracker: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     let bridge = BrowseCompBridge::new(
         backend,
         cli.k,
@@ -1817,6 +1821,7 @@ fn run_single_query(
         llm.clone(),
         cli.model.clone(),
         rt.clone(),
+        docid_tracker.clone(),
     );
 
     let external_fns = vec![
@@ -1898,7 +1903,12 @@ fn run_single_query(
         },
         timing: None,
         status,
-        retrieved_docids: Vec::new(), // TODO: extract from bridge
+        retrieved_docids: {
+            let mut docids = docid_tracker.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            docids.sort();
+            docids.dedup();
+            docids
+        },
         result: result_entries,
         trajectory,
     };
