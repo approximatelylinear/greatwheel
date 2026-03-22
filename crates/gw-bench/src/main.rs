@@ -1910,6 +1910,10 @@ struct Cli {
     #[arg(long, default_value = "topics-qrels/queries.tsv")]
     query: String,
 
+    /// Query ID (for single-query mode, sets query_id in output JSON)
+    #[arg(long)]
+    query_id: Option<String>,
+
     /// Output directory for result JSON files
     #[arg(long, default_value = "runs/rlm-agent")]
     output_dir: String,
@@ -2284,7 +2288,7 @@ async fn main() {
         }
     } else {
         let record = tokio::task::block_in_place(|| {
-            run_with_voting(&llm, &cli, &bench_config, &cli.query, None, &rt, cli.runs, native_ref)
+            run_with_voting(&llm, &cli, &bench_config, &cli.query, cli.query_id.as_deref(), &rt, cli.runs, native_ref)
         });
 
         let ts = Utc::now().format("%Y%m%dT%H%M%SZ");
