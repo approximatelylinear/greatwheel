@@ -45,6 +45,11 @@ struct RunRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     timing: Option<TimingInfo>,
     status: String,
+    /// Why the rLM loop terminated: "final_called", "max_turns", "timeout",
+    /// "refusal_rejected", "llm_error", "max_turns_fallback"
+    termination_reason: String,
+    /// Number of rLM iterations actually used
+    iterations_used: u32,
     retrieved_docids: Vec<String>,
     result: Vec<ResultEntry>,
     /// Full conversation trajectory (system + user + assistant messages)
@@ -67,7 +72,8 @@ struct TrajectoryMessage {
 #[derive(Debug, Clone, Serialize)]
 struct RunMetadata {
     model: String,
-    ollama_url: String,
+    llm_backend: String,
+    llm_url: String,
     searcher: String,
     max_turns: u32,
     k: u32,
@@ -1451,7 +1457,17 @@ fn pre_search(
     (all_hits, context_text, total_input, total_output)
 }
 
-#[tracing::instrument(name = "rlm.loop", skip(llm, agent, rt, pre_search_context), fields(gw.max_iterations = max_iterations, gw.iterations_used, gw.status, gw.input_tokens, gw.output_tokens))]
+struct RlmLoopResult {
+    status: String,
+    termination_reason: String,
+    iterations_used: u32,
+    result_entries: Vec<ResultEntry>,
+    input_tokens: u32,
+    output_tokens: u32,
+    trajectory: Vec<TrajectoryMessage>,
+}
+
+#[tracing::instrument(name = "rlm.loop", skip(llm, agent, rt, pre_search_context, bench_config), fields(gw.max_iterations = max_iterations, gw.iterations_used, gw.status, gw.input_tokens, gw.output_tokens))]
 fn run_rlm_loop(
     llm: &OllamaClient,
     model: &str,
@@ -1461,7 +1477,7 @@ fn run_rlm_loop(
     rt: &tokio::runtime::Handle,
     pre_search_context: &str,
     bench_config: &BenchConfig,
-) -> (String, Vec<ResultEntry>, u32, u32, Vec<TrajectoryMessage>) {
+) -> RlmLoopResult {
     let start_time = std::time::Instant::now();
     let system_prompt = bench_config.system_prompt();
     let mut messages: Vec<Message> = vec![Message {
@@ -1478,12 +1494,16 @@ fn run_rlm_loop(
     let mut result_entries: Vec<ResultEntry> = Vec::new();
     let mut total_input = 0u32;
     let mut total_output = 0u32;
+    let mut termination_reason = "max_turns".to_string();
+    let mut iterations_used = 0u32;
 
     for iteration in 0..max_iterations {
+        iterations_used = iteration + 1;
         let _iter_span = info_span!("rlm.iteration", n = iteration + 1).entered();
         // Check timeout
         if start_time.elapsed().as_secs() > bench_config.query_timeout_secs {
             warn!("Query timeout after {}s", start_time.elapsed().as_secs());
+            termination_reason = "timeout".to_string();
             break;
         }
         // Build variables metadata preview (DSPy-style)
@@ -1596,7 +1616,15 @@ fn run_rlm_loop(
                     span.record("gw.iterations_used", iteration + 1);
                     span.record("gw.input_tokens", total_input as u64);
                     span.record("gw.output_tokens", total_output as u64);
-                    return ("completed".into(), result_entries, total_input, total_output, trajectory);
+                    return RlmLoopResult {
+                        status: "completed".into(),
+                        termination_reason: "final_called".into(),
+                        iterations_used,
+                        result_entries,
+                        input_tokens: total_input,
+                        output_tokens: total_output,
+                        trajectory,
+                    };
                 }
             } else {
                 result_entries.push(ResultEntry {
@@ -1610,7 +1638,15 @@ fn run_rlm_loop(
                 span.record("gw.iterations_used", iteration + 1);
                 span.record("gw.input_tokens", total_input as u64);
                 span.record("gw.output_tokens", total_output as u64);
-                return ("completed".into(), result_entries, total_input, total_output, trajectory);
+                return RlmLoopResult {
+                    status: "completed".into(),
+                    termination_reason: "final_called".into(),
+                    iterations_used,
+                    result_entries,
+                    input_tokens: total_input,
+                    output_tokens: total_output,
+                    trajectory,
+                };
             }
         }
 
@@ -1688,13 +1724,15 @@ fn run_rlm_loop(
                                         "Exact Answer: {answer}"
                                     ))),
                                 });
-                                return (
-                                    "completed".into(),
+                                return RlmLoopResult {
+                                    status: "completed".into(),
+                                    termination_reason: "final_called_code".into(),
+                                    iterations_used,
                                     result_entries,
-                                    total_input,
-                                    total_output,
+                                    input_tokens: total_input,
+                                    output_tokens: total_output,
                                     trajectory,
-                                );
+                                };
                             }
                         }
                     }
@@ -1748,7 +1786,15 @@ fn run_rlm_loop(
                 span.record("gw.iterations_used", iteration + 1);
                 span.record("gw.input_tokens", total_input as u64);
                 span.record("gw.output_tokens", total_output as u64);
-                return ("completed".into(), result_entries, total_input, total_output, trajectory);
+                return RlmLoopResult {
+                    status: "completed".into(),
+                    termination_reason: "final_called".into(),
+                    iterations_used,
+                    result_entries,
+                    input_tokens: total_input,
+                    output_tokens: total_output,
+                    trajectory,
+                };
             }
         }
     }
@@ -1778,13 +1824,15 @@ fn run_rlm_loop(
     span.record("gw.iterations_used", max_iterations as u64);
     span.record("gw.input_tokens", total_input as u64);
     span.record("gw.output_tokens", total_output as u64);
-    (
-        "max_turns_fallback".into(),
+    RlmLoopResult {
+        status: "max_turns_fallback".into(),
+        termination_reason,
+        iterations_used,
         result_entries,
-        total_input,
-        total_output,
+        input_tokens: total_input,
+        output_tokens: total_output,
         trajectory,
-    )
+    }
 }
 
 // -------------------------------------------------------------------------- //
@@ -1834,11 +1882,19 @@ fn already_processed(output_dir: &Path) -> std::collections::HashSet<String> {
     about = "Greatwheel BrowseComp-Plus benchmark (rLM + ouros REPL)"
 )]
 struct Cli {
-    /// Ollama API URL
+    /// LLM backend: "ollama" (native API) or "sglang" (OpenAI-compatible)
+    #[arg(long, default_value = "ollama", env = "GW_LLM_BACKEND")]
+    llm_backend: String,
+
+    /// LLM server URL (overrides --ollama-url when set)
+    #[arg(long, env = "GW_LLM_URL")]
+    llm_url: Option<String>,
+
+    /// Ollama API URL (used when --llm-url is not set)
     #[arg(long, default_value = "http://localhost:11434", env = "OLLAMA_URL")]
     ollama_url: String,
 
-    /// Ollama model name
+    /// LLM model name
     #[arg(long, default_value = "qwen2.5:7b", env = "GW_MODEL")]
     model: String,
 
@@ -2004,12 +2060,16 @@ fn run_single_query(
     agent.set_variable("answer_type", Object::String(answer_type.clone())).ok();
 
     let rlm_start = std::time::Instant::now();
-    let (status, result_entries, input_tokens, output_tokens, trajectory) =
-        run_rlm_loop(llm, &cli.model, &mut agent, query_text, cli.max_turns, rt, &context_text, bench_config);
+    let rlm_result = run_rlm_loop(llm, &cli.model, &mut agent, query_text, cli.max_turns, rt, &context_text, bench_config);
     let rlm_ms = rlm_start.elapsed().as_millis() as u64;
     let total_ms = query_start.elapsed().as_millis() as u64;
-    let input_tokens = input_tokens + pre_input;
-    let output_tokens = output_tokens + pre_output;
+    let status = rlm_result.status;
+    let termination_reason = rlm_result.termination_reason;
+    let iterations_used = rlm_result.iterations_used;
+    let result_entries = rlm_result.result_entries;
+    let trajectory = rlm_result.trajectory;
+    let input_tokens = rlm_result.input_tokens + pre_input;
+    let output_tokens = rlm_result.output_tokens + pre_output;
 
     info!(
         total_ms,
@@ -2036,7 +2096,8 @@ fn run_single_query(
     let record = RunRecord {
         metadata: RunMetadata {
             model: cli.model.clone(),
-            ollama_url: cli.ollama_url.clone(),
+            llm_backend: cli.llm_backend.clone(),
+            llm_url: cli.llm_url.clone().unwrap_or_else(|| cli.ollama_url.clone()),
             searcher: "rlm-ouros".into(),
             max_turns: cli.max_turns,
             k: cli.k,
@@ -2048,8 +2109,19 @@ fn run_single_query(
             output_tokens,
             total_tokens: input_tokens + output_tokens,
         },
-        timing: None,
+        timing: Some(TimingInfo {
+            total_ms,
+            bm25_ms: 0,
+            embed_ms: 0,
+            vector_ms: 0,
+            llm_query_ms: 0,
+            get_doc_ms: 0,
+            root_llm_ms: rlm_ms,
+            other_ms: pre_search_ms,
+        }),
         status,
+        termination_reason,
+        iterations_used,
         retrieved_docids: {
             let mut docids = docid_tracker.lock().unwrap_or_else(|e| e.into_inner()).clone();
             docids.sort();
@@ -2220,11 +2292,25 @@ async fn main() {
         return;
     }
 
-    let llm = OllamaClient::new(
-        cli.ollama_url.clone(),
+    let backend: gw_llm::LlmBackend = cli.llm_backend.parse().unwrap_or_else(|e| {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    });
+    // Resolve LLM URL: --llm-url > --ollama-url (with backend-specific default)
+    let llm_chat_url = cli.llm_url.clone().unwrap_or_else(|| {
+        if backend == gw_llm::LlmBackend::Sglang {
+            "http://localhost:30000".to_string()
+        } else {
+            cli.ollama_url.clone()
+        }
+    });
+    // Embeddings always go through Ollama
+    let llm = OllamaClient::with_backend(
+        llm_chat_url,
         cli.ollama_url.clone(),
         cli.model.clone(),
         "nomic-embed-text".into(),
+        backend,
     );
 
     // Open native searcher if requested
