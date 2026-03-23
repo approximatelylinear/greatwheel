@@ -56,8 +56,41 @@ services:
     #       devices:
     #         - capabilities: [gpu]
 
+  sglang:
+    image: lmsysorg/sglang:latest
+    ports:
+      - "30000:30000"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    entrypoint: ["python3", "-m", "sglang.launch_server"]
+    command:
+      - "--model-path"
+      - "Qwen/Qwen3.5-9B"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "30000"
+      - "--mem-fraction-static"
+      - "0.80"
+      - "--quantization"
+      - "fp8"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:30000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 12
+      start_period: 120s
+
 volumes:
   pg-data:
   lance-data:
   ollama-models:
   rl-play-data:
+  hf-cache:

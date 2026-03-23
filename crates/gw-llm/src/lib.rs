@@ -16,13 +16,47 @@ pub struct CompletionResponse {
     pub output_tokens: Option<u32>,
 }
 
-/// Ollama client that routes chat through rl-play and embeddings direct.
+/// LLM inference backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LlmBackend {
+    /// Ollama native API (/api/chat, /api/embed).
+    Ollama,
+    /// OpenAI-compatible API (/v1/chat/completions) — SGLang, vLLM, etc.
+    Sglang,
+}
+
+impl std::fmt::Display for LlmBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LlmBackend::Ollama => write!(f, "ollama"),
+            LlmBackend::Sglang => write!(f, "sglang"),
+        }
+    }
+}
+
+impl std::str::FromStr for LlmBackend {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "ollama" => Ok(LlmBackend::Ollama),
+            "sglang" | "vllm" | "openai" => Ok(LlmBackend::Sglang),
+            _ => Err(format!("unknown LLM backend: {s} (expected: ollama, sglang)")),
+        }
+    }
+}
+
+/// LLM client that supports Ollama and OpenAI-compatible (SGLang/vLLM) backends.
+///
+/// - Chat requests route through `proxy_url` (Ollama: /api/chat, SGLang: /v1/chat/completions).
+/// - Embedding requests always use Ollama's /api/embed via `direct_url`.
 #[derive(Clone)]
 pub struct OllamaClient {
     pub proxy_url: String,
     pub direct_url: String,
     pub default_model: String,
     pub embedding_model: String,
+    pub backend: LlmBackend,
     client: reqwest::Client,
 }
 
@@ -33,6 +67,16 @@ impl OllamaClient {
         default_model: String,
         embedding_model: String,
     ) -> Self {
+        Self::with_backend(proxy_url, direct_url, default_model, embedding_model, LlmBackend::Ollama)
+    }
+
+    pub fn with_backend(
+        proxy_url: String,
+        direct_url: String,
+        default_model: String,
+        embedding_model: String,
+        backend: LlmBackend,
+    ) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()
@@ -42,22 +86,31 @@ impl OllamaClient {
             direct_url,
             default_model,
             embedding_model,
+            backend,
             client,
         }
     }
 
-    /// Returns the effective base URL for chat. Tries proxy first, falls back to direct.
+    /// Returns the chat endpoint URL based on the active backend.
     fn chat_url(&self) -> String {
-        format!("{}/api/chat", self.proxy_url)
+        match self.backend {
+            LlmBackend::Ollama => format!("{}/api/chat", self.proxy_url),
+            LlmBackend::Sglang => format!("{}/v1/chat/completions", self.proxy_url),
+        }
     }
 
     /// Non-streaming chat completion.
+    /// For SGLang backend, defaults to think=false (Qwen3.5 thinking mode off).
     pub async fn chat(
         &self,
         messages: &[Message],
         model: Option<&str>,
     ) -> Result<CompletionResponse, Box<dyn std::error::Error + Send + Sync>> {
-        self.chat_with_options(messages, model, None).await
+        let think = match self.backend {
+            LlmBackend::Sglang => Some(false), // SGLang + Qwen3.5: disable thinking by default
+            _ => None,
+        };
+        self.chat_with_options(messages, model, think).await
     }
 
     /// Non-streaming chat completion with optional think parameter.
@@ -88,7 +141,17 @@ impl OllamaClient {
             "stream": false,
         });
         if let Some(think_val) = think {
-            body["think"] = serde_json::Value::Bool(think_val);
+            match self.backend {
+                LlmBackend::Ollama => {
+                    body["think"] = serde_json::Value::Bool(think_val);
+                }
+                LlmBackend::Sglang => {
+                    // SGLang uses chat_template_kwargs for Qwen3.5 thinking mode
+                    body["chat_template_kwargs"] = serde_json::json!({
+                        "enable_thinking": think_val,
+                    });
+                }
+            }
         }
 
         let resp = self
@@ -101,12 +164,34 @@ impl OllamaClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Ollama returned {status}: {body}").into());
+            let backend = self.backend;
+            return Err(format!("{backend} returned {status}: {body}").into());
         }
 
         let json: serde_json::Value = resp.json().await?;
-        let input_tokens = json["prompt_eval_count"].as_u64().map(|n| n as u32);
-        let output_tokens = json["eval_count"].as_u64().map(|n| n as u32);
+
+        let (content, input_tokens, output_tokens) = match self.backend {
+            LlmBackend::Ollama => {
+                let content = json["message"]["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                let input = json["prompt_eval_count"].as_u64().map(|n| n as u32);
+                let output = json["eval_count"].as_u64().map(|n| n as u32);
+                (content, input, output)
+            }
+            LlmBackend::Sglang => {
+                let content = json["choices"]
+                    .as_array()
+                    .and_then(|c| c.first())
+                    .and_then(|c| c["message"]["content"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let input = json["usage"]["prompt_tokens"].as_u64().map(|n| n as u32);
+                let output = json["usage"]["completion_tokens"].as_u64().map(|n| n as u32);
+                (content, input, output)
+            }
+        };
 
         let span = tracing::Span::current();
         if let Some(t) = input_tokens {
@@ -117,10 +202,7 @@ impl OllamaClient {
         }
 
         Ok(CompletionResponse {
-            content: json["message"]["content"]
-                .as_str()
-                .unwrap_or("")
-                .to_string(),
+            content,
             input_tokens,
             output_tokens,
         })
@@ -231,8 +313,11 @@ impl OllamaClient {
     }
 
 
-    /// Streaming chat — returns the raw reqwest Response for NDJSON processing.
-    /// Each line is a JSON object with `message.content` (token) and `done` flag.
+    /// Streaming chat — returns the raw reqwest Response for line-by-line processing.
+    ///
+    /// Stream format varies by backend:
+    /// - Ollama: NDJSON lines with `message.content` (token) and `done` flag.
+    /// - SGLang: SSE lines (`data: {...}`) with `choices[0].delta.content`.
     #[tracing::instrument(
         name = "gen_ai.chat",
         skip(self, messages),
@@ -265,7 +350,8 @@ impl OllamaClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Ollama returned {status}: {body}").into());
+            let backend = self.backend;
+            return Err(format!("{backend} returned {status}: {body}").into());
         }
 
         Ok(resp)
