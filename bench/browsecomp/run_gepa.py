@@ -131,7 +131,7 @@ def main():
                         help="Use N-query representative subset (0 = all 30)")
     parser.add_argument("--max-metric-calls", type=int, default=20,
                         help="Max evaluator invocations")
-    parser.add_argument("--reflection-lm", default="openai/gpt-4o",
+    parser.add_argument("--reflection-lm", default="openai/gpt-5",
                         help="LiteLLM model string for reflection/proposal")
     parser.add_argument("--model", default="qwen3.5:9b",
                         help="Agent LLM model (via Ollama)")
