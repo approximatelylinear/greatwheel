@@ -67,3 +67,4 @@ a6d682c-colbert	0.2667	~12	115047	keep	ColBERT-only search (Mode A). 8/30 — wo
 2db8944	0.2333	~12	114536	discard	Hybrid BM25+ColBERT augment with [Q]/[D] prefix fix + IVF-HNSW-SQ. 7/30 — regression
 46933fe	0.3000	~12	121633	keep	Aggressive FINAL() prompts. 28/30 completed (was 12/30). 9/30 correct. New: 1128+1144+572+689. Lost: 175+853(near-miss)
 8414fef	0.2667	~12	120902	keep	Refusal filter v1. 26/30 completed, 1 refusal rejected. New: Q894+Q1106. 8/30
+5946fae-sglang	0.1333	~12	113165	discard	SGLang fp8 Qwen3.5-9B. 4/30 — significant regression from Ollama (8-11/30). fp8 quality loss
