@@ -163,10 +163,14 @@ def score_answer_llm(
     agent_answer: str,
     ground_truth: str,
     query: str,
+    judge_backend: str = "ollama",
     ollama_url: str = "http://localhost:11434",
     model: str = "qwen3.5:9b",
 ) -> bool:
-    """LLM judge: ask the model if the answers are equivalent."""
+    """LLM judge: ask the model if the answers are equivalent.
+
+    judge_backend: "ollama" (local) or "openai" (API, uses OPENAI_API_KEY from env)
+    """
     if not agent_answer or not ground_truth:
         return False
 
@@ -192,30 +196,50 @@ def score_answer_llm(
         f"abbreviations, partial but unambiguous name matches.\n\n"
         f"It is WRONG if: it names a different entity, gives a vague/generic response, "
         f"or the answer text is not a real factual answer.\n\n"
-        f"Reply with ONLY 'YES' or 'NO'.\n\n/no_think"
+        f"Reply with ONLY 'YES' or 'NO'."
     )
 
     try:
-        resp = requests.post(
-            f"{ollama_url}/api/chat",
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-                "think": False,
-            },
-            timeout=30,
-        )
-        if resp.ok:
-            content = resp.json().get("message", {}).get("content", "").strip().upper()
-            return content.startswith("YES")
+        if judge_backend == "openai":
+            from dotenv import load_dotenv
+            load_dotenv()
+            api_key = os.environ.get("OPENAI_API_KEY", "")
+            if not api_key:
+                return False
+            resp = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 5,
+                },
+                timeout=15,
+            )
+            if resp.ok:
+                content = resp.json()["choices"][0]["message"]["content"].strip().upper()
+                return content.startswith("YES")
+        else:
+            resp = requests.post(
+                f"{ollama_url}/api/chat",
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                    "think": False,
+                },
+                timeout=30,
+            )
+            if resp.ok:
+                content = resp.json().get("message", {}).get("content", "").strip().upper()
+                return content.startswith("YES")
     except Exception:
         pass
 
     return False
 
 
-def evaluate_run_dir(run_dir: Path, gt: dict[str, dict[str, str]], fuzzy: bool = False, llm_judge: bool = False, judge_model: str = "qwen3.5:9b", ollama_url: str = "http://localhost:11434") -> dict:
+def evaluate_run_dir(run_dir: Path, gt: dict[str, dict[str, str]], fuzzy: bool = False, llm_judge: bool = False, judge_model: str = "qwen3.5:9b", judge_backend: str = "ollama", ollama_url: str = "http://localhost:11434") -> dict:
     """Evaluate all JSON files in a run directory."""
     json_files = sorted(run_dir.glob("*.json"))
     if not json_files:
@@ -273,7 +297,7 @@ def evaluate_run_dir(run_dir: Path, gt: dict[str, dict[str, str]], fuzzy: bool =
             llm_correct += 1
             is_llm = True
         elif llm_judge:
-            is_llm = score_answer_llm(agent_answer, gt_answer, query_text, ollama_url, judge_model)
+            is_llm = score_answer_llm(agent_answer, gt_answer, query_text, judge_backend, ollama_url, judge_model)
             if is_llm:
                 llm_correct += 1
 
@@ -361,9 +385,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Quick BrowseComp-Plus evaluation")
     parser.add_argument("--run-dir", required=True, help="Directory with run JSON files")
     parser.add_argument("--fuzzy", action="store_true", help="Enable fuzzy matching (edit distance + token overlap)")
-    parser.add_argument("--llm-judge", action="store_true", help="Enable LLM judge (requires Ollama)")
-    parser.add_argument("--judge-model", default="qwen3.5:9b", help="Model for LLM judge")
-    parser.add_argument("--ollama-url", default="http://localhost:11434", help="Ollama URL for LLM judge")
+    parser.add_argument("--llm-judge", action="store_true", help="Enable LLM judge")
+    parser.add_argument("--judge-model", default="gpt-4o-mini", help="Model for LLM judge")
+    parser.add_argument("--judge-backend", default="openai", choices=["openai", "ollama"], help="LLM judge backend")
+    parser.add_argument("--ollama-url", default="http://localhost:11434", help="Ollama URL (if using ollama backend)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show per-query breakdown")
     parser.add_argument(
         "--write-sample-tsv",
@@ -387,6 +412,7 @@ if __name__ == "__main__":
         fuzzy=args.fuzzy or args.llm_judge,
         llm_judge=args.llm_judge,
         judge_model=args.judge_model,
+        judge_backend=args.judge_backend,
         ollama_url=args.ollama_url,
     )
     print_results(results, verbose=args.verbose)
