@@ -1,0 +1,35 @@
+name = "L09: Error recovery across turns (live)"
+capability = "error_recovery"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+4. If a previous attempt had an error, fix it and try again.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Set up data
+[[turns]]
+type = "user_message"
+content = "Create a list called items with values [10, 0, 5, 0, 20]."
+
+# Turn 2: Attempt division that will encounter zeros — the LLM should handle this
+[[turns]]
+type = "user_message"
+content = "Create a list called safe_reciprocals where each element is 1/x for non-zero values in items, and 0 for zero values. Store the result."
+
+# Turn 3: Use the results
+[[turns]]
+type = "user_message"
+content = "Compute the sum of safe_reciprocals and store it in a variable called recip_sum."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_exists"
+name = "safe_reciprocals"
+
+[[turns.checks]]
+kind = "variable_exists"
+name = "recip_sum"

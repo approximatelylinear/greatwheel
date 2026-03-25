@@ -1,3 +1,6 @@
+mod session_api;
+mod ws_handler;
+
 use axum::{
     extract::State,
     response::{
@@ -9,9 +12,10 @@ use axum::{
 };
 use clap::Parser;
 use gw_llm::{Message, OllamaClient};
+use gw_loop::{LoopConfig, OllamaLlmClient, SessionManager};
 use reqwest::StatusCode;
 use serde::Deserialize;
-use std::{convert::Infallible, sync::Arc};
+use std::{convert::Infallible, sync::Arc, time::Duration};
 use tokio_stream::wrappers::ReceiverStream;
 
 #[derive(Parser)]
@@ -66,6 +70,7 @@ struct LlmConfig {
 struct AppState {
     llm: Arc<OllamaClient>,
     config: Arc<LlmConfig>,
+    session_mgr: Arc<SessionManager>,
 }
 
 #[derive(Deserialize)]
@@ -204,6 +209,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let llm = Arc::new(llm);
 
+    // Clone pool for session manager before memory store consumes it.
+    let session_pool = pg_pool.clone();
+
     // Initialize memory store if database is available
     if let Some(pool) = pg_pool {
         match gw_memory::lance::LanceStore::new(
@@ -229,9 +237,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Create session manager with LLM factory.
+    let llm_for_factory = llm.clone();
+    let llm_factory: Arc<dyn Fn() -> Box<dyn gw_loop::LlmClient> + Send + Sync> =
+        Arc::new(move || {
+            Box::new(OllamaLlmClient::new((*llm_for_factory).clone()))
+        });
+
+    let session_mgr = Arc::new(match session_pool {
+        Some(pool) => SessionManager::with_pg(
+            llm_factory,
+            LoopConfig::default(),
+            Duration::from_secs(30 * 60),
+            pool,
+        ),
+        None => SessionManager::new(
+            llm_factory,
+            LoopConfig::default(),
+            Duration::from_secs(30 * 60),
+        ),
+    });
+
     let state = AppState {
         llm,
         config: Arc::new(config.llm),
+        session_mgr,
     };
 
     let app = Router::new()
@@ -240,6 +270,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/config", get(get_config))
         .route("/api/models", get(list_models))
         .route("/api/chat", post(chat))
+        // Session-based conversation endpoints
+        .route("/api/sessions", get(session_api::list_sessions))
+        .route("/api/sessions/create", post(session_api::create_session))
+        .route("/api/sessions/message", post(session_api::send_message))
+        .route("/api/sessions/tree", post(session_api::get_tree))
+        .route("/api/sessions/state", post(session_api::get_repl_state))
+        .route("/api/sessions/compact", post(session_api::compact))
+        .route("/api/sessions/branch", post(session_api::switch_branch))
+        .route("/api/sessions/ask", post(session_api::get_pending_ask))
+        .route("/api/sessions/reply", post(session_api::reply_to_ask))
+        .route("/api/sessions/resume", post(session_api::resume_session))
+        .route("/api/sessions/end", post(session_api::end_session))
+        // WebSocket session endpoint
+        .route("/api/ws", get(ws_handler::ws_session))
         .with_state(state);
 
     let addr = format!("{}:{}", config.server.host, config.server.port);

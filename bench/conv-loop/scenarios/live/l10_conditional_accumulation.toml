@@ -1,0 +1,47 @@
+name = "L10: Conditional accumulation across turns (live)"
+capability = "state_persistence"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Initialize an accumulator
+[[turns]]
+type = "user_message"
+content = "Set total to 0 and create an empty list called log."
+
+# Turn 2: Conditional add
+[[turns]]
+type = "user_message"
+content = "Execute: total += 15; log.append('added 15')"
+
+# Turn 3: Another conditional add
+[[turns]]
+type = "user_message"
+content = "Execute: total += 27; log.append('added 27')"
+
+# Turn 4: Conditional subtract
+[[turns]]
+type = "user_message"
+content = "Execute: total -= 10; log.append('subtracted 10')"
+
+# Turn 5: Check accumulated state
+[[turns]]
+type = "user_message"
+content = "Store the length of log in a variable called step_count."
+
+[[turns]]
+type = "assert"
+
+# 0 + 15 + 27 - 10 = 32
+[[turns.checks]]
+kind = "variable_equals"
+name = "total"
+expected = 32
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "step_count"
+expected = 3

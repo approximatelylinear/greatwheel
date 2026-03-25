@@ -1,0 +1,77 @@
+name = "L19: Branch switch with live LLM"
+capability = "branching"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Establish shared state
+[[turns]]
+type = "user_message"
+content = "Set base to 10 and multiplier to 5."
+
+# Snapshot so branch restore works
+[[turns]]
+type = "snapshot"
+
+# Turn 2: Branch A — multiply
+[[turns]]
+type = "user_message"
+content = "Set result_a to base * multiplier."
+
+# Verify branch A state
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "result_a"
+expected = 50
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "base"
+expected = 10
+
+# Switch back to turn 1 (before branch A diverged)
+[[turns]]
+type = "switch_branch"
+target_turn = 1
+
+# Verify REPL was restored: base exists, result_a does NOT
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "base"
+expected = 10
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "multiplier"
+expected = 5
+
+[[turns.checks]]
+kind = "variable_absent"
+name = "result_a"
+
+# Turn 3: Branch B — add instead
+[[turns]]
+type = "user_message"
+content = "Set result_b to base + multiplier."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "result_b"
+expected = 15
+
+# result_a should still be absent (we're on branch B)
+[[turns.checks]]
+kind = "variable_absent"
+name = "result_a"

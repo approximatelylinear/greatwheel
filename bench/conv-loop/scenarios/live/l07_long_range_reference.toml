@@ -1,0 +1,58 @@
+name = "L07: Long-range variable reference (live)"
+capability = "instruction_retention"
+recency_window = 3
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+4. Variables from previous turns are still available — use them directly.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Set up early variables (these will fall outside the context window)
+[[turns]]
+type = "user_message"
+content = "Set secret_a to 17 and secret_b to 23."
+
+# Turns 2-5: Padding turns that push turn 1 out of context window (recency=3)
+[[turns]]
+type = "user_message"
+content = "Set padding_1 to 'hello'."
+
+[[turns]]
+type = "user_message"
+content = "Set padding_2 to 'world'."
+
+[[turns]]
+type = "user_message"
+content = "Set padding_3 to 'foo'."
+
+[[turns]]
+type = "user_message"
+content = "Set padding_4 to 'bar'."
+
+# Turn 6: Reference the early variables — they're outside context window
+# but still in the REPL. The LLM should see them in the REPL state summary.
+[[turns]]
+type = "user_message"
+content = "Compute secret_a * secret_b and store the result in a variable called product. The variables secret_a and secret_b were set earlier and should still be available."
+
+[[turns]]
+type = "assert"
+
+# 17 * 23 = 391
+[[turns.checks]]
+kind = "variable_equals"
+name = "product"
+expected = 391
+
+# The early variables should still exist in the REPL
+[[turns.checks]]
+kind = "variable_equals"
+name = "secret_a"
+expected = 17
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "secret_b"
+expected = 23

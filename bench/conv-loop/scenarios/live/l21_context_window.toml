@@ -1,0 +1,58 @@
+name = "L21: Context recency window (live)"
+capability = "context_management"
+recency_window = 3
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Early turn with unique instruction text (will be pruned)
+[[turns]]
+type = "user_message"
+content = "INSTRUCTION_ALPHA_ZULU: Set x to 7."
+
+# Turn 2: Another early turn (also pruned)
+[[turns]]
+type = "user_message"
+content = "INSTRUCTION_BRAVO_KILO: Set y to 13."
+
+# Turn 3: In window
+[[turns]]
+type = "user_message"
+content = "Set a to 100."
+
+# Turn 4: In window
+[[turns]]
+type = "user_message"
+content = "Set b to 200."
+
+# Turn 5: In window — only uses variables from recent context
+[[turns]]
+type = "user_message"
+content = "Set result to a + b."
+
+# Check that the recency window correctly pruned old turn instructions
+# The instruction text itself won't appear in state_summary (only var names/values)
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "context_excludes"
+substring = "INSTRUCTION_ALPHA_ZULU"
+
+[[turns.checks]]
+kind = "context_excludes"
+substring = "INSTRUCTION_BRAVO_KILO"
+
+# REPL state should still have ALL variables (pruning is context-only)
+[[turns.checks]]
+kind = "variable_equals"
+name = "x"
+expected = 7
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "result"
+expected = 300

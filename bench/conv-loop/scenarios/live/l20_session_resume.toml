@@ -1,0 +1,78 @@
+name = "L20: Session suspend and resume (live)"
+capability = "session_resumption"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Build up state
+[[turns]]
+type = "user_message"
+content = "Create a dictionary called config with keys 'host' (value 'localhost'), 'port' (value 8080), and 'debug' (value True)."
+
+# Turn 2: Define a function
+[[turns]]
+type = "user_message"
+content = "Define a function called get_url() that returns 'http://' + config['host'] + ':' + str(config['port'])."
+
+# Turn 3: Use the function
+[[turns]]
+type = "user_message"
+content = "Store get_url() in a variable called url."
+
+# Verify state before suspend
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_exists"
+name = "config"
+
+[[turns.checks]]
+kind = "function_defined"
+name = "get_url"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "url"
+expected = "http://localhost:8080"
+
+# === SUSPEND ===
+[[turns]]
+type = "snapshot"
+
+# === RESUME ===
+[[turns]]
+type = "restore_snapshot"
+
+# Verify state survived the suspend/resume cycle
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_exists"
+name = "config"
+
+[[turns.checks]]
+kind = "function_defined"
+name = "get_url"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "url"
+expected = "http://localhost:8080"
+
+# Turn 4: Continue working after resume — references prior state
+[[turns]]
+type = "user_message"
+content = "Set config['port'] to 9090 and store get_url() in a variable called new_url."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "new_url"
+expected = "http://localhost:9090"

@@ -1,0 +1,104 @@
+name = "L30: Full infrastructure integration (live)"
+capability = "tree_integrity"
+compaction_keep_count = 2
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+4. Variables from previous turns persist in the REPL.
+Keep responses brief — code only, no explanations."""
+
+# Phase 1: Build state (4 turns)
+[[turns]]
+type = "user_message"
+content = "Set width to 10 and height to 5."
+
+[[turns]]
+type = "user_message"
+content = "Set area to width * height."
+
+[[turns]]
+type = "user_message"
+content = "Define a function called perimeter(w, h) that returns 2 * (w + h)."
+
+[[turns]]
+type = "user_message"
+content = "Set perim to perimeter(width, height)."
+
+# Verify Phase 1
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "area"
+expected = 50
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "perim"
+expected = 30
+
+# Phase 2: Compact (keeps last 2 turns, summarizes first 2)
+[[turns]]
+type = "compact"
+
+# Phase 3: Continue after compaction
+[[turns]]
+type = "user_message"
+content = "Set ratio to area / perim."
+
+# Verify post-compaction
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "width"
+expected = 10
+
+[[turns.checks]]
+kind = "function_defined"
+name = "perimeter"
+
+# Phase 4: Snapshot and resume
+[[turns]]
+type = "snapshot"
+
+[[turns]]
+type = "restore_snapshot"
+
+# Verify post-resume
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "area"
+expected = 50
+
+[[turns.checks]]
+kind = "function_defined"
+name = "perimeter"
+
+# Phase 5: Continue after resume
+[[turns]]
+type = "user_message"
+content = "Set doubled_area to area * 2."
+
+# Final verification
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "doubled_area"
+expected = 100
+
+[[turns.checks]]
+kind = "all_parents_valid"
+
+[[turns.checks]]
+kind = "tree_size_gte"
+min = 18

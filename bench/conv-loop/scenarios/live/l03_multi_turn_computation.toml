@@ -1,0 +1,38 @@
+name = "L03: Multi-turn computation (live)"
+capability = "state_persistence"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+[[turns]]
+type = "user_message"
+content = "Create a list called numbers containing [10, 20, 30, 40, 50]."
+
+[[turns]]
+type = "user_message"
+content = "Compute the sum of the numbers list and store it in a variable called total."
+
+[[turns]]
+type = "user_message"
+content = "Compute the average (total divided by the length of numbers) and store it in a variable called avg."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "numbers"
+expected = [10, 20, 30, 40, 50]
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "total"
+expected = 150
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "avg"
+expected = 30.0

@@ -1,0 +1,46 @@
+name = "S06: Steering message injection"
+capability = "steering"
+system_prompt = "You are a helpful assistant with a Python REPL."
+
+# Turn 1: set up initial state
+[[turns]]
+type = "user_message"
+content = "Set mode to 'default'"
+mock_response = """
+```python
+mode = 'default'
+```
+"""
+
+# Turn 2: inject a code change with a steering marker in the response
+[[turns]]
+type = "user_message"
+content = "STEERING_MARKER: Switch to analysis mode"
+mock_response = """
+```python
+mode = 'analysis'
+```
+"""
+
+# The context for a subsequent turn should contain the steering message
+[[turns]]
+type = "user_message"
+content = "What mode are we in?"
+mock_response = """
+```python
+current = mode
+```
+"""
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "mode"
+expected = "analysis"
+
+# Verify the steering message text made it into the conversation
+[[turns.checks]]
+kind = "context_contains"
+substring = "STEERING_MARKER"

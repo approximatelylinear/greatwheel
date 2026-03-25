@@ -1,0 +1,47 @@
+name = "L04: Instruction retention across turns (live)"
+capability = "instruction_retention"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+4. IMPORTANT: Always store a copy of each result in a variable called "last_result" as well.
+Keep responses brief — code only, no explanations."""
+
+# The system prompt says to always set last_result.
+# We check if the LLM retains this instruction across turns.
+
+[[turns]]
+type = "user_message"
+content = "Compute 7 * 6 and store it in a variable called product."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "product"
+expected = 42
+
+# Check the instruction was followed — last_result should also be set.
+[[turns.checks]]
+kind = "variable_exists"
+name = "last_result"
+
+[[turns]]
+type = "user_message"
+content = "Compute 100 - 58 and store it in a variable called difference."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "difference"
+expected = 42
+
+# last_result should be updated to the new value.
+[[turns.checks]]
+kind = "variable_equals"
+name = "last_result"
+expected = 42

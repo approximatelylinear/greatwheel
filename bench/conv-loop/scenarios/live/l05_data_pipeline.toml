@@ -1,0 +1,50 @@
+name = "L05: Data pipeline across 5 turns (live)"
+capability = "state_persistence"
+system_prompt = """
+You are a data analyst assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Create raw data
+[[turns]]
+type = "user_message"
+content = "Create a list called raw_data with these dictionaries: {'name': 'Alice', 'score': 85}, {'name': 'Bob', 'score': 92}, {'name': 'Charlie', 'score': 78}, {'name': 'Diana', 'score': 95}, {'name': 'Eve', 'score': 88}."
+
+# Turn 2: Filter
+[[turns]]
+type = "user_message"
+content = "Create a list called high_scorers containing only dictionaries from raw_data where score >= 88."
+
+# Turn 3: Extract names
+[[turns]]
+type = "user_message"
+content = "Create a list called high_scorer_names containing just the 'name' values from high_scorers, sorted alphabetically."
+
+# Turn 4: Compute stats from the original data
+[[turns]]
+type = "user_message"
+content = "Compute the average score across all entries in raw_data and store it in a variable called avg_score."
+
+# Turn 5: Summary — references variables from turns 2, 3, and 4
+[[turns]]
+type = "user_message"
+content = "Create a dictionary called summary with keys 'total_count' (length of raw_data), 'high_count' (length of high_scorers), 'high_names' (high_scorer_names), and 'avg' (avg_score)."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "high_scorer_names"
+expected = ["Bob", "Diana", "Eve"]
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "avg_score"
+expected = 87.6
+
+[[turns.checks]]
+kind = "variable_exists"
+name = "summary"

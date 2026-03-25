@@ -1,0 +1,45 @@
+name = "L08: Complex data structure manipulation (live)"
+capability = "state_persistence"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Build a nested structure
+[[turns]]
+type = "user_message"
+content = "Create a dictionary called config with keys 'database' (value: {'host': 'localhost', 'port': 5432}), 'cache' (value: {'enabled': True, 'ttl': 300}), and 'features' (value: ['auth', 'logging'])."
+
+# Turn 2: Modify a nested value
+[[turns]]
+type = "user_message"
+content = "Change config['database']['port'] to 5433 and append 'metrics' to config['features']."
+
+# Turn 3: Extract and compute
+[[turns]]
+type = "user_message"
+content = "Store the number of features (length of config['features']) in a variable called feature_count. Store config['database']['port'] in a variable called db_port."
+
+# Turn 4: Build a new structure from the existing one
+[[turns]]
+type = "user_message"
+content = "Create a dictionary called status with keys 'db_url' (value: a string formatted as 'postgresql://HOST:PORT' using config['database']['host'] and config['database']['port']), 'cache_on' (value: config['cache']['enabled']), and 'feature_count' (value: feature_count)."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "db_port"
+expected = 5433
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "feature_count"
+expected = 3
+
+[[turns.checks]]
+kind = "variable_exists"
+name = "status"

@@ -14,9 +14,12 @@ gw-llm = { workspace = true }
 gw-memory = { workspace = true }
 gw-bus = { workspace = true }
 gw-channels = { workspace = true }
+gw-loop = { workspace = true }
+uuid = { workspace = true }
 gw-scheduler = { workspace = true }
 gw-trace = { workspace = true }
 axum = { workspace = true }
+futures = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

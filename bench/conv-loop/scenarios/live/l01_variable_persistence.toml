@@ -1,0 +1,29 @@
+name = "L01: Variable persistence (live)"
+capability = "state_persistence"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+[[turns]]
+type = "user_message"
+content = "Set a variable called x to the value 42."
+
+[[turns]]
+type = "user_message"
+content = "Set a variable called y to x multiplied by 2."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "x"
+expected = 42
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "y"
+expected = 84

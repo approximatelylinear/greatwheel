@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
 
+pub mod loop_event;
+pub mod session_tree;
+
+pub use loop_event::LoopEvent;
+pub use session_tree::{EntryId, EntryType, ReplSnapshotData, SessionEntry, SessionState};
+
 /// Newtype wrappers for domain IDs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OrgId(pub Uuid);

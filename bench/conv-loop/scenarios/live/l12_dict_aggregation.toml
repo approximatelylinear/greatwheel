@@ -1,0 +1,43 @@
+name = "L12: Dictionary aggregation across turns (live)"
+capability = "state_persistence"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Create inventory
+[[turns]]
+type = "user_message"
+content = "Create a dictionary called inventory with keys 'apples' (value 50), 'bananas' (value 30), 'oranges' (value 45)."
+
+# Turn 2: Add items
+[[turns]]
+type = "user_message"
+content = "Add 20 to inventory['apples'] and add a new key 'grapes' with value 60 to inventory."
+
+# Turn 3: Remove bananas
+[[turns]]
+type = "user_message"
+content = "Delete the key 'bananas' from inventory using: del inventory['bananas']"
+
+# Turn 4: Compute total
+[[turns]]
+type = "user_message"
+content = "Store sum(inventory.values()) in a variable called stock_total. Store len(inventory) in a variable called item_count."
+
+[[turns]]
+type = "assert"
+
+# apples: 50+20=70, oranges: 45, grapes: 60. bananas removed.
+# stock_total = 70 + 45 + 60 = 175
+[[turns.checks]]
+kind = "variable_equals"
+name = "stock_total"
+expected = 175
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "item_count"
+expected = 3

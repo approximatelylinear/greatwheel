@@ -1,0 +1,46 @@
+name = "L14: Nested list matrix operations (live)"
+capability = "state_persistence"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Create a 3x3 matrix as nested lists
+[[turns]]
+type = "user_message"
+content = "Create a variable called matrix as a list of lists: [[1,2,3],[4,5,6],[7,8,9]]."
+
+# Turn 2: Compute transpose
+[[turns]]
+type = "user_message"
+content = "Compute the transpose of matrix (swap rows and columns) and store it in a variable called transposed. Use list comprehension."
+
+# Turn 3: Compute diagonal sum
+[[turns]]
+type = "user_message"
+content = "Compute the sum of the main diagonal of the original matrix (elements at positions [0][0], [1][1], [2][2]) and store it in diag_sum."
+
+# Turn 4: Flatten
+[[turns]]
+type = "user_message"
+content = "Flatten the original matrix into a single list called flat. Then store the sum of flat in flat_sum."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "transposed"
+expected = [[1,4,7],[2,5,8],[3,6,9]]
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "diag_sum"
+expected = 15
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "flat_sum"
+expected = 45

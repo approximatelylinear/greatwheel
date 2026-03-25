@@ -1,0 +1,48 @@
+name = "L29: Self-correcting computation (live)"
+capability = "error_recovery"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. If your code has an error, look at the error message and fix it.
+4. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Set up data with a potential division-by-zero trap
+[[turns]]
+type = "user_message"
+content = "Create a list called data = [4, 0, 8, 0, 2]. Compute a list called safe_inverse where each element is 1/x if x != 0, otherwise 0. Store the result in safe_inverse."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "safe_inverse"
+expected = [0.25, 0, 0.125, 0, 0.5]
+
+# Turn 2: Build on the previous result
+[[turns]]
+type = "user_message"
+content = "Compute the sum of safe_inverse and store it in a variable called inv_total."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "inv_total"
+expected = 0.875
+
+# Turn 3: String formatting edge case
+[[turns]]
+type = "user_message"
+content = "Create a list called formatted where each value in safe_inverse is formatted as a string with exactly 3 decimal places using f-strings (like f'{x:.3f}'). Store as formatted."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "formatted"
+expected = ["0.250", "0.000", "0.125", "0.000", "0.500"]

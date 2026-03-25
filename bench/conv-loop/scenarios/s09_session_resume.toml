@@ -1,0 +1,97 @@
+name = "S09: Session suspend and resume"
+capability = "session_resumption"
+system_prompt = "You are a helpful assistant with a Python REPL."
+
+# Turn 1: set up variables
+[[turns]]
+type = "user_message"
+content = "Set up initial state"
+mock_response = """
+```python
+data = {"key": "value", "count": 42}
+label = "important"
+```
+"""
+
+# Turn 2: define a function
+[[turns]]
+type = "user_message"
+content = "Define a helper function"
+mock_response = """
+```python
+def process(x):
+    return x * 2
+```
+"""
+
+# Turn 3: use the function
+[[turns]]
+type = "user_message"
+content = "Use the helper"
+mock_response = """
+```python
+result = process(21)
+```
+"""
+
+# Verify state before snapshot
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "result"
+expected = 42
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "label"
+expected = "important"
+
+[[turns.checks]]
+kind = "function_defined"
+name = "process"
+
+# === SUSPEND: take a snapshot ===
+[[turns]]
+type = "snapshot"
+
+# === RESUME: restore from snapshot ===
+[[turns]]
+type = "restore_snapshot"
+
+# Verify state survived the suspend/resume cycle
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "result"
+expected = 42
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "label"
+expected = "important"
+
+[[turns.checks]]
+kind = "function_defined"
+name = "process"
+
+# Verify the dict survived too
+[[turns]]
+type = "user_message"
+content = "Check the dict"
+mock_response = """
+```python
+check = data["count"]
+```
+"""
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "check"
+expected = 42

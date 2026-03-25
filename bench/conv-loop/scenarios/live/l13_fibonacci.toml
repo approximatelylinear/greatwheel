@@ -1,0 +1,46 @@
+name = "L13: Multi-turn algorithm building (live)"
+capability = "state_persistence"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Define a function
+[[turns]]
+type = "user_message"
+content = "Define a function called fib(n) that returns the nth Fibonacci number (fib(0)=0, fib(1)=1, fib(n)=fib(n-1)+fib(n-2))."
+
+# Turn 2: Use it to compute specific values
+[[turns]]
+type = "user_message"
+content = "Compute fib(10) and store it in fib_10. Compute fib(15) and store it in fib_15."
+
+# Turn 3: Use previously computed values
+[[turns]]
+type = "user_message"
+content = "Store fib_10 + fib_15 in a variable called fib_sum."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "function_defined"
+name = "fib"
+
+# fib(10) = 55, fib(15) = 610
+[[turns.checks]]
+kind = "variable_equals"
+name = "fib_10"
+expected = 55
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "fib_15"
+expected = 610
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "fib_sum"
+expected = 665

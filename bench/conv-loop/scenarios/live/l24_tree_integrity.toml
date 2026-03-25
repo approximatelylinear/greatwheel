@@ -1,0 +1,89 @@
+name = "L24: Tree integrity under live workload"
+capability = "tree_integrity"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Base state
+[[turns]]
+type = "user_message"
+content = "Set x to 1 and y to 2."
+
+# Snapshot after turn 1
+[[turns]]
+type = "snapshot"
+
+# Turn 2: Extend
+[[turns]]
+type = "user_message"
+content = "Set z to x + y."
+
+# Turn 3: More state
+[[turns]]
+type = "user_message"
+content = "Set w to z * 10."
+
+# Snapshot after turn 3
+[[turns]]
+type = "snapshot"
+
+# Turn 4: Branch A work
+[[turns]]
+type = "user_message"
+content = "Set branch_a to w + 100."
+
+# Verify branch A
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "branch_a"
+expected = 130
+
+# Switch back to turn 2 (after z was set but before w)
+[[turns]]
+type = "switch_branch"
+target_turn = 2
+
+# Verify we're on branch B: z exists, w should not
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "z"
+expected = 3
+
+[[turns.checks]]
+kind = "variable_absent"
+name = "w"
+
+[[turns.checks]]
+kind = "variable_absent"
+name = "branch_a"
+
+# Turn 5: Branch B work
+[[turns]]
+type = "user_message"
+content = "Set branch_b to z * 100."
+
+# Final structural checks
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "branch_b"
+expected = 300
+
+[[turns.checks]]
+kind = "all_parents_valid"
+
+# Tree should have: root entries (user+code+asst x4) + 2 snapshots + branch entries
+[[turns.checks]]
+kind = "tree_size_gte"
+min = 15

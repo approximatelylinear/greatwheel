@@ -6,6 +6,8 @@
 //! 3. External functions (search, get_document, llm_query) pause ouros and get resolved by Rust
 //! 4. FINAL(answer) signals completion
 
+mod conv_loop_runner;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -58,7 +60,7 @@ struct RunRecord {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct TrajectoryMessage {
+pub(crate) struct TrajectoryMessage {
     role: String,
     content: String,
     /// For assistant messages: code blocks extracted
@@ -87,7 +89,7 @@ struct UsageInfo {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct ResultEntry {
+pub(crate) struct ResultEntry {
     #[serde(rename = "type")]
     entry_type: String,
     tool_name: Option<String>,
@@ -115,7 +117,7 @@ struct SearchHit {
 /// Loaded from TOML via `--config`, falls back to hardcoded defaults.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-struct BenchConfig {
+pub(crate) struct BenchConfig {
     // --- Prompts ---
     /// Path to system prompt text file. If empty, uses the built-in SYSTEM_PROMPT.
     pub system_prompt_path: String,
@@ -223,7 +225,7 @@ impl BenchConfig {
             .map_err(|e| format!("Failed to parse config {path}: {e}"))
     }
 
-    fn system_prompt(&self) -> String {
+    pub(crate) fn system_prompt(&self) -> String {
         if self.system_prompt_path.is_empty() {
             return SYSTEM_PROMPT.to_string();
         }
@@ -242,6 +244,7 @@ impl BenchConfig {
 // -------------------------------------------------------------------------- //
 
 /// Search backend: HTTP (Python search server) or Native (in-process Rust).
+#[derive(Clone)]
 enum SearchBackend {
     Http {
         url: String,
@@ -260,7 +263,11 @@ struct BrowseCompBridge {
     colbert_encode_url: Option<String>, // Optional ColBERT encode server URL (for multi-vector search)
     llm: OllamaClient,
     model: String,
+    /// Runtime handle for async operations. Uses a dedicated runtime when
+    /// running inside ConversationLoop (to avoid nested block_on).
     rt: tokio::runtime::Handle,
+    /// Dedicated runtime owned by the bridge, used when `use_dedicated_rt` is true.
+    _dedicated_rt: Option<tokio::runtime::Runtime>,
     // Tracking
     tool_counts: HashMap<String, u32>,
     all_docids: Arc<std::sync::Mutex<Vec<String>>>,
@@ -297,6 +304,7 @@ impl BrowseCompBridge {
             search_mode,
             rerank_url,
             colbert_encode_url,
+            _dedicated_rt: None,
             llm,
             model,
             rt,
@@ -314,6 +322,18 @@ impl BrowseCompBridge {
             timing_llm_ms: 0,
             timing_get_doc_ms: 0,
         }
+    }
+
+    /// Switch the bridge to use a dedicated tokio runtime for its async operations.
+    /// Required when running inside ConversationLoop (which has its own runtime).
+    fn use_dedicated_runtime(&mut self) {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("failed to create dedicated runtime for bridge");
+        self.rt = rt.handle().clone();
+        self._dedicated_rt = Some(rt);
     }
 
     fn is_timed_out(&self) -> bool {
@@ -873,7 +893,7 @@ RULES:
 
 /no_think"#;
 
-fn iteration_prompt(query: &str, iteration: usize, max_iterations: usize, variables_info: &str) -> String {
+pub(crate) fn iteration_prompt(query: &str, iteration: usize, max_iterations: usize, variables_info: &str) -> String {
     let counter = format!("[Iteration {}/{}]", iteration + 1, max_iterations);
 
     if iteration == 0 {
@@ -916,7 +936,7 @@ fn iteration_prompt(query: &str, iteration: usize, max_iterations: usize, variab
     }
 }
 
-fn final_prompt(query: &str, variables_info: &str) -> String {
+pub(crate) fn final_prompt(query: &str, variables_info: &str) -> String {
     let vars_section = if variables_info.is_empty() {
         String::new()
     } else {
@@ -937,7 +957,7 @@ fn final_prompt(query: &str, variables_info: &str) -> String {
 
 /// Build a summary of REPL variables (DSPy-style metadata preview).
 /// Shows type, length, and a short preview — NOT full content.
-fn build_variables_info(agent: &ReplAgent) -> String {
+pub(crate) fn build_variables_info(agent: &ReplAgent) -> String {
     let var_names = ["context", "evidence", "answer", "doc", "doc1", "doc2", "doc3",
                      "docs", "results", "hits", "response", "info", "data", "text",
                      "combined", "analysis", "findings", "candidates", "best"];
@@ -981,7 +1001,7 @@ fn describe_value(val: &serde_json::Value) -> (&'static str, usize, String) {
 
 /// Fallback extraction: if max_iterations reached without FINAL, ask LLM to extract answer
 /// from the accumulated conversation history (DSPy-style extract_sig).
-fn fallback_extract(
+pub(crate) fn fallback_extract(
     llm: &OllamaClient,
     model: &str,
     query: &str,
@@ -1038,7 +1058,7 @@ fn fallback_extract(
 // -------------------------------------------------------------------------- //
 
 /// Strip `<think>...</think>` blocks from LLM output (qwen3.5 thinking mode).
-fn strip_think_tags(text: &str) -> String {
+pub(crate) fn strip_think_tags(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find("<think>") {
@@ -1055,7 +1075,7 @@ fn strip_think_tags(text: &str) -> String {
 }
 
 /// Check if an answer is a refusal/hedge that should be rejected.
-fn is_refusal_answer(answer: &str) -> bool {
+pub(crate) fn is_refusal_answer(answer: &str) -> bool {
     let lower = answer.to_lowercase();
     // Reject if answer is too long — real answers are short
     // Note: threshold configurable via BenchConfig.max_answer_length (default 100)
@@ -1457,14 +1477,14 @@ fn pre_search(
     (all_hits, context_text, total_input, total_output)
 }
 
-struct RlmLoopResult {
-    status: String,
-    termination_reason: String,
-    iterations_used: u32,
-    result_entries: Vec<ResultEntry>,
-    input_tokens: u32,
-    output_tokens: u32,
-    trajectory: Vec<TrajectoryMessage>,
+pub(crate) struct RlmLoopResult {
+    pub(crate) status: String,
+    pub(crate) termination_reason: String,
+    pub(crate) iterations_used: u32,
+    pub(crate) result_entries: Vec<ResultEntry>,
+    pub(crate) input_tokens: u32,
+    pub(crate) output_tokens: u32,
+    pub(crate) trajectory: Vec<TrajectoryMessage>,
 }
 
 #[tracing::instrument(name = "rlm.loop", skip(llm, agent, rt, pre_search_context, bench_config), fields(gw.max_iterations = max_iterations, gw.iterations_used, gw.status, gw.input_tokens, gw.output_tokens))]
@@ -1973,6 +1993,10 @@ struct Cli {
     /// Output directory for result JSON files
     #[arg(long, default_value = "runs/rlm-agent")]
     output_dir: String,
+
+    /// Use gw-loop ConversationLoop instead of the hand-rolled rLM loop.
+    #[arg(long)]
+    use_conv_loop: bool,
 }
 
 #[tracing::instrument(name = "rlm.question", skip(llm, cli, rt, native_searcher), fields(gw.model = %cli.model, gw.query_id = query_id, gw.status, gw.answer))]
@@ -2010,9 +2034,10 @@ fn run_single_query(
 
     let query_start = std::time::Instant::now();
 
+    let search_backend = backend;
     let docid_tracker: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut bridge = BrowseCompBridge::new(
-        backend,
+        search_backend.clone(),
         cli.k,
         cli.search_mode.clone(),
         cli.rerank_url.clone(),
@@ -2036,7 +2061,7 @@ fn run_single_query(
         "FINAL".to_string(),
     ];
 
-    let mut agent = ReplAgent::new(external_fns, Box::new(bridge));
+    let mut agent = ReplAgent::new(external_fns.clone(), Box::new(bridge));
 
     // Inject question as a variable
     agent
@@ -2055,12 +2080,47 @@ fn run_single_query(
     let pre_output = pre_output + at_output;
 
     // Inject context as ouros variable (list of {docid, snippet} dicts)
-    let context_obj = json_to_object(serde_json::Value::Array(context_hits));
+    let context_obj = json_to_object(serde_json::Value::Array(context_hits.clone()));
     agent.set_variable("context", context_obj).ok();
     agent.set_variable("answer_type", Object::String(answer_type.clone())).ok();
 
     let rlm_start = std::time::Instant::now();
-    let rlm_result = run_rlm_loop(llm, &cli.model, &mut agent, query_text, cli.max_turns, rt, &context_text, bench_config);
+    let rlm_result = if cli.use_conv_loop {
+        // Use ConversationLoop-based runner.
+        // We need to create a new agent since conv_loop_runner creates its own.
+        let mut bridge2 = BrowseCompBridge::new(
+            search_backend.clone(),
+            cli.k,
+            cli.search_mode.clone(),
+            cli.rerank_url.clone(),
+            cli.colbert_encode_url.clone(),
+            llm.clone(),
+            cli.model.clone(),
+            rt.clone(),
+            docid_tracker.clone(),
+        );
+        // Give the bridge its own runtime so its block_on calls don't
+        // conflict with ConversationLoop's runtime.
+        bridge2.use_dedicated_runtime();
+        bridge2.max_llm_calls = bench_config.max_llm_calls;
+        bridge2.max_search_calls = bench_config.max_search_calls;
+        bridge2.timeout_secs = bench_config.bridge_timeout_secs;
+        let bridge2_boxed: Box<dyn HostBridge> = Box::new(bridge2);
+        // Apply config overrides to the new bridge.
+        // (Can't access fields through Box<dyn HostBridge>, so we cast.)
+        // Actually, let's just use the external_fns and let the runner handle it.
+        let ext_fns = external_fns.clone();
+        let mut agent2 = ReplAgent::new(ext_fns, bridge2_boxed);
+        let context_obj2 = json_to_object(serde_json::Value::Array(context_hits));
+        agent2.set_variable("context", context_obj2).ok();
+        agent2.set_variable("question", Object::String(query_text.to_string())).ok();
+        agent2.set_variable("answer_type", Object::String(answer_type.clone())).ok();
+        conv_loop_runner::run_rlm_loop_v2_with_agent(
+            llm, &cli.model, agent2, query_text, cli.max_turns, rt, &context_text, bench_config,
+        )
+    } else {
+        run_rlm_loop(llm, &cli.model, &mut agent, query_text, cli.max_turns, rt, &context_text, bench_config)
+    };
     let rlm_ms = rlm_start.elapsed().as_millis() as u64;
     let total_ms = query_start.elapsed().as_millis() as u64;
     let status = rlm_result.status;

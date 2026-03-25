@@ -1,0 +1,66 @@
+name = "L26: Long conversation with 8 turns (live)"
+capability = "state_persistence"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Initialize
+[[turns]]
+type = "user_message"
+content = "Set total to 0."
+
+# Turn 2
+[[turns]]
+type = "user_message"
+content = "Set total to total + 10."
+
+# Turn 3
+[[turns]]
+type = "user_message"
+content = "Set total to total + 20."
+
+# Turn 4
+[[turns]]
+type = "user_message"
+content = "Set total to total + 30."
+
+# Midpoint: total = 0 + 10 + 20 + 30 = 60
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "total"
+expected = 60
+
+# Turn 5
+[[turns]]
+type = "user_message"
+content = "Set total to total + 40."
+
+# Turn 6
+[[turns]]
+type = "user_message"
+content = "Set total to total + 50."
+
+# Turn 7
+[[turns]]
+type = "user_message"
+content = "Set total to total + 60."
+
+# Turn 8: Final computation
+[[turns]]
+type = "user_message"
+content = "Store total in a variable called grand_total."
+
+# total = 0+10+20+30+40+50+60 = 210
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "grand_total"
+expected = 210

@@ -1,0 +1,28 @@
+name = "L02: Function definition persistence (live)"
+capability = "state_persistence"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+[[turns]]
+type = "user_message"
+content = "Define a function called triple that takes a number and returns it multiplied by 3."
+
+[[turns]]
+type = "user_message"
+content = "Use the triple function to compute triple(14) and store the result in a variable called answer."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "function_defined"
+name = "triple"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "answer"
+expected = 42

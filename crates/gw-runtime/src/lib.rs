@@ -1,5 +1,6 @@
 use ouros::{
-    CollectStringPrint, NoLimitTracker, Object, ReplProgress, ReplSession, RunProgress, Runner,
+    CollectStringPrint, NoLimitTracker, Object, ReplProgress, ReplSession, ResourceLimits,
+    RunProgress, Runner,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -30,7 +31,7 @@ pub struct AgentResult {
 }
 
 /// Trait for resolving host function calls from within ouros.
-pub trait HostBridge {
+pub trait HostBridge: Send {
     fn call(
         &mut self,
         function: &str,
@@ -213,6 +214,93 @@ impl ReplAgent {
         self.final_value.as_ref().map(object_to_json)
     }
 
+    /// Summarize REPL state as "name: type = value" lines for scalars,
+    /// "name: type (N items)" for collections, "name: type" for complex objects.
+    pub fn state_summary(&self) -> String {
+        self.session
+            .list_variables()
+            .into_iter()
+            .map(|(name, ty)| {
+                if let Some(obj) = self.session.get_variable(&name) {
+                    let val = object_to_json(&obj);
+                    match &val {
+                        Value::Number(_) | Value::Bool(_) | Value::Null => {
+                            format!("{name}: {ty} = {val}")
+                        }
+                        Value::String(s) if s.len() <= 80 => {
+                            format!("{name}: {ty} = {val}")
+                        }
+                        Value::String(s) => {
+                            format!("{name}: {ty} ({} chars)", s.len())
+                        }
+                        Value::Array(a) => {
+                            if a.len() <= 5 {
+                                format!("{name}: {ty} = {val}")
+                            } else {
+                                format!("{name}: {ty} ({} items)", a.len())
+                            }
+                        }
+                        Value::Object(m) => {
+                            let keys: Vec<&str> = m.keys().map(|k| k.as_str()).collect();
+                            if keys.len() <= 5 {
+                                format!("{name}: {ty} keys={keys:?}")
+                            } else {
+                                format!("{name}: {ty} ({} keys)", keys.len())
+                            }
+                        }
+                    }
+                } else {
+                    format!("{name}: {ty}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Get all variables as a JSON map.
+    pub fn get_all_variables(&self) -> HashMap<String, Value> {
+        self.session
+            .list_variables()
+            .into_iter()
+            .filter_map(|(name, _)| {
+                self.session
+                    .get_variable(&name)
+                    .map(|obj| (name, object_to_json(&obj)))
+            })
+            .collect()
+    }
+
+    /// Serialize the REPL session to bytes for snapshot/restore.
+    pub fn save_snapshot(&self) -> Result<Vec<u8>, AgentError> {
+        self.session
+            .save()
+            .map_err(|e| AgentError::Runtime(format!("save_snapshot failed: {e}")))
+    }
+
+    /// Restore a REPL agent from a snapshot.
+    pub fn restore_snapshot(
+        bytes: &[u8],
+        bridge: Box<dyn HostBridge>,
+    ) -> Result<Self, AgentError> {
+        let session = ReplSession::load(bytes, ResourceLimits::new())
+            .map_err(|e| AgentError::Runtime(format!("restore_snapshot failed: {e}")))?;
+        Ok(Self {
+            session,
+            bridge,
+            final_value: None,
+        })
+    }
+
+    /// Get names of defined functions in the REPL.
+    pub fn get_definitions(&self) -> Vec<String> {
+        self.session
+            .list_variables()
+            .into_iter()
+            .filter(|(_, ty)| ty == "function")
+            .map(|(name, _)| name)
+            .collect()
+    }
+
     /// Execute a code block in the REPL session.
     ///
     /// External function calls are resolved synchronously through the bridge.
@@ -367,4 +455,22 @@ pub fn extract_final_answer(text: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Strip `<think>...</think>` blocks from LLM output.
+/// Used for thinking models (qwen3.5, etc.) that wrap reasoning in think tags.
+pub fn strip_think_tags(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<think>") {
+        result.push_str(&rest[..start]);
+        if let Some(end) = rest[start..].find("</think>") {
+            rest = &rest[start + end + "</think>".len()..];
+        } else {
+            // Unclosed <think> — skip everything after it.
+            return result.trim().to_string();
+        }
+    }
+    result.push_str(rest);
+    result.trim().to_string()
 }

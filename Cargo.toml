@@ -11,6 +11,8 @@ members = [
     "crates/gw-trace",
     "crates/gw-server",
     "crates/gw-bench",
+    "crates/gw-loop",
+    "bench/conv-loop",
 ]
 
 [workspace.dependencies]
@@ -24,11 +26,12 @@ gw-channels = { path = "crates/gw-channels" }
 gw-scheduler = { path = "crates/gw-scheduler" }
 gw-trace = { path = "crates/gw-trace" }
 gw-server = { path = "crates/gw-server" }
+gw-loop = { path = "crates/gw-loop" }
 
 # External dependencies
 arrow-array = "57"
 arrow-schema = "57"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 clap = { version = "4", features = ["derive"] }

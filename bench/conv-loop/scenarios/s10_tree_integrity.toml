@@ -1,0 +1,164 @@
+name = "S10: Tree integrity under stress"
+capability = "tree_integrity"
+system_prompt = "You are a helpful assistant with a Python REPL."
+
+# === Phase 1: Build initial state (turns 1-3) ===
+
+[[turns]]
+type = "user_message"
+content = "Set a to 1"
+mock_response = """
+```python
+a = 1
+```
+"""
+
+[[turns]]
+type = "user_message"
+content = "Set b to 2"
+mock_response = """
+```python
+b = 2
+```
+"""
+
+[[turns]]
+type = "user_message"
+content = "Set c to 3"
+mock_response = """
+```python
+c = 3
+```
+"""
+
+# Snapshot after turn 3
+[[turns]]
+type = "snapshot"
+
+# === Phase 2: Diverge on branch A (turns 4-5) ===
+
+[[turns]]
+type = "user_message"
+content = "Branch A: set d to 100"
+mock_response = """
+```python
+d = 100
+```
+"""
+
+[[turns]]
+type = "user_message"
+content = "Branch A: set e to 200"
+mock_response = """
+```python
+e = 200
+```
+"""
+
+# Verify branch A state
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "d"
+expected = 100
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "e"
+expected = 200
+
+# === Phase 3: Switch back to turn 3 ===
+[[turns]]
+type = "switch_branch"
+target_turn = 3
+
+# d and e should NOT exist (they were on branch A)
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "a"
+expected = 1
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "b"
+expected = 2
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "c"
+expected = 3
+
+[[turns.checks]]
+kind = "variable_absent"
+name = "d"
+
+[[turns.checks]]
+kind = "variable_absent"
+name = "e"
+
+# === Phase 4: Diverge on branch B (turns 6-7) ===
+
+[[turns]]
+type = "user_message"
+content = "Branch B: set f to 300"
+mock_response = """
+```python
+f = 300
+```
+"""
+
+[[turns]]
+type = "user_message"
+content = "Branch B: set g to 400"
+mock_response = """
+```python
+g = 400
+```
+"""
+
+# Snapshot on branch B
+[[turns]]
+type = "snapshot"
+
+# === Phase 5: Switch back to turn 6 (first turn of branch B) ===
+[[turns]]
+type = "switch_branch"
+target_turn = 6
+
+# f should exist (set in turn 6), g should NOT (set in turn 7, after our target)
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "a"
+expected = 1
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "f"
+expected = 300
+
+# === Phase 6: Final tree integrity checks ===
+[[turns]]
+type = "assert"
+
+# All entries in the tree should have valid parent references
+[[turns.checks]]
+kind = "all_parents_valid"
+
+# Tree should have accumulated many entries across all branches
+# 3 user turns * (user + code + assistant) = 9 from phase 1
+# + 1 snapshot + 2 user turns * 3 = 6 from phase 2
+# + switch_branch doesn't add entries directly
+# + 2 user turns * 3 = 6 from phase 4
+# + 1 snapshot
+# Total: at least 20
+[[turns.checks]]
+kind = "tree_size_gte"
+min = 20

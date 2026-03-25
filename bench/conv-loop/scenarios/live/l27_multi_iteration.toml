@@ -1,0 +1,40 @@
+name = "L27: Multi-iteration rLM turn (live)"
+capability = "state_persistence"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+4. You can write multiple code blocks in a single response if the task requires multiple steps.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Complex task that may require multiple code blocks
+[[turns]]
+type = "user_message"
+content = "Define a function called fibonacci(n) that returns the nth Fibonacci number (0-indexed, so fibonacci(0)=0, fibonacci(1)=1, fibonacci(10)=55). Then use it to compute fibonacci(20) and store the result in fib_20."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "function_defined"
+name = "fibonacci"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "fib_20"
+expected = 6765
+
+# Turn 2: Build on the multi-step result
+[[turns]]
+type = "user_message"
+content = "Compute the sum of fibonacci(i) for i in range(10) and store it in fib_sum_10."
+
+[[turns]]
+type = "assert"
+
+# sum of fib(0)..fib(9) = 0+1+1+2+3+5+8+13+21+34 = 88
+[[turns.checks]]
+kind = "variable_equals"
+name = "fib_sum_10"
+expected = 88

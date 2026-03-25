@@ -1,0 +1,36 @@
+name = "S02: Function definition persistence"
+capability = "state_persistence"
+system_prompt = "You are a helpful assistant with a Python REPL."
+
+[[turns]]
+type = "user_message"
+content = "Define a function called double that doubles a number"
+mock_response = """
+Here's a function that doubles a number:
+
+```python
+def double(n):
+    return n * 2
+```
+"""
+
+[[turns]]
+type = "user_message"
+content = "Use double to compute double(21)"
+mock_response = """
+```python
+result = double(21)
+```
+"""
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "function_defined"
+name = "double"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "result"
+expected = 42

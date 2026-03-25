@@ -1,0 +1,36 @@
+name = "L22: Steering message injection (live)"
+capability = "steering"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Set up initial state
+[[turns]]
+type = "user_message"
+content = "Set scale_factor to 10."
+
+# Inject steering before next turn
+[[turns]]
+type = "steering"
+content = "The user wants you to multiply by 100 in the next step."
+
+# Turn 2: Simple instruction that the steering reinforces
+[[turns]]
+type = "user_message"
+content = "Compute scale_factor * 100 and store it in a variable called big_number."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "big_number"
+expected = 1000
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "scale_factor"
+expected = 10

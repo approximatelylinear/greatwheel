@@ -1,0 +1,46 @@
+name = "L11: Multi-turn string processing (live)"
+capability = "state_persistence"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Build a sentence
+[[turns]]
+type = "user_message"
+content = "Set sentence to 'the quick brown fox jumps over the lazy dog'."
+
+# Turn 2: Word analysis
+[[turns]]
+type = "user_message"
+content = "Split sentence into a list of words called words. Store the number of words in word_count."
+
+# Turn 3: Transform
+[[turns]]
+type = "user_message"
+content = "Create a list called capitalized containing each word from words with its first letter capitalized (use .capitalize()). Join them with spaces into a string called title_case."
+
+# Turn 4: Search
+[[turns]]
+type = "user_message"
+content = "Create a list called long_words containing words from words that have more than 3 characters. Store the count in long_count."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "word_count"
+expected = 9
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "title_case"
+expected = "The Quick Brown Fox Jumps Over The Lazy Dog"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "long_count"
+expected = 5

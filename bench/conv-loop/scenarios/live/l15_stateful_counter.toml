@@ -1,0 +1,45 @@
+name = "L15: Stateful class-like pattern (live)"
+capability = "state_persistence"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Create a dictionary-based "object" with methods as functions
+[[turns]]
+type = "user_message"
+content = "Create a dictionary called counter with keys 'value' (set to 0) and 'history' (set to an empty list)."
+
+# Turn 2: Define operations
+[[turns]]
+type = "user_message"
+content = "Define a function called increment(n) that adds n to counter['value'] and appends n to counter['history']."
+
+# Turn 3: Use the operations
+[[turns]]
+type = "user_message"
+content = "Call increment(5), then increment(3), then increment(7)."
+
+# Turn 4: Query state
+[[turns]]
+type = "user_message"
+content = "Store counter['value'] in final_value. Store len(counter['history']) in num_ops."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "final_value"
+expected = 15
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "num_ops"
+expected = 3
+
+[[turns.checks]]
+kind = "function_defined"
+name = "increment"

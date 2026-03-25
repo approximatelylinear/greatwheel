@@ -1,0 +1,49 @@
+name = "L06: Iterative refinement (live)"
+capability = "state_persistence"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Start with initial estimate
+[[turns]]
+type = "user_message"
+content = "We're computing square root of 2 using Newton's method. Set guess to 1.0 as the initial estimate."
+
+# Turn 2: First iteration
+[[turns]]
+type = "user_message"
+content = "Apply one Newton's method iteration: set guess to (guess + 2/guess) / 2."
+
+# Turn 3: Second iteration
+[[turns]]
+type = "user_message"
+content = "Apply one more Newton's method iteration: set guess to (guess + 2/guess) / 2."
+
+# Turn 4: Third iteration
+[[turns]]
+type = "user_message"
+content = "Apply one more Newton's method iteration: set guess to (guess + 2/guess) / 2."
+
+# Turn 5: Check convergence
+[[turns]]
+type = "user_message"
+content = "Compute the error as abs(guess * guess - 2) and store it in a variable called error."
+
+[[turns]]
+type = "assert"
+
+# After 3 Newton iterations from 1.0, guess should be very close to sqrt(2)
+# Iteration 1: (1.0 + 2.0) / 2 = 1.5
+# Iteration 2: (1.5 + 2/1.5) / 2 = (1.5 + 1.333...) / 2 = 1.41666...
+# Iteration 3: (1.41666... + 2/1.41666...) / 2 ≈ 1.41421568...
+# error = |1.41421568...^2 - 2| ≈ 6e-6
+[[turns.checks]]
+kind = "variable_exists"
+name = "guess"
+
+[[turns.checks]]
+kind = "variable_exists"
+name = "error"

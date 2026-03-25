@@ -1,0 +1,33 @@
+name = "S01: Variable persistence"
+capability = "state_persistence"
+system_prompt = "You are a helpful assistant with a Python REPL."
+
+[[turns]]
+type = "user_message"
+content = "Set x to 42"
+mock_response = """
+I'll set x to 42.
+
+```python
+x = 42
+```
+"""
+
+[[turns]]
+type = "user_message"
+content = "What is x?"
+mock_response = """
+Let me check the value of x.
+
+```python
+x
+```
+"""
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "x"
+expected = 42

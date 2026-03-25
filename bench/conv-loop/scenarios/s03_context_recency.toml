@@ -1,0 +1,65 @@
+name = "S03: Context recency window"
+capability = "context_management"
+system_prompt = "You are a helpful assistant."
+recency_window = 2
+
+[[turns]]
+type = "user_message"
+content = "TURN_1_MARKER: Hello"
+mock_response = "Hi there! RESP_1_MARKER"
+
+[[turns]]
+type = "user_message"
+content = "TURN_2_MARKER: How are you?"
+mock_response = "I'm well! RESP_2_MARKER"
+
+[[turns]]
+type = "user_message"
+content = "TURN_3_MARKER: What's the weather?"
+mock_response = "I can't check the weather. RESP_3_MARKER"
+
+[[turns]]
+type = "user_message"
+content = "TURN_4_MARKER: Tell me a joke"
+mock_response = "Why did the chicken cross the road? RESP_4_MARKER"
+
+[[turns]]
+type = "user_message"
+content = "TURN_5_MARKER: What's 2+2?"
+mock_response = "4! RESP_5_MARKER"
+
+[[turns]]
+type = "user_message"
+content = "TURN_6_MARKER: Favorite color?"
+mock_response = "I don't have preferences. RESP_6_MARKER"
+
+[[turns]]
+type = "user_message"
+content = "TURN_7_MARKER: What's your name?"
+mock_response = "I'm an AI assistant. RESP_7_MARKER"
+
+[[turns]]
+type = "user_message"
+content = "TURN_8_MARKER: Goodbye"
+mock_response = "Goodbye! RESP_8_MARKER"
+
+[[turns]]
+type = "assert"
+
+# Last 2 user messages should be in context
+[[turns.checks]]
+kind = "context_contains"
+substring = "TURN_7_MARKER"
+
+[[turns.checks]]
+kind = "context_contains"
+substring = "TURN_8_MARKER"
+
+# Earlier turns should be excluded by recency window
+[[turns.checks]]
+kind = "context_excludes"
+substring = "TURN_1_MARKER"
+
+[[turns.checks]]
+kind = "context_excludes"
+substring = "TURN_2_MARKER"

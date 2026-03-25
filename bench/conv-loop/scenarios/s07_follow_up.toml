@@ -1,0 +1,47 @@
+name = "S07: Follow-up sequencing"
+capability = "follow_up"
+system_prompt = "You are a helpful assistant with a Python REPL."
+
+# Turn 1: first message sets a variable
+[[turns]]
+type = "user_message"
+content = "Set counter to 1"
+mock_response = """
+```python
+counter = 1
+```
+"""
+
+# Turn 2: increment
+[[turns]]
+type = "user_message"
+content = "Increment counter"
+mock_response = """
+```python
+counter = counter + 1
+```
+"""
+
+# Turn 3: increment again
+[[turns]]
+type = "user_message"
+content = "Increment counter again"
+mock_response = """
+```python
+counter = counter + 1
+```
+"""
+
+# After 3 turns, counter should be 3 (1 + 1 + 1)
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "counter"
+expected = 3
+
+# Tree should have at least the user + code + assistant entries for each turn
+[[turns.checks]]
+kind = "tree_size_gte"
+min = 9

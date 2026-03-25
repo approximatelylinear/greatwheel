@@ -1,0 +1,85 @@
+name = "L18: Compaction recovery with live LLM"
+capability = "compaction"
+compaction_keep_count = 2
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Establish baseline state
+[[turns]]
+type = "user_message"
+content = "Set alpha to 100 and beta to 200."
+
+# Turn 2: Compute from baseline
+[[turns]]
+type = "user_message"
+content = "Set gamma to alpha + beta."
+
+# Turn 3: More state
+[[turns]]
+type = "user_message"
+content = "Define a function called scale(x) that returns x * 3."
+
+# Turn 4: Use everything
+[[turns]]
+type = "user_message"
+content = "Set delta to scale(gamma)."
+
+# Verify state before compaction
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "alpha"
+expected = 100
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "gamma"
+expected = 300
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "delta"
+expected = 900
+
+[[turns.checks]]
+kind = "function_defined"
+name = "scale"
+
+# Compact — with keep_count=2, turns 1-2 get summarized
+[[turns]]
+type = "compact"
+
+# Turn 5: After compaction, ask to use the surviving REPL state.
+# The LLM must use the compaction summary + REPL state to continue.
+[[turns]]
+type = "user_message"
+content = "Compute scale(delta) and store the result in a variable called final_val."
+
+# Turn 6: Reference a variable from before compaction (still in REPL)
+[[turns]]
+type = "user_message"
+content = "Store alpha + beta + gamma + delta + final_val in a variable called grand_total."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "final_val"
+expected = 2700
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "grand_total"
+expected = 4200
+
+# Verify tree has compaction entry
+[[turns.checks]]
+kind = "tree_size_gte"
+min = 14

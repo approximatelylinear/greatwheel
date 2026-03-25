@@ -1,0 +1,49 @@
+name = "L23: Follow-up message queuing (live)"
+capability = "follow_up"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Set up state
+[[turns]]
+type = "user_message"
+content = "Set counter to 0 and create an empty list called steps."
+
+# Queue a follow-up that will execute after the next user_message
+[[turns]]
+type = "follow_up"
+content = "Add 10 to counter. Append the string 'follow_up_executed' to steps."
+
+# Turn 2: This turn will execute first, then the follow-up processes after
+[[turns]]
+type = "user_message"
+content = "Add 1 to counter. Append the string 'main_turn' to steps."
+
+# After turn 2 + follow-up: counter should be 11 (0+1+10), steps should have both entries
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "counter"
+expected = 11
+
+[[turns.checks]]
+kind = "variable_exists"
+name = "steps"
+
+# Turn 3: Verify we can keep working
+[[turns]]
+type = "user_message"
+content = "Store len(steps) in a variable called step_count."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "step_count"
+expected = 2

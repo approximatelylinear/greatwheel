@@ -1,0 +1,73 @@
+name = "L28: Resume after compaction (live)"
+capability = "session_resumption"
+compaction_keep_count = 2
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+4. Variables from previous turns persist in the REPL even if you don't see the full conversation.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Base state
+[[turns]]
+type = "user_message"
+content = "Set server_host to 'api.example.com' and server_port to 443."
+
+# Turn 2: Build on it
+[[turns]]
+type = "user_message"
+content = "Set protocol to 'https'."
+
+# Turn 3: Define a function
+[[turns]]
+type = "user_message"
+content = "Define a function called build_url() that returns protocol + '://' + server_host + ':' + str(server_port)."
+
+# Turn 4: Use the function
+[[turns]]
+type = "user_message"
+content = "Store build_url() in a variable called base_url."
+
+# Compact (keeps turns 3-4, summarizes turns 1-2)
+[[turns]]
+type = "compact"
+
+# Snapshot after compaction
+[[turns]]
+type = "snapshot"
+
+# Simulate session suspend/resume
+[[turns]]
+type = "restore_snapshot"
+
+# Verify everything survived: compaction + snapshot + restore
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "base_url"
+expected = "https://api.example.com:443"
+
+[[turns.checks]]
+kind = "function_defined"
+name = "build_url"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "server_host"
+expected = "api.example.com"
+
+# Turn 5: Continue after resume — test that LLM can use restored state
+[[turns]]
+type = "user_message"
+content = "Set server_port to 8443 and store build_url() in a variable called new_url."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "new_url"
+expected = "https://api.example.com:8443"

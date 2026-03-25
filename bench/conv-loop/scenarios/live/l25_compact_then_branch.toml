@@ -1,0 +1,77 @@
+name = "L25: Compaction then branch interaction (live)"
+capability = "compaction"
+compaction_keep_count = 2
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Build up enough state for compaction
+# Turn 1
+[[turns]]
+type = "user_message"
+content = "Set a to 10."
+
+# Turn 2
+[[turns]]
+type = "user_message"
+content = "Set b to 20."
+
+# Turn 3
+[[turns]]
+type = "user_message"
+content = "Set c to a + b."
+
+# Snapshot before compaction
+[[turns]]
+type = "snapshot"
+
+# Turn 4
+[[turns]]
+type = "user_message"
+content = "Set d to c * 2."
+
+# Compact — keeps last 2 user turns (turns 3,4), summarizes turns 1,2
+[[turns]]
+type = "compact"
+
+# Verify state survived compaction
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "c"
+expected = 30
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "d"
+expected = 60
+
+# Turn 5: Continue after compaction
+[[turns]]
+type = "user_message"
+content = "Set e to d + 40."
+
+# Verify post-compaction work
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "e"
+expected = 100
+
+# All pre-compaction variables should still be in REPL
+[[turns.checks]]
+kind = "variable_equals"
+name = "a"
+expected = 10
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "b"
+expected = 20

@@ -1,0 +1,43 @@
+name = "L16: Recursive data structure building (live)"
+capability = "state_persistence"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Build a tree-like structure
+[[turns]]
+type = "user_message"
+content = "Create a dictionary called tree representing: {'value': 1, 'children': [{'value': 2, 'children': []}, {'value': 3, 'children': [{'value': 4, 'children': []}]}]}."
+
+# Turn 2: Extract values manually (avoid recursion issues with ouros)
+[[turns]]
+type = "user_message"
+content = "Compute the sum: tree['value'] + tree['children'][0]['value'] + tree['children'][1]['value'] + tree['children'][1]['children'][0]['value']. Store the result in tree_total."
+
+# Turn 3: Modify the tree
+[[turns]]
+type = "user_message"
+content = "Append {'value': 5, 'children': []} to tree['children'][1]['children']."
+
+# Turn 4: Recompute
+[[turns]]
+type = "user_message"
+content = "Compute tree['value'] + tree['children'][0]['value'] + tree['children'][1]['value'] + tree['children'][1]['children'][0]['value'] + tree['children'][1]['children'][1]['value']. Store the result in new_total."
+
+[[turns]]
+type = "assert"
+
+# Original: 1+2+3+4 = 10
+[[turns.checks]]
+kind = "variable_equals"
+name = "tree_total"
+expected = 10
+
+# After adding 5: 1+2+3+4+5 = 15
+[[turns.checks]]
+kind = "variable_equals"
+name = "new_total"
+expected = 15

@@ -1,0 +1,47 @@
+name = "L17: Set operations across turns (live)"
+capability = "state_persistence"
+system_prompt = """
+You are a helpful assistant with a Python REPL. When asked to perform tasks:
+1. Write Python code in ```python fenced blocks.
+2. Store results in clearly named variables using the exact names requested.
+3. Do NOT call FINAL() — just execute the code.
+Keep responses brief — code only, no explanations."""
+
+# Turn 1: Create sets
+[[turns]]
+type = "user_message"
+content = "Create set_a = {1, 2, 3, 4, 5} and set_b = {4, 5, 6, 7, 8}."
+
+# Turn 2: Compute operations
+[[turns]]
+type = "user_message"
+content = "Store the intersection of set_a and set_b as a sorted list in common. Store the union as a sorted list in combined."
+
+# Turn 3: More operations using results
+[[turns]]
+type = "user_message"
+content = "Store the items only in set_a (not in set_b) as a sorted list in only_a. Store len(common) + len(only_a) in check_sum."
+
+[[turns]]
+type = "assert"
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "common"
+expected = [4, 5]
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "combined"
+expected = [1, 2, 3, 4, 5, 6, 7, 8]
+
+[[turns.checks]]
+kind = "variable_equals"
+name = "only_a"
+expected = [1, 2, 3]
+
+# len(common)=2, len(only_a)=3, check_sum=5
+[[turns.checks]]
+kind = "variable_equals"
+name = "check_sum"
+expected = 5
