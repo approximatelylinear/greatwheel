@@ -66,12 +66,99 @@ def select_representative_subset(examples: list[dict], n: int = 8) -> list[dict]
     return subset[:n]
 
 
-def build_evaluator_fn(evaluator: BrowseCompEvaluator, examples: list[dict]):
+def precompute_oracle_analysis(examples: list[dict]) -> dict[str, dict]:
+    """Precompute oracle retrieval analysis for each query (static, run once).
+
+    Returns {query_id: {oracle_best_rank, oracle_best_query, oracle_retrievable}}.
+    """
+    from retrieval_diagnostic import (
+        load_ground_truth, generate_oracle_queries, _tantivy_py_search, _open_tantivy,
+    )
+
+    gt = load_ground_truth()
+    try:
+        _open_tantivy()
+    except Exception as e:
+        print(f"Warning: tantivy not available for oracle analysis: {e}", file=sys.stderr)
+        return {}
+
+    oracle_data = {}
+    for example in examples:
+        qid = str(example["query_id"])
+        if qid not in gt:
+            continue
+
+        gt_entry = gt[qid]
+        gold_docids = gt_entry["gold_docids"]
+        gold_texts = gt_entry.get("gold_texts", {})
+        answer = gt_entry["answer"]
+        query = gt_entry["query"]
+
+        best_rank = None
+        best_query = None
+
+        for gold_did in gold_docids:
+            gold_text = gold_texts.get(gold_did, "")
+            oracle_queries = generate_oracle_queries(gold_text, answer, query)
+
+            for oq in oracle_queries:
+                if not oq.strip():
+                    continue
+                hits = _tantivy_py_search(oq, k=200)
+                for rank, hit in enumerate(hits):
+                    if hit["docid"] == gold_did:
+                        if best_rank is None or rank < best_rank:
+                            best_rank = rank
+                            best_query = oq
+                        break
+
+        oracle_data[qid] = {
+            "oracle_best_rank": best_rank,
+            "oracle_best_query": best_query,
+            "oracle_retrievable": best_rank is not None,
+            "oracle_in_top10": best_rank is not None and best_rank < 10,
+        }
+
+    return oracle_data
+
+
+def classify_retrieval_failure(asi: dict, oracle: dict) -> str:
+    """Classify a query failure with retrieval diagnostic context.
+
+    Returns a more specific failure category:
+      - extraction_error: gold doc found, wrong answer
+      - query_quality: oracle finds it but model's queries didn't
+      - unretrievable: even oracle can't find it
+      - hedge/timeout: model didn't submit a real answer
+    """
+    if asi.get("correct"):
+        return "correct"
+
+    fm = asi.get("failure_mode", "")
+    if fm in ("hedge", "timeout"):
+        return fm
+
+    gold_retrieved = asi.get("gold_docid_retrieved", False)
+    oracle_easy = oracle.get("oracle_in_top10", False)
+    oracle_any = oracle.get("oracle_retrievable", False)
+
+    if gold_retrieved:
+        return "extraction_error"
+    elif oracle_easy:
+        return "query_quality"
+    elif oracle_any:
+        return "query_quality_hard"
+    else:
+        return "unretrievable"
+
+
+def build_evaluator_fn(evaluator: BrowseCompEvaluator, examples: list[dict], oracle_data: dict[str, dict] | None = None):
     """Build a GEPA-compatible evaluator function.
 
     For optimize_anything, the evaluator receives (candidate_str) and
     returns (score, side_info_dict). We evaluate across all examples
-    and return the aggregate score + per-query ASI.
+    and return the aggregate score + per-query ASI enriched with
+    retrieval diagnostic context.
     """
     def evaluate(candidate: str) -> tuple[float, dict]:
         candidate_dict = {"system_prompt": candidate}
@@ -81,41 +168,77 @@ def build_evaluator_fn(evaluator: BrowseCompEvaluator, examples: list[dict]):
         for example in examples:
             score, asi = evaluator.evaluate(candidate_dict, example)
             total_score += score
+
+            # Enrich with retrieval diagnostic
+            qid = str(example.get("query_id", ""))
+            oracle = (oracle_data or {}).get(qid, {})
+            asi["retrieval_category"] = classify_retrieval_failure(asi, oracle)
+            if oracle:
+                asi["oracle_best_rank"] = oracle.get("oracle_best_rank")
+                asi["oracle_best_query"] = oracle.get("oracle_best_query")
+
             per_query.append(asi)
 
         accuracy = total_score / len(examples) if examples else 0.0
 
         # Build aggregated side info for the reflection LM
         failure_dist = {}
+        retrieval_dist = {}
         for q in per_query:
-            mode = q["failure_mode"]
+            mode = q.get("failure_mode", "?")
             failure_dist[mode] = failure_dist.get(mode, 0) + 1
+            rcat = q.get("retrieval_category", "?")
+            retrieval_dist[rcat] = retrieval_dist.get(rcat, 0) + 1
 
         correct_ids = [q["query_id"] for q in per_query if q.get("correct", False)]
         wrong_queries = [q for q in per_query if not q.get("correct", False)]
 
-        # Build concise feedback string for reflection
+        # Build concise, actionable feedback string for the reflection LM
         feedback_lines = [
             f"Accuracy: {int(total_score)}/{len(examples)} ({accuracy:.0%})",
-            f"Failures: {failure_dist}",
+            f"Retrieval breakdown: {retrieval_dist}",
             f"Correct: {correct_ids}",
             "",
+            "FAILURES (most actionable first):",
         ]
-        for q in wrong_queries[:5]:  # Show up to 5 failures in detail
-            feedback_lines.append(
-                f"Q{q.get('query_id', '?')} [{q.get('failure_mode', '?')}]: "
-                f"expected '{q.get('expected_answer', '?')[:50]}', "
-                f"got '{q.get('final_answer', '?')[:50]}'"
-            )
-            searches = q.get("searches_issued", [])
-            if searches:
-                feedback_lines.append(f"  searches: {searches[:3]}")
+
+        # Group by retrieval category for clearer feedback
+        for category in ["extraction_error", "query_quality", "query_quality_hard", "hedge", "timeout", "unretrievable"]:
+            cat_queries = [q for q in wrong_queries if q.get("retrieval_category") == category]
+            if not cat_queries:
+                continue
+
+            if category == "extraction_error":
+                feedback_lines.append(f"\n  EXTRACTION ERRORS ({len(cat_queries)}): Gold doc was found but wrong answer extracted.")
+                feedback_lines.append("  → Improve fact extraction from documents, use llm_query() more carefully.")
+            elif category == "query_quality":
+                feedback_lines.append(f"\n  QUERY QUALITY ({len(cat_queries)}): Gold doc exists and is easily findable, but model's search queries missed it.")
+                feedback_lines.append("  → Improve search query generation — use more specific keywords from the question.")
+            elif category == "hedge":
+                feedback_lines.append(f"\n  HEDGES ({len(cat_queries)}): Model refused to give a concrete answer.")
+                feedback_lines.append("  → Force concrete answers, never say 'unable to determine'.")
+            elif category == "unretrievable":
+                feedback_lines.append(f"\n  UNRETRIEVABLE ({len(cat_queries)}): Gold doc not findable by BM25 — cannot fix with prompts.")
+                continue  # Don't show details for unfixable queries
+
+            for q in cat_queries[:3]:
+                line = f"    Q{q.get('query_id', '?')}: expected '{q.get('expected_answer', '?')[:40]}', got '{q.get('final_answer', '?')[:40]}'"
+                feedback_lines.append(line)
+                if category == "query_quality":
+                    oq = q.get("oracle_best_query", "")
+                    orank = q.get("oracle_best_rank")
+                    if oq:
+                        feedback_lines.append(f"      Oracle query '{oq[:50]}' finds it at rank #{orank+1 if orank is not None else '?'}")
+                searches = q.get("searches_issued", [])
+                if searches:
+                    feedback_lines.append(f"      Model's queries: {searches[:3]}")
 
         side_info = {
             "accuracy": accuracy,
             "n_correct": int(total_score),
             "n_total": len(examples),
             "failure_distribution": failure_dist,
+            "retrieval_breakdown": retrieval_dist,
             "correct_ids": correct_ids,
             "per_query_summary": "\n".join(feedback_lines),
         }
@@ -159,8 +282,14 @@ def main():
         k=args.k,
     )
 
-    # Build GEPA-compatible evaluator
-    evaluate_fn = build_evaluator_fn(bench_evaluator, examples)
+    # Precompute oracle retrieval analysis (static, runs once)
+    print("Precomputing oracle retrieval analysis...", flush=True)
+    oracle_data = precompute_oracle_analysis(examples)
+    n_oracle = sum(1 for v in oracle_data.values() if v.get("oracle_in_top10"))
+    print(f"  {n_oracle}/{len(examples)} queries have gold doc in BM25 top-10 with oracle queries")
+
+    # Build GEPA-compatible evaluator with retrieval diagnostic
+    evaluate_fn = build_evaluator_fn(bench_evaluator, examples, oracle_data)
 
     # Run optimization
     from gepa.optimize_anything import (
@@ -253,10 +382,11 @@ def main():
     if args.subset > 0:
         print(f"\nValidating best prompt on full sample30...")
         all_examples = load_sample30()
-        full_eval = build_evaluator_fn(bench_evaluator, all_examples)
+        full_oracle = precompute_oracle_analysis(all_examples)
+        full_eval = build_evaluator_fn(bench_evaluator, all_examples, full_oracle)
         full_score, full_info = full_eval(best_text)
         print(f"Full sample30 accuracy: {full_info['n_correct']}/{full_info['n_total']} ({full_score:.1%})")
-        print(f"Failures: {full_info['failure_distribution']}")
+        print(f"Retrieval breakdown: {full_info.get('retrieval_breakdown', {})}")
 
 
 if __name__ == "__main__":
