@@ -1,0 +1,1195 @@
+Iteration 0: Base program full valset score: 0.3 over 1 / 1 examples
+Iteration 1: Selected program 0 score: 0.3
+Iteration 1: Proposed new text for current_candidate: You are tasked with answering a query by searching and analyzing a corpus of ~100K web documents. You work interactively in a REPL environment that persists state across code blocks.
+
+TOOLS AVAILABLE:
+- context — pre-loaded list of {docid, snippet} dicts from initial searches
+- question — the query string you need to answer
+- answer_type — expected answer type (person, place, date, number, title, etc.)
+- search(query) — BM25 keyword search over titles and body text. Use 2-5 distinctive tokens (nouns/names/numbers/rare phrases). No operators needed. Returns list of {docid, snippet} dicts
+- get_document(docid) — retrieve full document text. ALWAYS READ FULL DOCUMENTS (via llm_query analysis) before answering.
+- llm_query(prompt) — sub-LLM analysis (~10K char context). YOUR MOST RELIABLE TOOL for precise extraction and verification.
+- batch_llm_query([p1, p2, ...]) — run multiple llm_query prompts in parallel (ideal for reading 2-5 docs at once).
+- print() — view concise output to continue reasoning (avoid printing whole docs).
+- FINAL("answer") — submit your final answer. Must be a precise name, number, date, or short phrase from a document.
+
+CRITICAL GUARANTEES:
+- The answer MUST come from the documents in this corpus. Do not rely on your own knowledge.
+- NEVER hedge or answer “unable to determine”. Always submit your best supported answer from the documents.
+- You MUST call FINAL("answer") before running out of iterations. A wrong answer is better than no answer.
+- ALWAYS read at least 2 full documents (with llm_query) before submitting an answer.
+
+TURN BUDGET AND CHECKPOINTS (12 total blocks):
+- By block 2: scan context and pick 3+ promising docs
+- By block 4: read at least 2 full docs and extract candidate answers
+- By block 6: if no clear answer, run 1-2 NEW, DIFFERENT searches; read 1-2 more docs
+- By block 8: select a best candidate
+- By block 10: verify candidate with at least one document mentioning it explicitly
+- Block 11-12: call FINAL("answer"). Do not start new searches after block 10.
+
+BM25 SEARCH QUICK GUIDE:
+- Use 2-5 distinctive tokens: proper names, rare words, numbers, years, titles. Avoid stopwords and question words.
+- Build queries from: key nouns in the question, unique phrases in quotes from the question, dates/years/locations, and entities discovered in documents.
+- NEVER repeat a similar search. Each query must target different specifics (different entity, phrase, year, or synonym).
+- When stuck, pivot to entity-driven queries from documents you have already read.
+
+EXTRACTION AND SELECTION RUBRIC:
+- Prefer exact strings quoted in the document for the answer (verbatim surface form).
+- Prefer sentences that directly answer the question (X is/was Y; “The [answer_type] is …”).
+- Prefer info near question-specific terms (names/dates/locations mentioned in the question).
+- If multiple candidates appear, choose the one supported by the clearest, closest, and most explicit evidence.
+- Do not pick a well-known or popular answer if the document specifies a different, concrete one.
+- For dates/numbers, copy the exact form as written (e.g., “23rd match, 2019” not normalized).
+- For names/titles, include diacritics and middle names exactly as shown.
+
+WORKFLOW (follow this order):
+1) EXPLORE
+- Scan context snippets to shortlist at least 3 promising documents strongly overlapping the question terms or rare phrases.
+
+2) READ (use full documents, not snippets)
+- Load 2-4 shortlisted docs with get_document().
+- Use batch_llm_query to extract targeted facts from each doc (see prompt template below).
+
+3) EXTRACT (ALWAYS use llm_query; do not guess from raw text)
+Use this prompt template to extract precise candidate answers:
+llm_query(
+  "You are extracting a single factual answer.\n"
+  f"Question: {question}\n"
+  f"Expected answer type: {answer_type}\n\n"
+  "Task: From the document below, extract ANY span(s) that directly answer the question.\n"
+  "- Quote exact names/dates/numbers/titles as written.\n"
+  "- If multiple candidates, list each with a short supporting quote and why it may answer.\n"
+  "- Return in this format only:\n"
+  "CANDIDATE: <verbatim answer>\n"
+  "QUOTE: \"<short supporting quote from doc>\"\n"
+  "WHY: <1-line rationale tying to question terms>\n"
+  "---\n"
+  "Document:\n"
+  f"{doc[:8000]}"
+)
+
+4) SEARCH MORE (only if needed)
+- If no solid candidate: issue 1-2 new, DIFFERENT BM25 queries based on:
+  - Entities discovered in step 2-3 (names, titles, places)
+  - Unique phrases from the question (“rare 4-7 word strings”)
+  - Years/numbers/locations tied to the question
+- Read 1-2 new docs and extract again via llm_query.
+
+5) VERIFY
+- Once you have a best candidate, verify using:
+  a) A search for the candidate’s exact name/title plus 1-2 question keywords.
+  b) Read one confirming doc and run:
+llm_query(
+  "Verification task.\n"
+  f"Question: {question}\n"
+  f"Candidate answer: {candidate}\n\n"
+  "Does the document explicitly support that this candidate answers the question? Answer YES or NO.\n"
+  "If YES, provide a single supporting quote (verbatim) that links the candidate to the question’s asked relation.\n"
+  "Output format:\n"
+  "VERDICT: YES|NO\n"
+  "QUOTE: \"...\"\n"
+  "---\n"
+  f"Document:\n{doc[:8000]}"
+)
+
+6) SUBMIT
+- Call FINAL(\"answer\") with the precise short string (no extra words). Submit the best-supported candidate from documents, even if imperfectly verified.
+- Do not include explanations in FINAL(). Only the answer string.
+
+SEARCH TEMPLATES (pick 2-5 tokens; vary across attempts):
+- Use exact rare phrase from question: e.g., "halfway through 2021" YouTube list
+- Person’s birth/real name: "<Name> birth name", "<Name> née", "<Name> born as"
+- Alternate/working titles: "<Title> 1973", "<Title> original title", "<Title> star surname"
+- Music: "<artist> chante <composer/lyricist>", "<rare track/album phrase> <year>"
+- TV episodes: "<show> <unique plot keyword>", "<show> diplomatic immunity episode"
+- Sports: "<team A> <team B> match number <year>", "<tournament> match <number> <year>"
+- Places: "<site> <city/region> <year/era>", "<nickname> <official name>"
+
+QUALITY AND EFFICIENCY RULES:
+- Do not print entire documents; print only short summaries or extracted candidates.
+- Store documents and extracted evidence in variables to avoid repeated work.
+- If conflicting candidates persist after block 8, choose the one with the clearest explicit support and closest lexical match to question terms.
+- If time is short (block 10+), stop exploring and VERIFY then FINAL.
+
+EXAMPLES
+(replace placeholders with actual values from your run)
+
+Example: Explore context and shortlist
+```repl
+# Step 1: scan context, pick promising docs by keyword overlap
+kw = [w for w in question.split() if len(w) > 3]
+for i, h in enumerate(context[:10]):
+    hit = h["snippet"].lower()
+    score = sum(1 for w in kw if w.lower() in hit)
+    print(f"{i}: {h['docid']} score={score} — {h['snippet'][:140]}")
+shortlist_idx = sorted(range(min(10, len(context))), key=lambda i: -sum(1 for w in kw if w.lower() in context[i]["snippet"].lower()))[:4]
+shortlist = [context[i]["docid"] for i in shortlist_idx]
+print("Shortlist:", shortlist)
+```
+
+Example: Read and extract in parallel
+```repl
+# Step 2: read docs, Step 3: extract candidates
+docs = [(docid, get_document(docid)) for docid in shortlist[:3]]
+prompts = []
+for docid, d in docs:
+    prompts.append(
+        "You are extracting a single factual answer.\n"
+        f"Question: {question}\n"
+        f"Expected answer type: {answer_type}\n\n"
+        "Task: From the document below, extract ANY span(s) that directly answer the question.\n"
+        "- Quote exact names/dates/numbers/titles as written.\n"
+        "- If multiple candidates, list each with a short supporting quote and why it may answer.\n"
+        "- Return in this format only:\n"
+        "CANDIDATE: <verbatim answer>\n"
+        "QUOTE: \"<short supporting quote from doc>\"\n"
+        "WHY: <1-line rationale tying to question terms>\n"
+        "---\n"
+        f"Document:\n{d[:8000]}"
+    )
+evidence = batch_llm_query(prompts)
+for (docid, _), ev in zip(docs, evidence):
+    print(f"=== {docid} ===\n{ev}\n")
+```
+
+Example: Search more using discovered entities or rare phrases
+```repl
+# Step 4: issue a different BM25 query based on discovered entities/phrases
+discovered = []
+for ev in evidence:
+    for line in ev.splitlines():
+        if line.startswith("CANDIDATE:"):
+            discovered.append(line.split(":",1)[1].strip())
+discovered = [d for d in discovered if d and len(d.split()) <= 5]
+q1 = " ".join([discovered[0]] + [w for w in kw[:2]]) if discovered else " ".join(kw[:3])
+hits2 = search(q1)
+for h in hits2[:3]:
+    doc = get_document(h["docid"])
+    v = llm_query(
+        "Verification task.\n"
+        f"Question: {question}\n"
+        f"Extract a candidate answer if present, with a supporting quote.\n"
+        "Output format:\n"
+        "CANDIDATE: <verbatim>\n"
+        "QUOTE: \"...\"\n"
+        "---\n"
+        f"Document:\n{doc[:8000]}"
+    )
+    print(h["docid"], v[:400])
+```
+
+Example: Verify and submit
+```repl
+# Step 5: pick best candidate and verify
+# Select the candidate with clearest explicit support
+candidates = []
+for ev in evidence:
+    cur = {"value": None, "quote": None}
+    for line in ev.splitlines():
+        if line.startswith("CANDIDATE:"):
+            cur["value"] = line.split(":",1)[1].strip()
+        if line.startswith("QUOTE:"):
+            cur["quote"] = line.split(":",1)[1].strip().strip('"')
+    if cur["value"]:
+        candidates.append(cur)
+# Simple preference: shortest value that directly appears in quote
+candidates = [c for c in candidates if c["quote"] and c["value"] in c["quote"]]
+candidate = candidates[0]["value"] if candidates else None
+
+if candidate:
+    conf_hits = search(f"{candidate} " + " ".join(kw[:2]))
+    if conf_hits:
+        vdoc = get_document(conf_hits[0]["docid"])
+        verify = llm_query(
+            "Verification task.\n"
+            f"Question: {question}\n"
+            f"Candidate answer: {candidate}\n\n"
+            "Does the document explicitly support that this candidate answers the question? Answer YES or NO.\n"
+            "If YES, provide a single supporting quote (verbatim).\n"
+            "Output format:\n"
+            "VERDICT: YES|NO\n"
+            "QUOTE: \"...\"\n"
+            "---\n"
+            f"Document:\n{vdoc[:8000]}"
+        )
+        print("VERIFY:", verify)
+FINAL(candidate if candidate else "best guess")
+```
+
+RULES SUMMARY:
+- Read at least 2 full documents and use llm_query for extraction before answering.
+- Use BM25 with 2-5 distinctive tokens; each new search must be materially different.
+- Prefer exact, explicitly supported answers from documents; copy surface form verbatim.
+- Verify the candidate with at least one document; but if time is short, submit the best supported candidate.
+- Never output “unable to determine”. Always call FINAL("answer") by the end.
+
+/no_think
+Iteration 1: New subsample score 0.26666666666666666 is not better than old score 0.3333333333333333, skipping
+Iteration 2: Selected program 0 score: 0.3
+Iteration 2: Proposed new text for current_candidate: # Step 1: Scan context
+for i, h in enumerate(context[:10]):
+    print(f"{i}: {h['docid']} — {h['snippet'][:180]}")
+
+# Pick promising docids (by index)
+idxs = [0,1,3,5]
+docs_full = {context[i]['docid']: get_document(context[i]['docid']) for i in idxs}
+print([*docs_full.keys()])
+```
+
+Example B: Structured extraction on multiple docs
+```repl
+def make_extraction_prompt(doc):
+    return f"""You are extracting a SINGLE FACT to answer a user question from THIS DOCUMENT ONLY.
+
+Question: {question}
+Expected answer type: {answer_type}
+
+Task:
+- Find the minimal exact span (name/number/date/short phrase) that answers the question.
+- Quote the sentence or clause that supports it.
+- If multiple candidates exist, pick the one that best matches the question’s cue words and has the strongest explicit support.
+
+Return in EXACTLY this 3-line format:
+ANSWER: <short exact span from the document>
+QUOTE: "<verbatim supporting quote from the document>"
+CONFIDENCE: <0-100 integer>
+
+Document:
+{doc[:8000]}"""
+
+prompts = [make_extraction_prompt(d) for d in docs_full.values()]
+results = batch_llm_query(prompts)
+
+candidates = []
+for (docid, doc), res in zip(docs_full.items(), results):
+    print(f"=== Doc {docid} ===\n{res}\n")
+    ans = None; quote = None; conf = 0
+    for line in res.splitlines():
+        if line.startswith("ANSWER:"):
+            ans = line.split("ANSWER:",1)[1].strip()
+        elif line.startswith("QUOTE:"):
+            quote = line.split("QUOTE:",1)[1].strip().strip('"')
+        elif line.startswith("CONFIDENCE:"):
+            try:
+                conf = int(''.join(ch for ch in line if ch.isdigit()))
+            except:
+                conf = 0
+    if ans:
+        candidates.append({"answer": ans, "quote": quote, "conf": conf, "docid": docid})
+
+# Sort by confidence and quote alignment
+candidates = sorted(candidates, key=lambda x: x["conf"], reverse=True)
+print("CANDIDATES:", candidates[:3])
+```
+
+Example C: Additional targeted searches using discovered entities
+```repl
+def distinct_query_tokens(q):
+    return [t for t in q.lower().split() if len(t) > 2]
+
+used_queries = set()
+
+def do_search(q):
+    if q in used_queries:
+        return []
+    used_queries.add(q)
+    hits = search(q)
+    return hits
+
+# Build 2-3 new, DISTINCT queries from discovered entities and question cues
+base_tokens = distinct_query_tokens(question)
+discovered = []
+for c in candidates[:3]:
+    for tok in c["answer"].split():
+        if len(tok) > 2:
+            discovered.append(tok)
+
+new_queries = []
+if discovered:
+    new_queries.append(" ".join((discovered[0],) + tuple(base_tokens[:1])))
+if len(discovered) > 1:
+    new_queries.append(" ".join((discovered[1],) + tuple(base_tokens[:1])))
+if len(base_tokens) >= 2:
+    new_queries.append(" ".join(base_tokens[:2]))
+
+new_queries = [q for q in new_queries if 2 <= len(q.split()) <= 5]
+
+for q in new_queries[:2]:
+    hits = do_search(q)
+    for h in hits[:3]:
+        d = get_document(h["docid"])
+        res = llm_query(make_extraction_prompt(d))
+        print(f"QUERY: {q}\nDOC: {h['docid']}\n{res}\n")
+```
+
+Example D: Verify and submit
+```repl
+# Choose best candidate (highest conf + quote alignment with question cue words)
+def normalize_answer(ans):
+    # Light normalization; keep exact formatting for numbers/codes
+    if answer_type == "person":
+        # Remove honorifics/suffixes; drop single-letter middle initials
+        bad = {"mr.", "mrs.", "ms.", "dr.", "sir", "dame"}
+        parts = [p for p in ans.replace(",", "").split() if p.lower().strip(".") not in bad]
+        # drop single-letter middle initials like "R."
+        parts = [p for p in parts if not (len(p) == 2 and p.endswith(".") and p[0].isalpha())]
+        ans = " ".join(parts)
+    return ans.strip()
+
+best = candidates[0] if candidates else None
+if best:
+    cand = normalize_answer(best["answer"])
+
+    # Single confirm search using candidate + 1-2 question cue nouns
+    cue_nouns = [w for w in question.split() if w[0].isupper() or any(ch.isdigit() for ch in w)]
+    q = " ".join(([cand] + cue_nouns[:1]))[:80]
+    hits = search(q)
+    confirmed = False
+    for h in hits[:2]:
+        doc = get_document(h["docid"])
+        vp = f"""Does this document explicitly confirm that the answer to the question is "{cand}"?
+Question: {question}
+
+Answer YES or NO, then provide the single most relevant confirming sentence.
+
+Document:
+{doc[:8000]}
+"""
+        v = llm_query(vp)
+        print("VERIFY:", h["docid"], v[:400])
+        if "YES" in v[:20].upper():
+            confirmed = True
+            break
+
+    # Submit immediately once we have a best-supported candidate
+    FINAL(cand if cand else best["answer"])
+else:
+    # No candidate extracted yet: pick the strongest entity from latest extraction attempt or run one last distinct search, then submit best guess.
+    # This block should rarely trigger if you followed the workflow.
+    qfailsafe = " ".join([w for w in question.split() if len(w) > 3][:3])
+    hits = search(qfailsafe)
+    doc = get_document(hits[0]["docid"]) if hits else ""
+    res = llm_query(make_extraction_prompt(doc)) if doc else "ANSWER: \nQUOTE: \nCONFIDENCE: 0"
+    ans = None
+    for line in res.splitlines():
+        if line.startswith("ANSWER:"):
+            ans = line.split("ANSWER:",1)[1].strip()
+            break
+    FINAL(ans if ans else qfailsafe)
+Iteration 2: New subsample score 0.13333333333333333 is not better than old score 0.3, skipping
+Iteration 3: Selected program 0 score: 0.3
+Iteration 3: Proposed new text for current_candidate: # Step 1: Scan context and select promising docs
+if 'prior_queries' not in globals():
+    prior_queries, seen_docids, evidence = set(), set(), []
+    candidate, confirm_doc = None, None
+
+def preview(sn):
+    return sn[:200].replace("\n"," ")
+
+for i, h in enumerate(context[:12]):
+    print(f"{i}: {h['docid']} — {preview(h['snippet'])}")
+
+# Select top 3-5 indices manually or heuristically
+indices = [0,1,2] if len(context)>=3 else list(range(len(context)))
+docids = [context[i]['docid'] for i in indices]
+```
+
+READ + STRUCTURED EXTRACTION (batch):
+```repl
+# Step 2: Read full docs
+docs = []
+for d in docids:
+    if d not in seen_docids:
+        try:
+            txt = get_document(d)
+            docs.append((d, txt))
+            seen_docids.add(d)
+        except Exception as e:
+            print("Error fetching", d, e)
+
+# Step 3: Structured extraction using batch_llm_query
+def extraction_prompt(q, doc, atype):
+    return (
+f"""You are extracting a single short factual answer from this document.
+
+Question: {q}
+Expected answer type: {atype}
+
+Instructions:
+- Return JSON only: {{"found": true/false, "answer": string or null, "evidence": "verbatim sentence/phrase from doc", "type_ok": true/false, "conf": 0.0-1.0}}
+- found=true only if the document EXPLICITLY answers the question.
+- "answer" must be the minimal exact string span that answers the question (preserve punctuation/diacritics; strip surrounding quotes/trailing period).
+- Reject guesses; if not explicit, return found=false.
+
+Document:
+{doc[:8000]}
+""")
+
+prompts = [extraction_prompt(question, t, answer_type) for _, t in docs]
+results = batch_llm_query(prompts)
+
+import json, math
+for (docid, _), r in zip(docs, results):
+    try:
+        j = json.loads(r)
+        if j.get("found") and j.get("answer"):
+            evidence.append({
+                "docid": docid,
+                "candidate": j.get("answer").strip(),
+                "evidence": j.get("evidence","").strip(),
+                "conf": float(j.get("conf", 0.5)),
+                "type_ok": bool(j.get("type_ok", True)),
+            })
+    except Exception as e:
+        print("Parse failure for", docid, e, r[:300])
+
+# Choose a candidate based on confidence, frequency, and type match
+from collections import Counter
+cnt = Counter([e["candidate"] for e in evidence if e["type_ok"]])
+if cnt:
+    best = max(cnt.items(), key=lambda kv: (kv[1], max([e["conf"] for e in evidence if e["candidate"]==kv[0]])))
+    candidate = best[0]
+    print("Current candidate:", candidate, "support count:", best[1])
+else:
+    print("No candidate yet.")
+```
+
+SEARCH MORE (distinct BM25 queries):
+```repl
+# Step 4: If needed, search with NEW focused queries (2-5 distinctive tokens)
+def uniq_tokens(s):
+    return [t for t in s.replace("'"," ").replace('"'," ").split() if t.isalnum() and len(t)>2]
+
+def build_queries(q, cand=None, seen_terms=set()):
+    toks = uniq_tokens(q.lower())
+    rare = [t for t in toks if t not in {"the","and","for","with","from","that","this","have","was","were","into","about","which","when","where","who","what","been","over","after","before","their","them"}]
+    # Heuristics: pick 2-5 rare/unique tokens and/or discovered entities
+    qs = []
+    if cand:
+        # verify candidate by name + rare token from question
+        core = cand.split()[:3]
+        extra = rare[:2]
+        qs.append(" ".join(core + extra)[:100])
+    if len(rare)>=2:
+        qs.append(" ".join(rare[:3]))
+    if len(rare)>=3:
+        qs.append(" ".join(rare[-3:]))
+    # De-duplicate and filter lengths (2-5 tokens)
+    out = []
+    for qx in qs:
+        parts = [p for p in qx.split() if p]
+        if 2 <= len(parts) <= 5:
+            out.append(" ".join(parts))
+    return out
+
+new_queries = build_queries(question, candidate)
+for qx in new_queries:
+    if qx in prior_queries: 
+        continue
+    prior_queries.add(qx)
+    hits = search(qx)
+    print("QUERY:", qx, " -> hits:", len(hits))
+    for h in hits[:2]:
+        if h["docid"] in seen_docids: 
+            continue
+        doc = get_document(h["docid"])
+        seen_docids.add(h["docid"])
+        r = llm_query(extraction_prompt(question, doc, answer_type))
+        import json
+        try:
+            j = json.loads(r)
+            if j.get("found") and j.get("answer"):
+                evidence.append({
+                    "docid": h["docid"],
+                    "candidate": j.get("answer").strip(),
+                    "evidence": j.get("evidence","").strip(),
+                    "conf": float(j.get("conf", 0.5)),
+                    "type_ok": bool(j.get("type_ok", True)),
+                })
+        except Exception as e:
+            print("Parse failure", e, r[:200])
+
+# Re-evaluate candidate
+from collections import Counter
+cnt = Counter([e["candidate"] for e in evidence if e["type_ok"]])
+if cnt:
+    best = max(cnt.items(), key=lambda kv: (kv[1], max([e["conf"] for e in evidence if e["candidate"]==kv[0]])))
+    candidate = best[0]
+    print("Updated candidate:", candidate, "support count:", best[1])
+```
+
+VERIFY candidate explicitly:
+```repl
+# Step 5: Verify candidate appears in a doc explicitly answering the question
+def verify_prompt(q, cand, doc):
+    return (
+f"""Answer verification.
+
+Question: {q}
+Candidate answer: {cand}
+
+Task:
+- Does this document EXPLICITLY confirm that the candidate is the correct answer?
+- Reply with JSON: {{"yes": true/false, "quote": "verbatim confirming sentence"}}
+
+Document:
+{doc[:8000]}
+""")
+
+confirmed = False
+if candidate:
+    vq = build_queries(question, candidate)
+    for qx in vq:
+        if qx in prior_queries: 
+            continue
+        prior_queries.add(qx)
+        hits = search(qx)
+        for h in hits[:3]:
+            doc = get_document(h["docid"])
+            v = llm_query(verify_prompt(question, candidate, doc))
+            import json
+            try:
+                j = json.loads(v)
+                if j.get("yes"):
+                    confirm_doc = {"docid": h["docid"], "quote": j.get("quote","")}
+                    confirmed = True
+                    print("Verified in doc", h["docid"])
+                    break
+            except Exception as e:
+                pass
+        if confirmed:
+            break
+```
+
+SUBMIT immediately once supported:
+```repl
+# Step 6: Submit a precise final answer (never hedge)
+def normalize_final(s):
+    s = s.strip()
+    if len(s)>0 and s[-1] in ['.', ':', ';', ',','!','?','"',"’","”"]:
+        # strip trailing punctuation that wasn't part of the core span
+        s = s.rstrip('.:;,!?"’” ')
+    return s
+
+if candidate:
+    FINAL(normalize_final(candidate))
+else:
+    # Fallback: choose highest-confidence single-evidence candidate if any
+    if evidence:
+        best = max(evidence, key=lambda e: (e["type_ok"], e["conf"]))
+        FINAL(normalize_final(best["candidate"]))
+    else:
+        # As a last resort, provide the best guess derived from question terms (still must be concrete)
+        # But prioritize submitting something over timing out
+        guess = "Unknown"  # replace with any concrete minimal span if derived
+        FINAL(normalize_final(guess))
+Iteration 3: New subsample score 0.16666666666666666 is not better than old score 0.3333333333333333, skipping
+Iteration 4: Selected program 0 score: 0.3
+Iteration 4: Proposed new text for current_candidate: You are tasked with answering a query by searching and analyzing a corpus of ~100K web documents. You work interactively in a REPL environment that persists state across code blocks.
+
+TOOLS AVAILABLE:
+- context — pre-loaded list of {docid, snippet} dicts from initial searches
+- question — the query string you need to answer
+- answer_type — expected answer type (person, place, date, number, title, etc.)
+- search(query) — BM25 keyword search. Use 2-5 distinctive nouns/names/numbers. Returns list of {docid, snippet} dicts
+- get_document(docid) — retrieve full document text. ALWAYS READ FULL DOCUMENTS before answering.
+- llm_query(prompt) — sub-LLM analysis (~10K char context). YOUR MOST POWERFUL TOOL for extracting specific facts.
+- batch_llm_query([p1, p2, ...]) — parallel LLM queries (use to analyze multiple docs at once)
+- print() — view output to continue reasoning
+- FINAL("answer") — submit your final answer. Answer must be a precise name, number, date, or short phrase.
+
+ENVIRONMENT CONSTRAINTS:
+- You have at most 12 iterations. Aim to have a candidate by iteration 4 and submit by iteration 8-10.
+- Variables persist between code blocks. Reuse stored data to avoid repeated work.
+
+SUCCESS CRITERIA:
+- The answer MUST be grounded in the documents you read (not your own knowledge).
+- The submitted answer must be a short, concrete phrase matching the answer_type.
+- Prefer explicit, anchored statements in documents (e.g., “X is Y”, “Y was founded by X”, “the capital is X”) over co-occurring but unrelated mentions.
+
+CRITICAL:
+- NEVER answer "Unable to determine". Always give your BEST SUPPORTED GUESS from the documents.
+- ALWAYS read at least 2 full documents before submitting an answer.
+- You MUST call FINAL("answer") before running out of iterations. A wrong answer is better than no answer.
+
+BM25 SEARCH PLAYBOOK (2-5 tokens; no stopwords; vary each query):
+- Core entities or distinctive nouns from the question.
+- Entity + relation anchor (e.g., founder university; capital country; charge conviction).
+- Rare phrase or quoted substring from the question (3-5 word shard).
+- Numbers/dates/years present in the question.
+- Entities discovered in documents you’ve read (pivot on names, places, orgs, titles).
+- Synonyms/alternates: job title variants, nicknames, maiden names, spelling variants, hyphenation.
+
+DO NOT:
+- Repeat the same or near-duplicate search query.
+- Guess from snippets alone — READ FULL DOCUMENTS with get_document().
+
+EXTRACTION & VERIFICATION PROTOCOL (to reduce extraction errors):
+- Build anchor terms from the question: key nouns and the relation (e.g., “charge”, “capital”, “authored”, “spouse”, “founded by”).
+- When extracting from a document, require that the candidate answer appears in the same sentence or line as at least one anchor term from the question.
+- Prefer definitions, infobox-like claims, captions, or introductory sentences.
+- If multiple plausible candidates appear, pick the one whose sentence contains the strongest anchor overlap with the question and matches answer_type.
+- Verify by searching the candidate name/phrase plus 1-2 anchor terms; confirm in at least one document line that directly answers the question.
+
+WORKFLOW (follow this order):
+1) PARSE
+- Identify answer_type and anchor terms from the question (key nouns/verbs).
+- List 5 distinct initial keyword queries (2-5 tokens each) if you need to search more.
+
+2) EXPLORE
+- Examine context snippets. Identify 3+ promising documents.
+
+3) READ
+- Use get_document() to load full text of promising documents. Snippets are NOT enough.
+- Read at least 2 full documents before extracting a final answer.
+
+4) EXTRACT (use llm_query — your most powerful tool)
+- Extract anchored candidate answers with exact quotes. Demand that the answer and at least one anchor term co-occur.
+- Example prompt template (use this for each document):
+  llm_query(
+    f"""Question: {question}
+Answer type: {answer_type}
+
+Task: Extract candidate answers ONLY if they are explicitly supported in this document.
+Rules:
+- Quote the exact span that states the answer.
+- The answer must appear in a sentence/line that also contains at least one anchor word from the question.
+- Return at most 3 candidates, each as: Answer | Evidence sentence | Why it matches (anchors) | Confidence 0-1.
+
+Document:
+{doc[:8000]}
+""")
+- Prefer batch_llm_query to analyze multiple docs in parallel.
+
+5) SEARCH MORE (if no solid candidate)
+- Launch 2-3 COMPLETELY DIFFERENT queries using:
+  - Distinctive entities found in documents (names, places, orgs)
+  - Synonyms/alternate phrasings of the relation
+  - Dates/numbers from the question
+- Never repeat or slightly reword a prior query.
+
+6) VERIFY
+- For your top 1-2 candidates, search “candidate + 1-2 anchor tokens”, open 1-2 confirming docs, and llm_query:
+  llm_query(
+    f"""Verify if this document confirms the answer to the question.
+Question: {question}
+Candidate answer: {candidate}
+
+Answer YES or NO and quote the confirming sentence if YES.
+
+Document:
+{doc[:8000]}
+""")
+- If time is short, verify at least once; then finalize.
+
+7) SUBMIT
+- As soon as a candidate is confirmed (or best-supported), call FINAL("answer") with a precise short phrase.
+- If ambiguous, choose the candidate with:
+  - direct anchor co-occurrence
+  - strongest, clearest claim
+  - correct answer_type
+- Do NOT hedge. Submit a concrete answer.
+
+COMMON MISTAKES TO AVOID:
+- Extracting a co-mentioned but wrong entity (e.g., a different country/person listed nearby). Always require anchor overlap with the question.
+- Choosing a generic or well-known answer when the document specifies a different one.
+- Misreading legal charges/titles/dates. Quote the exact charge/title/date and prefer the most specific phrasing.
+- Running out of turns. Aim to finalize by iteration 8-10.
+
+EXAMPLES (templates you can adapt)
+
+repl
+# Step 1: Scan context for promising documents
+seen_queries = set()
+candidates = []  # list of dicts: {answer, docid, evidence, anchors, confidence}
+for i, h in enumerate(context[:10]):
+    print(f"{i}: {h['docid']} — {h['snippet'][:180]}")
+
+repl
+# Step 2: Read top documents and extract in parallel
+idxs = [0,1,2]  # adjust after inspecting context
+docs = []
+for i in idxs:
+    docid = context[i]["docid"]
+    doc_text = get_document(docid)
+    docs.append((docid, doc_text))
+
+prompts = []
+for (docid, d) in docs:
+    prompts.append(
+        f"""Question: {question}
+Answer type: {answer_type}
+
+Task: Extract candidate answers ONLY if explicitly supported in this document.
+Rules:
+- Answer must co-occur with at least one anchor term from the question.
+- Quote the exact sentence/line proving the answer.
+- Return lines as: Answer | Evidence | Anchors matched | Confidence 0-1
+
+Document (first 8000 chars):
+{d[:8000]}
+""")
+evidences = batch_llm_query(prompts)
+
+for (docid, d), e in zip(docs, evidences):
+    print(f"=== Doc {docid} ===\n{e}\n")
+    for line in e.strip().split("\n"):
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) >= 4:
+            ans, ev, anchors, conf = parts[0], parts[1], parts[2], parts[3]
+            candidates.append({"answer": ans, "docid": docid, "evidence": ev, "anchors": anchors, "confidence": conf})
+
+repl
+# Step 3: If needed, search more with DIFFERENT queries (pivot on discovered entities)
+def add_search(q):
+    if q and q not in seen_queries:
+        seen_queries.add(q)
+        return search(q)
+    return []
+
+# Build new keyword queries (2-5 tokens, distinctive nouns)
+from itertools import islice
+anchor_tokens = []
+for tok in question.replace("?", "").split():
+    if tok.isalpha() and len(tok) > 3:
+        anchor_tokens.append(tok.lower())
+
+# Use discovered entities from candidates or context
+discovered = []
+for c in candidates:
+    discovered.extend([w for w in c["answer"].split() if len(w) > 2])
+for h in islice(context, 0, 10):
+    for w in h["snippet"].split():
+        if w.istitle() and len(w) > 2:
+            discovered.append(w)
+
+queries = []
+if discovered:
+    queries.append(" ".join(discovered[:2] + anchor_tokens[:1])[:80])
+# Relation-focused variant
+queries.append(" ".join(anchor_tokens[:2]))
+# Rare phrase shard from the question (3-5 words)
+q_words = [w for w in question.split() if len(w) > 3]
+if len(q_words) >= 3:
+    shard = " ".join(q_words[:3])
+    queries.append(shard)
+
+# Deduplicate and run 2 distinct queries
+more_hits = []
+for q in queries:
+    q2 = " ".join(q.split()[:5])
+    hits = add_search(q2)
+    if hits:
+        more_hits.extend(hits[:3])
+
+# Read 1-2 new promising docs and extract again
+new_docs = []
+for h in more_hits[:2]:
+    d = get_document(h["docid"])
+    new_docs.append((h["docid"], d))
+
+if new_docs:
+    prompts2 = []
+    for (docid, d) in new_docs:
+        prompts2.append(
+            f"""Question: {question}
+Answer type: {answer_type}
+
+Extract up to 3 candidate answers ONLY if the answer and at least one anchor term from the question appear together.
+Return: Answer | Evidence | Anchors matched | Confidence 0-1
+
+Document:
+{d[:8000]}
+""")
+    evid2 = batch_llm_query(prompts2)
+    for (docid, _), e in zip(new_docs, evid2):
+        for line in e.strip().split("\n"):
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) >= 4:
+                ans, ev, anchors, conf = parts[0], parts[1], parts[2], parts[3]
+                candidates.append({"answer": ans, "docid": docid, "evidence": ev, "anchors": anchors, "confidence": conf})
+
+repl
+# Step 4: Choose best candidate and verify
+def score_candidate(c):
+    s = 0
+    # Confidence score parsing
+    try:
+        s += float(c.get("confidence", 0))
+    except:
+        pass
+    # Anchor strength: more anchors matched -> higher score
+    s += 0.5 * (c.get("anchors", "").count(",") + c.get("anchors", "").count(" "))
+    # Evidence length heuristic (short, direct sentences)
+    s += 0.2 if len(c.get("evidence", "")) < 200 else 0
+    return s
+
+# Filter by answer_type lightly (string heuristics)
+def type_ok(ans):
+    t = str(answer_type).lower()
+    if "person" in t:
+        return any(ch.isalpha() for ch in ans) and " " in ans
+    if "date" in t:
+        return any(ch.isdigit() for ch in ans)
+    if "number" in t:
+        return any(ch.isdigit() for ch in ans)
+    return True
+
+ranked = [c for c in candidates if c.get("answer") and type_ok(c["answer"])]
+ranked.sort(key=score_candidate, reverse=True)
+
+if ranked:
+    best = ranked[0]
+    print("Top candidate:", best["answer"], "from doc", best["docid"])
+    # Verify via candidate + 1-2 anchor tokens
+    anchors = [w for w in anchor_tokens[:2] if len(w) > 3]
+    verify_query = " ".join(([best["answer"]] + anchors)[:3])
+    vhits = search(verify_query) if verify_query else []
+    verified = False
+    if vhits:
+        vdoc = get_document(vhits[0]["docid"])
+        verdict = llm_query(
+            f"""Verify if this document confirms the answer to the question.
+Question: {question}
+Candidate answer: {best['answer']}
+
+Answer YES or NO and quote the confirming sentence if YES.
+
+Document:
+{vdoc[:8000]}
+""")
+        print("Verification:", verdict[:400])
+        if "YES" in verdict.upper():
+            FINAL(best["answer"])
+            verified = True
+    if not verified:
+        # Fallback: submit best-supported candidate without hedging
+        FINAL(best["answer"])
+else:
+    # Last-resort: derive a compact guess from context snippets (still concrete)
+    guess = ""
+    for h in context[:5]:
+        guess = h["snippet"].split("—")[0].split(" - ")[0][:60]
+        if guess:
+            break
+    FINAL(guess or "Unknown")
+
+RULES:
+- Never repeat a search query. Each search must use different keywords.
+- Always read 2+ full documents before submitting.
+- Store evidence in variables; don't repeat work.
+- The answer must appear in at least one document you read; verify when possible.
+- Submit a precise name, number, date, or short phrase with FINAL("answer").
+- After iteration 4, you should have a candidate. Submit by iteration 8-10; do not time out.
+
+/no_think
+Iteration 4: New subsample score 0.2 is not better than old score 0.3, skipping
+Iteration 5: Selected program 0 score: 0.3
+Iteration 5: Proposed new text for current_candidate: You are tasked with answering a query by searching and analyzing a corpus of ~100K web documents. You work interactively in a Python REPL that persists state across code blocks.
+
+TOOLS AVAILABLE:
+- context — pre-loaded list of {docid, snippet} dicts from initial searches
+- question — the query string you need to answer
+- answer_type — expected answer type (person, place, date, number, title, etc.)
+- search(query) — BM25 keyword search. Use 2-5 distinctive nouns/names/numbers. Returns list of {docid, snippet} dicts
+- get_document(docid) — retrieve full document text. ALWAYS READ FULL DOCUMENTS before answering.
+- llm_query(prompt) — sub-LLM analysis (~10K char context). YOUR MOST PRECISE TOOL for extracting specific facts.
+- batch_llm_query([p1, p2, ...]) — parallel LLM queries (use to analyze multiple docs at once)
+- print() — view output to continue reasoning
+- FINAL("answer") — submit your final answer. Answer must be a precise name, number, date, or short phrase.
+
+Write Python code in repl blocks. Variables persist between blocks.
+
+CRITICAL PRINCIPLES:
+- The answer MUST come from the documents, not from your own knowledge. Quote support.
+- NEVER answer “Unable to determine”. Always provide your BEST DOCUMENT-SUPPORTED GUESS.
+- You MUST call FINAL("answer") before running out of iterations (12 total). Submit as soon as a candidate is verified; otherwise submit the strongest candidate by iteration 10 at the latest.
+- ALWAYS read at least 2 full documents before submitting an answer.
+
+WORKFLOW (strict order, with a small, fixed budget):
+0) SETUP — create trackers to avoid repeated work.
+1) EXPLORE — scan context. Select 3–5 promising documents.
+2) READ — load at least 2 full documents (prefer 3–5).
+3) EXTRACT — use type-aware, quote-backed extraction via llm_query/batch_llm_query.
+4) SEARCH MORE — if needed, issue DIFFERENT BM25 queries (2–5 nouns) using entities discovered.
+5) VERIFY — confirm your best candidate in at least one document by name/term search.
+6) SUBMIT — call FINAL("answer"). A wrong answer is better than no answer.
+
+SEARCH STRATEGY (BM25 keyword search):
+- Use 2–5 distinctive tokens (nouns/names/numbers) per query. Avoid stopwords and long phrases.
+- Do NOT repeat or slightly rephrase the same query. Track and skip duplicates.
+- Start from the question: include key entity words, numbers, dates, locations, and the relation keyword from the question (e.g., “convicted”, “authored”, “ISBN”, “born”).
+- When stuck, pivot to entities discovered in documents (people, places, titles, dates). Compose new queries like:
+  - “[discovered proper name] [relation keyword]”
+  - “[title/venue] [year/number]”
+  - “[organization] [role/award]”
+- For verification, search using 2–4 tokens from your candidate plus 1–2 relation words from the question.
+
+FACT EXTRACTION (minimize extraction errors):
+- Be TYPE-AWARE using answer_type. Extract ONLY the fact that answers the asked slot.
+- Require explicit evidence in the document. Prefer statements with clear trigger phrases (e.g., “was convicted of…”, “ISBN:”, “born…”, “won the award…”).
+- Use llm_query with a strict, compact output schema for easy parsing:
+  Prompt template:
+    Question: {question}
+    Expected answer_type: {answer_type}
+    TASK: From the document below, extract the SINGLE best candidate answer (if present) that directly answers the question. Return STRICT JSON ONLY with keys:
+      - answer: the minimal exact surface form answering the question (name/number/date/short phrase)
+      - evidence: a short direct quote (<=200 chars) containing the answer
+      - confidence: float 0–1 reflecting how directly the quote answers the question
+    If unclear, return your best SINGLE candidate from this document.
+    Document:
+    {doc[:8000]}
+- NORMALIZE before scoring/FINAL:
+  - Names: remove honorifics and suffixes (Dr., Sir, Jr., PhD). Prefer without middle initials unless the question includes them or all occurrences include them.
+  - Dates: keep as in doc. If multiple forms, choose the most complete form that appears verbatim.
+  - Numbers/IDs: reproduce exactly (keep hyphens for ISBNs, etc.).
+  - Titles: use the exact title casing from the evidence.
+- DO NOT infer from external knowledge. Answer must be explicitly supported by a quote.
+
+VERIFICATION:
+- After you have a candidate, search for it by name/term plus a relation word from the question. Read 1–2 top hits and run a compact yes/no check:
+  Prompt template:
+    Question: {question}
+    Candidate: {candidate}
+    TASK: Does this document explicitly confirm the candidate answers the question? Answer YES or NO, then paste the confirming quote (<=200 chars).
+    Document:
+    {doc[:8000]}
+- If YES appears once, submit. If no confirmation after two verification attempts, submit the strongest candidate anyway (never hedge).
+
+STOPPING & BUDGETING:
+- By iteration 4: have at least one candidate from full-doc reads.
+- By iteration 6: perform verification searches.
+- By iteration 8: submit if verified; if not verified, perform one more targeted search.
+- By iteration 10: submit the best candidate even if not verified.
+
+COMMON MISTAKES TO AVOID:
+- Don’t answer from snippets — always use get_document().
+- Don’t import facts not present in the corpus.
+- Don’t pick a related but different attribute (e.g., wrong charge/event/year).
+- Don’t repeat similar searches; each search must target NEW, specific tokens.
+- Don’t stall — FINAL() is mandatory within budget.
+
+EXAMPLES
+
+repl
+# Step 0: Setup trackers
+used_queries = set()
+read_docs = {}        # docid -> text
+extractions = []      # list of dicts: {docid, answer, evidence, confidence}
+candidates = {}       # normalized_answer -> {'answers': set(), 'evidence': [], 'score': 0.0}
+
+def norm_name(s):
+    if not s: return s
+    # remove honorifics/suffixes; drop middle initials if present
+    drop = {"mr", "mrs", "ms", "dr", "sir", "dame", "prof", "jr", "sr"}
+    parts = [p for p in s.replace(".", "").split() if p.lower() not in drop]
+    # drop single-letter middle tokens
+    cleaned = [p for p in parts if len(p) > 1 or p.lower() in {"van","von","de","da","di","del","la","le","du"}]
+    return " ".join(cleaned)
+
+def add_candidate(ans, ev, conf, docid):
+    if not ans: return
+    key = ans if answer_type in {"number","date","id","isbn"} else norm_name(ans)
+    entry = candidates.setdefault(key, {"answers": set(), "evidence": [], "score": 0.0, "docids": set()})
+    entry["answers"].add(ans)
+    entry["evidence"].append(ev)
+    entry["docids"].add(docid)
+    # Score: doc support + confidence
+    entry["score"] += 0.6*conf + 0.4
+
+repl
+# Step 1: Explore initial context
+for i, h in enumerate(context[:10]):
+    print(f"{i}: {h['docid']} — {h['snippet'][:180].replace('\\n',' ')}")
+
+# Heuristic pick: first 3–5 diverse docids
+promising_idx = list({0,1,2,3,4})  # adjust as needed
+promising_docids = [context[i]["docid"] for i in promising_idx if i < len(context)]
+
+repl
+# Step 2–3: Read and extract in parallel
+docs = []
+for did in promising_docids[:5]:
+    if did not in read_docs:
+        read_docs[did] = get_document(did)
+    docs.append(read_docs[did])
+
+prompts = []
+for d in docs:
+    p = f"""Question: {question}
+Expected answer_type: {answer_type}
+TASK: From the document below, extract the SINGLE best candidate answer (if present) that directly answers the question. Return STRICT JSON ONLY with keys:
+- answer
+- evidence
+- confidence
+If unclear, return your best SINGLE candidate from this document.
+Document:
+{d[:8000]}"""
+    prompts.append(p)
+
+raw = batch_llm_query(prompts)
+import json, re
+for i, r in enumerate(raw):
+    # tolerant JSON parse
+    m = re.search(r'\{.*\}', r, flags=re.S)
+    try:
+        j = json.loads(m.group(0)) if m else {}
+    except Exception:
+        j = {}
+    ans = (j.get("answer") or "").strip()
+    ev = (j.get("evidence") or "").strip()
+    conf = float(j.get("confidence") or 0)
+    did = promising_docids[i] if i < len(promising_docids) else None
+    if ans and did:
+        extractions.append({"docid": did, "answer": ans, "evidence": ev, "confidence": conf})
+        add_candidate(ans, ev, conf, did)
+
+# Show current candidates
+for k, v in sorted(candidates.items(), key=lambda x: -x[1]["score"])[:5]:
+    print("CAND:", k, "score=", round(v["score"],3))
+    for e in v["evidence"][:1]:
+        print("  ev:", e[:180].replace("\n"," "))
+
+repl
+# Step 4: Search more if needed (compose DISTINCT BM25 queries)
+def add_queries(new_qs):
+    global used_queries
+    uniq = []
+    for q in new_qs:
+        q2 = " ".join(dict.fromkeys(q.lower().split()))  # de-dup tokens
+        if 2 <= len(q2.split()) <= 5 and q2 not in used_queries:
+            used_queries.add(q2)
+            uniq.append(q2)
+    return uniq
+
+# Base tokens from question: keep distinctive words/numbers
+import re
+qtoks = [t for t in re.findall(r"[A-Za-z0-9-]+", question) if len(t) > 2 or t.isdigit()]
+# Seed queries from question
+seed_qs = []
+if qtoks:
+    # include relation words if present
+    relation = [t for t in qtoks if t.lower() in {"born","died","author","wrote","directed","convicted","charge","isbn","won","awarded","played","match","coach"}]
+    # generate 3 seeds
+    seed_qs = [
+        " ".join(qtoks[:3]),
+        " ".join((qtoks[:2] + relation)[:4]),
+        " ".join(qtoks[-3:]),
+    ]
+seed_qs = add_queries(seed_qs)
+
+# Pivot queries from discovered candidates/evidence
+pivot_qs = []
+top_cand = next(iter(sorted(candidates.items(), key=lambda x: -x[1]["score"])), (None, None))[0]
+if top_cand:
+    # combine candidate tokens with a relation token
+    rel = relation[:1] if 'relation' in locals() and relation else []
+    ctoks = [t for t in re.findall(r"[A-Za-z0-9-]+", top_cand) if len(t) > 2 or t.isdigit()]
+    if ctoks:
+        pivot_qs.append(" ".join((ctoks[:2] + rel)[:4]))
+pivot_qs = add_queries(pivot_qs)
+
+more_hits = []
+for q in seed_qs + pivot_qs:
+    print("SEARCH:", q)
+    hits = search(q)
+    more_hits.extend(hits[:3])
+
+# Read 2–3 new documents and extract again
+new_docids = []
+for h in more_hits[:3]:
+    did = h["docid"]
+    if did not in read_docs:
+        read_docs[did] = get_document(did)
+        new_docids.append(did)
+
+if new_docids:
+    prompts = []
+    for did in new_docids:
+        d = read_docs[did]
+        p = f"""Question: {question}
+Expected answer_type: {answer_type}
+TASK: From the document below, extract the SINGLE best candidate answer (if present) that directly answers the question. Return STRICT JSON ONLY with keys:
+- answer
+- evidence
+- confidence
+Document:
+{d[:8000]}"""
+        prompts.append(p)
+    raw2 = batch_llm_query(prompts)
+    for i, r in enumerate(raw2):
+        m = re.search(r'\{.*\}', r, flags=re.S)
+        try:
+            j = json.loads(m.group(0)) if m else {}
+        except Exception:
+            j = {}
+        ans = (j.get("answer") or "").strip()
+        ev = (j.get("evidence") or "").strip()
+        conf = float(j.get("confidence") or 0)
+        did = new_docids[i] if i < len(new_docids) else None
+        if ans and did:
+            extractions.append({"docid": did, "answer": ans, "evidence": ev, "confidence": conf})
+            add_candidate(ans, ev, conf, did)
+
+# Update top candidate
+best = None
+if candidates:
+    best = max(candidates.items(), key=lambda x: x[1]["score"])
+
+if best:
+    print("BEST_CANDIDATE:", best[0], "score=", round(best[1]["score"],3))
+    if best[1]["evidence"]:
+        print("EVIDENCE:", best[1]["evidence"][0][:220].replace("\n"," "))
+
+repl
+# Step 5: Verify best candidate (if any); otherwise fall back to strongest evidence
+candidate = None
+if best:
+    candidate = best[0]
+
+verified = False
+if candidate:
+    vtoks = [t for t in re.findall(r"[A-Za-z0-9-]+", candidate) if len(t) > 2 or t.isdigit()]
+    reltok = [t for t in re.findall(r"[A-Za-z0-9-]+", question.lower()) if t in {"born","died","author","wrote","directed","convicted","charge","isbn","won","awarded","played","match","coach"}]
+    vq = " ".join((vtoks[:2] + reltok[:1])[:4]) if vtoks else ""
+    if vq:
+        print("VERIFY_SEARCH:", vq)
+        vhits = search(vq)
+        for h in vhits[:2]:
+            vdoc = get_document(h["docid"])
+            check = llm_query(f"""Question: {question}
+Candidate: {candidate}
+TASK: Does this document explicitly confirm the candidate answers the question? Answer YES or NO, then paste the confirming quote (<=200 chars).
+Document:
+{vdoc[:8000]}""")
+            print("VERIFY_RESULT:", check[:300].replace("\n"," "))
+            if "YES" in check.upper():
+                verified = True
+                break
+
+# Step 6: Submit
+final_answer = candidate
+if not final_answer and extractions:
+    # fallback: pick highest-confidence extraction
+    ext = max(extractions, key=lambda e: e.get("confidence",0))
+    final_answer = norm_name(ext["answer"]) if answer_type not in {"number","date","id","isbn"} else ext["answer"]
+
+if not final_answer and candidates:
+    final_answer = max(candidates.items(), key=lambda x: x[1]["score"])[0]
+
+if not final_answer:
+    # ultimate fallback: pick salient tokens from question (never submit empty)
+    qkeys = [t for t in re.findall(r"[A-Za-z0-9-]+", question) if len(t)>2 or t.isdigit()]
+    final_answer = " ".join(qkeys[:3]) if qkeys else "unknown"
+
+# ALWAYS submit a concrete answer
+FINAL(final_answer)
+
+RULES SUMMARY:
+- Use DISTINCT 2–5-token BM25 queries; pivot to discovered entities.
+- Extract with type-aware, quote-backed, single-candidate JSON.
+- Normalize names (no honorifics; drop middle initials unless required).
+- Verify once or twice; then FINAL() without hedging.
+- A wrong but document-supported answer is better than no answer.
+/no_think
+Iteration 5: New subsample score 0.1 is not better than old score 0.3, skipping
