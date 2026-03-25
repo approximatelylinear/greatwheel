@@ -152,13 +152,16 @@ def classify_retrieval_failure(asi: dict, oracle: dict) -> str:
         return "unretrievable"
 
 
-def build_evaluator_fn(evaluator: BrowseCompEvaluator, examples: list[dict], oracle_data: dict[str, dict] | None = None):
+def build_evaluator_fn(evaluator: BrowseCompEvaluator, examples: list[dict], oracle_data: dict[str, dict] | None = None, n_runs: int = 1):
     """Build a GEPA-compatible evaluator function.
 
     For optimize_anything, the evaluator receives (candidate_str) and
     returns (score, side_info_dict). We evaluate across all examples
     and return the aggregate score + per-query ASI enriched with
     retrieval diagnostic context.
+
+    When n_runs > 1, each query is evaluated multiple times and the
+    score is averaged. This reduces variance at the cost of n_runs × time.
     """
     def evaluate(candidate: str) -> tuple[float, dict]:
         candidate_dict = {"system_prompt": candidate}
@@ -166,7 +169,21 @@ def build_evaluator_fn(evaluator: BrowseCompEvaluator, examples: list[dict], ora
         per_query = []
 
         for example in examples:
-            score, asi = evaluator.evaluate(candidate_dict, example)
+            if n_runs <= 1:
+                score, asi = evaluator.evaluate(candidate_dict, example)
+            else:
+                # Multi-run averaging: run n_runs times, take mean score,
+                # keep ASI from the last run (most representative for diagnostics)
+                run_scores = []
+                asi = {}
+                for run_idx in range(n_runs):
+                    s, a = evaluator.evaluate(candidate_dict, example)
+                    run_scores.append(s)
+                    asi = a  # keep last ASI for diagnostics
+                score = sum(run_scores) / len(run_scores)
+                asi["run_scores"] = run_scores
+                asi["correct"] = score > 0.5  # majority correct
+
             total_score += score
 
             # Enrich with retrieval diagnostic
@@ -260,6 +277,8 @@ def main():
                         help="Agent LLM model (via Ollama)")
     parser.add_argument("--max-turns", type=int, default=12)
     parser.add_argument("--k", type=int, default=10)
+    parser.add_argument("--runs", type=int, default=1,
+                        help="Evaluate each query N times and average (reduces variance, N× cost)")
     parser.add_argument("--run-dir", default=None,
                         help="Directory to save GEPA state (default: auto)")
     args = parser.parse_args()
@@ -289,7 +308,9 @@ def main():
     print(f"  {n_oracle}/{len(examples)} queries have gold doc in BM25 top-10 with oracle queries")
 
     # Build GEPA-compatible evaluator with retrieval diagnostic
-    evaluate_fn = build_evaluator_fn(bench_evaluator, examples, oracle_data)
+    if args.runs > 1:
+        print(f"Multi-run averaging: {args.runs}x per query ({args.runs * len(examples)} total evals per iteration)")
+    evaluate_fn = build_evaluator_fn(bench_evaluator, examples, oracle_data, n_runs=args.runs)
 
     # Run optimization
     from gepa.optimize_anything import (
@@ -343,6 +364,7 @@ def main():
     print(f"  Reflection LM: {args.reflection_lm}")
     print(f"  Max metric calls: {args.max_metric_calls}")
     print(f"  Queries: {len(examples)}")
+    print(f"  Runs per query: {args.runs}")
     print(f"  Run dir: {run_dir}")
     print()
 
