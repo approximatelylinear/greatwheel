@@ -68,7 +68,7 @@ pub fn parse_temporal(query: &str, now: DateTime<Utc>) -> Option<TemporalRange> 
     }
 
     // "in <Month> <Year>" or "<Month> <Year>"
-    if let Some(range) = parse_month_year(&lower) {
+    if let Some(range) = parse_month_year(query, &lower) {
         return Some(range);
     }
 
@@ -141,7 +141,11 @@ fn parse_last_n_days(lower: &str) -> Option<i64> {
     None
 }
 
-fn parse_month_year(lower: &str) -> Option<TemporalRange> {
+/// Short month names that are also common English words.
+/// These require capitalization in the original query to be treated as months.
+const AMBIGUOUS_MONTHS: &[&str] = &["may", "mar", "aug"];
+
+fn parse_month_year(original: &str, lower: &str) -> Option<TemporalRange> {
     let months = [
         ("january", 1), ("february", 2), ("march", 3), ("april", 4),
         ("may", 5), ("june", 6), ("july", 7), ("august", 8),
@@ -153,6 +157,16 @@ fn parse_month_year(lower: &str) -> Option<TemporalRange> {
 
     for (name, month) in months {
         if let Some(idx) = lower.find(name) {
+            // For ambiguous names ("may", "mar", "aug"), require the match
+            // to be capitalized in the original query — "May 2026" is a month,
+            // "may happen in 2026" is a verb.
+            if AMBIGUOUS_MONTHS.contains(&name) {
+                let orig_char = original.as_bytes().get(idx).copied().unwrap_or(0);
+                if !orig_char.is_ascii_uppercase() {
+                    continue;
+                }
+            }
+
             let after = &lower[idx + name.len()..];
             let after = after.trim_start().trim_start_matches(',').trim_start();
             if let Some(year_str) = after.split_whitespace().next() {
@@ -222,6 +236,21 @@ mod tests {
         let range = parse_temporal("What happened last month?", now).unwrap();
         assert_eq!(range.start, Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap());
         assert_eq!(range.end, Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn parse_may_capitalized() {
+        let now = utc(2026, 3, 26);
+        let range = parse_temporal("What happened in May 2026?", now).unwrap();
+        assert_eq!(range.start, Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap());
+        assert_eq!(range.end, Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn parse_may_lowercase_is_verb() {
+        let now = utc(2026, 3, 26);
+        // "may" as a verb should NOT match as a month
+        assert!(parse_temporal("What may happen in 2026?", now).is_none());
     }
 
     #[test]
