@@ -178,4 +178,66 @@ impl PgMemoryStore {
 
         Ok(())
     }
+
+    /// Update confidence for an opinion memory.
+    ///
+    /// Returns the new confidence value, or None if the key doesn't exist
+    /// or isn't an opinion.
+    pub async fn update_confidence(
+        &self,
+        org_id: &Uuid,
+        key: &str,
+        delta: f32,
+    ) -> Result<Option<f32>, MemoryError> {
+        let row: Option<(f32,)> = sqlx::query_as(
+            r#"
+            UPDATE memories
+            SET confidence = GREATEST(0.0, LEAST(1.0, COALESCE(confidence, 0.5) + $3)),
+                updated_at = now()
+            WHERE org_id = $1 AND key = $2 AND kind = 'opinion'
+            RETURNING confidence
+            "#,
+        )
+        .bind(org_id)
+        .bind(key)
+        .bind(delta)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|(c,)| c))
+    }
+
+    /// Find opinion memories that share entities with the given list.
+    ///
+    /// Used by the opinions plugin to detect when a new fact relates to
+    /// an existing opinion.
+    pub async fn find_opinions_by_entities(
+        &self,
+        org_id: &Uuid,
+        entities: &[String],
+        limit: usize,
+    ) -> Result<Vec<(String, f32, Vec<String>)>, MemoryError> {
+        if entities.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let rows: Vec<(String, f32, Vec<String>)> = sqlx::query_as(
+            r#"
+            SELECT key, COALESCE(confidence, 0.5), COALESCE(entities, '{}')
+            FROM memories
+            WHERE org_id = $1
+              AND kind = 'opinion'
+              AND entities && $2
+            ORDER BY updated_at DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(org_id)
+        .bind(entities)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
 }

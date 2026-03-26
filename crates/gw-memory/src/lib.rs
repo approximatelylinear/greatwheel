@@ -57,6 +57,10 @@ pub struct RecallOpts {
     /// Optional: filter by memory kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind_filter: Option<MemoryKind>,
+    /// Optional: exclude opinion memories with confidence below this threshold.
+    /// Default: None (no filtering). Typical value: 0.3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_threshold: Option<f32>,
 }
 
 /// How to search memory.

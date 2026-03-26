@@ -398,6 +398,14 @@ impl HybridStore {
             }
         };
 
+        // Apply confidence threshold: exclude opinion memories below the threshold.
+        // This implements Hindsight §2.5 — low-confidence opinions are suppressed.
+        let results = if let Some(threshold) = opts.confidence_threshold {
+            self.apply_confidence_filter(results, &org_id, threshold).await
+        } else {
+            results
+        };
+
         // Dispatch AfterMemoryRecall — plugins can augment/re-score/filter results.
         // Currently a notification; plugins that need to modify results will use
         // the Custom EventData variant with the result set once Phase 3 plugins land.
@@ -414,6 +422,52 @@ impl HybridStore {
         }
 
         Ok(results)
+    }
+
+    /// Filter out opinion memories with confidence below the threshold.
+    ///
+    /// Queries Postgres for the confidence of each result key that is an opinion.
+    /// Non-opinion memories pass through unfiltered.
+    async fn apply_confidence_filter(
+        &self,
+        results: Vec<MemoryRecord>,
+        org_id: &uuid::Uuid,
+        threshold: f32,
+    ) -> Vec<MemoryRecord> {
+        let keys: Vec<String> = results.iter().map(|r| r.key.clone()).collect();
+        if keys.is_empty() {
+            return results;
+        }
+
+        // Fetch kind + confidence for all result keys in one query
+        let rows: Vec<(String, String, Option<f32>)> = match sqlx::query_as(
+            "SELECT key, kind::text, confidence FROM memories WHERE org_id = $1 AND key = ANY($2)",
+        )
+        .bind(org_id)
+        .bind(&keys)
+        .fetch_all(self.pg.pool())
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "confidence filter query failed, returning unfiltered");
+                return results;
+            }
+        };
+
+        let filter_map: HashMap<String, bool> = rows
+            .into_iter()
+            .map(|(key, kind, conf)| {
+                let dominated = kind == "opinion"
+                    && conf.unwrap_or(0.5) < threshold;
+                (key, dominated)
+            })
+            .collect();
+
+        results
+            .into_iter()
+            .filter(|r| !filter_map.get(&r.key).copied().unwrap_or(false))
+            .collect()
     }
 
     /// Forget a memory: delete from all three stores.
