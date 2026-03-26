@@ -1,6 +1,6 @@
 # Design: Structured Agent Memory — Hindsight Integration
 
-**Status:** In Progress — BrowseComp Phase A implemented, gw-memory phases not started
+**Status:** In Progress — BrowseComp Phase A + gw-memory Phases 1-3 implemented
 **Date:** 2026-03-26
 **Paper:** [Hindsight is 20/20: Building Agent Memory that Retains, Recalls, and Reflects](https://arxiv.org/abs/2512.12818) — Vectorize.io & Virginia Tech
 
@@ -27,18 +27,33 @@ Awaiting benchmark evaluation against the 40% (12/30) baseline.
 - Backward compatible: if agent ignores `facts`, pipeline works identically to before
 - Dual implementation: standalone Python class (`fact_registry.py`) for `ollama_client.py`, embedded Python string constant for `gw-bench` ouros path
 
-### gw-memory Phases 1-5: Not started
+### gw-memory Phases 1-3: Implemented (2026-03-26)
 
-Restructured to use the plugin system (Section 2.8). Core schema changes
-(Phase 1-2) go into `gw-core`/`gw-memory`/`migrations/`. Hindsight intelligence
-is implemented as three composable plugins under `gw-engine/src/plugins/`:
+**Phase 1 — Core schema + types:**
+- Migration 008: `memory_kind` enum, `confidence`/`occurred_at`/`occurred_end`/`entities`
+  columns, `memory_edges` table
+- `gw-core`: `MemoryKind` (with `sqlx::Type` derive), `MemoryEdgeKind`
+- `gw-memory`: `MemoryRecord` extended, `MemoryMeta` struct, `kind_filter` on `RecallOpts`
 
-- `hindsight-retain` (Phase 3) — fact extraction, entity resolution, edge computation
+**Phase 2 — Event dispatch:**
+- `HybridStore` accepts optional `DispatchFn`, dispatches `BeforeMemoryStore`/`AfterMemoryRecall`
+- `EventData::Memory` extended with `meta: Option<Value>` for plugin-enriched metadata
+
+**Phase 3 — `hindsight-retain` plugin:**
+
+| File | What |
+|---|---|
+| `gw-engine/src/builtins/hindsight_retain.rs` | Plugin impl: `BeforeMemoryStore` handler (entity extraction via compiled regex NER, memory kind classification via content heuristics, default confidence for opinions). Registers `memory.extract_entities` host function. 8 unit tests |
+| `gw-engine/src/builtins/mod.rs` | Builtins module |
+| `gw-server/src/main.rs` | Plugin wired into `GreatWheelEngine` |
+
+Deferred to async dispatch resolution (§6.2 Q7): LLM-powered fact extraction,
+LLM entity resolution, causal edges, graph edge computation.
+
+### gw-memory Phases 4-5: Not started
+
 - `hindsight-recall` (Phase 4) — graph traversal, temporal parsing, optional reranking
 - `hindsight-opinions` (Phase 5) — confidence evolution
-
-Each plugin hooks into `BeforeMemoryStore` / `AfterMemoryRecall` lifecycle events
-and is independently toggleable via `[plugins.*]` TOML config.
 
 See Section 3 for the full implementation plan.
 
