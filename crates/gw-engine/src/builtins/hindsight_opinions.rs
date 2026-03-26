@@ -123,33 +123,41 @@ impl Plugin for HindsightOpinionsPlugin {
         );
 
         // --- Host functions ---
-        // Each calls PgMemoryStore::update_confidence() via block_in_place.
-        // The org_id is required as the first arg, key as the second.
+        // Each calls update_confidence() via block_in_place.
+        // Signed deltas are computed by confidence_delta() — OpinionsDelta
+        // stores magnitudes, the function applies the sign.
+        // Args: [org_id (UUID string), key (string)]
 
-        let reinforce_delta = config.reinforce_alpha;
+        let deltas = OpinionsDelta {
+            reinforce_alpha: config.reinforce_alpha,
+            weaken_alpha: config.weaken_alpha,
+            contradict_alpha: config.contradict_alpha,
+        };
+
+        let delta_r = confidence_delta("reinforce", &deltas);
         let pool_r = pool.clone();
         ctx.register_host_fn(
             "memory.opinion_reinforce",
             Arc::new(move |args: Vec<Value>, _kwargs: HashMap<String, Value>| {
-                update_opinion(&pool_r, &args, reinforce_delta, "reinforce")
+                update_opinion(&pool_r, &args, delta_r, "reinforce")
             }),
         );
 
-        let weaken_delta = -config.weaken_alpha;
+        let delta_w = confidence_delta("weaken", &deltas);
         let pool_w = pool.clone();
         ctx.register_host_fn(
             "memory.opinion_weaken",
             Arc::new(move |args: Vec<Value>, _kwargs: HashMap<String, Value>| {
-                update_opinion(&pool_w, &args, weaken_delta, "weaken")
+                update_opinion(&pool_w, &args, delta_w, "weaken")
             }),
         );
 
-        let contradict_delta = -config.contradict_alpha;
+        let delta_c = confidence_delta("contradict", &deltas);
         let pool_c = pool;
         ctx.register_host_fn(
             "memory.opinion_contradict",
             Arc::new(move |args: Vec<Value>, _kwargs: HashMap<String, Value>| {
-                update_opinion(&pool_c, &args, contradict_delta, "contradict")
+                update_opinion(&pool_c, &args, delta_c, "contradict")
             }),
         );
 
@@ -228,7 +236,12 @@ fn update_opinion(
     }
 }
 
-/// Compute confidence reinforcement delta (pure function).
+/// Compute a signed confidence delta from an action name and magnitude config.
+///
+/// Returns positive for reinforcement, negative for weaken/contradict.
+/// This is the single place where the sign convention is applied —
+/// `OpinionsDelta` stores magnitudes (always positive), and this function
+/// adds the sign based on the action.
 pub fn confidence_delta(action: &str, config: &OpinionsDelta) -> f32 {
     match action {
         "reinforce" => config.reinforce_alpha,
@@ -238,7 +251,9 @@ pub fn confidence_delta(action: &str, config: &OpinionsDelta) -> f32 {
     }
 }
 
-/// Confidence adjustment parameters, extractable from plugin config.
+/// Confidence adjustment magnitudes (always positive).
+///
+/// Use [`confidence_delta()`] to get signed values for a specific action.
 pub struct OpinionsDelta {
     pub reinforce_alpha: f32,
     pub weaken_alpha: f32,
