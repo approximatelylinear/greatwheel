@@ -2605,35 +2605,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "gw-bus"
-version = "0.1.0"
-dependencies = [
- "gw-core",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "gw-channels"
-version = "0.1.0"
-dependencies = [
- "axum 0.8.8",
- "gw-core",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "gw-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
  "uuid",
+]
+
+[[package]]
+name = "gw-engine"
+version = "0.1.0"
+dependencies = [
+ "gw-core",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -2717,9 +2707,8 @@ dependencies = [
  "axum 0.8.8",
  "clap",
  "futures",
- "gw-bus",
- "gw-channels",
  "gw-core",
+ "gw-engine",
  "gw-llm",
  "gw-loop",
  "gw-memory",

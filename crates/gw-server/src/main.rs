@@ -11,10 +11,12 @@ use axum::{
     Router,
 };
 use clap::Parser;
+use gw_engine::GreatWheelEngine;
 use gw_llm::{Message, OllamaClient};
 use gw_loop::{LoopConfig, OllamaLlmClient, SessionManager};
 use reqwest::StatusCode;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::{convert::Infallible, sync::Arc, time::Duration};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -33,6 +35,9 @@ struct Config {
     memory: MemoryConfig,
     #[serde(default)]
     tracing: gw_trace::TracingConfig,
+    /// Per-plugin config sections: [plugins.name] → value.
+    #[serde(default)]
+    plugins: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -237,6 +242,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Initialize plugin engine.
+    let engine = GreatWheelEngine::new();
+    // TODO: add_plugin() calls go here as plugins are implemented
+    let engine = engine.init(&config.plugins).map_err(|e| {
+        format!("Plugin engine init failed: {e}")
+    })?;
+    engine.before_startup();
+
     // Create session manager with LLM factory.
     let llm_for_factory = llm.clone();
     let llm_factory: Arc<dyn Fn() -> Box<dyn gw_loop::LlmClient> + Send + Sync> =
@@ -290,8 +303,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Greatwheel running at http://{addr}");
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+
+    engine.after_startup();
     axum::serve(listener, app).await?;
 
+    // Shutdown plugins and tracing.
+    let shutdown_errors = engine.shutdown();
+    for (name, err) in &shutdown_errors {
+        tracing::warn!(plugin = name, error = %err, "plugin shutdown error");
+    }
     gw_trace::shutdown_tracing();
 
     Ok(())

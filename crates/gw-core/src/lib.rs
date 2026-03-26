@@ -3,10 +3,20 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
 
+pub mod agent_bus;
+pub mod channel;
 pub mod loop_event;
+pub mod plugin;
 pub mod session_tree;
 
+pub use agent_bus::AgentBus;
+pub use channel::{ChannelAdapter, TaskChannelAdapter};
 pub use loop_event::LoopEvent;
+pub use plugin::{
+    EventData, EventHandler, EventPayload, EventResult, HostFnHandler, LifecycleEvent,
+    LlmMessageData, Plugin, PluginContext, PluginError, PluginManifest, PluginRegistrations,
+    SharedState,
+};
 pub use session_tree::{EntryId, EntryType, ReplSnapshotData, SessionEntry, SessionState};
 
 /// Newtype wrappers for domain IDs.

@@ -9,11 +9,10 @@ path = "src/main.rs"
 
 [dependencies]
 gw-core = { workspace = true }
+gw-engine = { workspace = true }
 gw-runtime = { workspace = true }
 gw-llm = { workspace = true }
 gw-memory = { workspace = true }
-gw-bus = { workspace = true }
-gw-channels = { workspace = true }
 gw-loop = { workspace = true }
 uuid = { workspace = true }
 gw-scheduler = { workspace = true }

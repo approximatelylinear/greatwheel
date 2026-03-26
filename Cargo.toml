@@ -5,8 +5,7 @@ members = [
     "crates/gw-runtime",
     "crates/gw-llm",
     "crates/gw-memory",
-    "crates/gw-bus",
-    "crates/gw-channels",
+    "crates/gw-engine",
     "crates/gw-scheduler",
     "crates/gw-trace",
     "crates/gw-server",
@@ -21,8 +20,7 @@ gw-core = { path = "crates/gw-core" }
 gw-runtime = { path = "crates/gw-runtime" }
 gw-llm = { path = "crates/gw-llm" }
 gw-memory = { path = "crates/gw-memory" }
-gw-bus = { path = "crates/gw-bus" }
-gw-channels = { path = "crates/gw-channels" }
+gw-engine = { path = "crates/gw-engine" }
 gw-scheduler = { path = "crates/gw-scheduler" }
 gw-trace = { path = "crates/gw-trace" }
 gw-server = { path = "crates/gw-server" }
