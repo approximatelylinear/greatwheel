@@ -306,44 +306,43 @@ This is already the right shape — we just make it composable.
 ### HostFnRouter
 
 ```rust
+/// Sync handler — runs on the REPL execution thread.
+/// Will gain a CallContext parameter and async variant in a future phase.
 pub type HostFnHandler = Arc<
-    dyn Fn(Vec<Value>, HashMap<String, Value>, &CallContext)
-        -> BoxFuture<'_, Result<Object, AgentError>>
+    dyn Fn(Vec<Value>, HashMap<String, Value>)
+        -> Result<Value, PluginError>
     + Send + Sync
 >;
 
 pub struct HostFnRouter {
     handlers: HashMap<String, HostFnHandler>,
-    fallback: Option<Box<dyn HostBridge>>,
 }
 
-impl HostBridge for HostFnRouter {
-    async fn call(&self, function: &str, args: Vec<Value>, kwargs: HashMap<String, Value>)
-        -> Result<Object, AgentError>
-    {
-        if let Some(handler) = self.handlers.get(function) {
-            handler(args, kwargs, &self.call_context).await
-        } else if let Some(fallback) = &self.fallback {
-            fallback.call(function, args, kwargs).await
-        } else {
-            Err(AgentError::UnknownFunction(function.to_string()))
-        }
-    }
+impl HostFnRouter {
+    pub fn get(&self, function: &str) -> Option<&HostFnHandler>;
+    pub fn function_names(&self) -> Vec<&str>;
+    pub fn has(&self, function: &str) -> bool;
 }
 ```
+
+The router is a lookup table, not a `HostBridge` impl itself — the
+conversation bridge queries it and falls back to built-in functions
+for unmatched names.
 
 Plugins register handlers during init:
 
 ```rust
 // In a weather plugin's init():
-ctx.register_host_fn("weather.forecast", Arc::new(|args, _kwargs, _ctx| {
-    Box::pin(async move {
-        let city = args[0].as_str().ok_or(AgentError::BadArg)?;
-        let forecast = weather_api::get(city).await?;
-        Ok(forecast.into())
-    })
+ctx.register_host_fn("weather.forecast", Arc::new(|args, _kwargs| {
+    let city = args[0].as_str().ok_or(PluginError::HostFunction("expected string".into()))?;
+    let forecast = weather_api::get_sync(city)?;
+    Ok(serde_json::to_value(forecast).unwrap())
 }));
 ```
+
+> **Future:** When async handlers are needed (e.g., for plugins that call
+> external APIs), we'll add `CallContext` as a parameter and an async
+> variant alongside the sync one.
 
 Now any Python agent can call `weather.forecast("Amsterdam")`. The REPL
 pauses, Rust fulfills the call, REPL resumes with the result. The rLM
@@ -483,7 +482,6 @@ entirely.
 ```rust
 pub struct SlackPlugin { /* ... */ }
 
-#[async_trait]
 impl Plugin for SlackPlugin {
     fn name(&self) -> &str { "slack" }
 
@@ -495,10 +493,12 @@ impl Plugin for SlackPlugin {
         }
     }
 
-    async fn init(&self, ctx: &mut PluginContext) -> Result<(), PluginError> {
-        let token = ctx.config["bot_token"].as_str().unwrap();
-        let adapter = SlackAdapter::connect(token).await?;
-        ctx.register_channel(Box::new(adapter));
+    fn init(&self, ctx: &mut PluginContext) -> Result<(), PluginError> {
+        let token = ctx.config["bot_token"].as_str()
+            .ok_or(PluginError::Config("missing bot_token".into()))?;
+        // register_channel is Phase 3 — shown here for illustration
+        // ctx.register_channel(Box::new(SlackAdapter::new(token)));
+        ctx.provide(SlackConfig { token: token.to_string() });
         Ok(())
     }
 }
@@ -509,7 +509,6 @@ impl Plugin for SlackPlugin {
 ```rust
 pub struct GuardrailsPlugin { /* ... */ }
 
-#[async_trait]
 impl Plugin for GuardrailsPlugin {
     fn name(&self) -> &str { "guardrails" }
 
@@ -521,17 +520,18 @@ impl Plugin for GuardrailsPlugin {
         }
     }
 
-    async fn init(&self, ctx: &mut PluginContext) -> Result<(), PluginError> {
+    fn init(&self, ctx: &mut PluginContext) -> Result<(), PluginError> {
         let patterns: Vec<String> = /* from config */;
 
         ctx.on(LifecycleEvent::BeforeLlmCall, Arc::new(move |payload| {
-            let messages = payload.data.downcast_ref::<Vec<Message>>().unwrap();
-            for msg in messages {
-                for pattern in &patterns {
-                    if msg.content.contains(pattern) {
-                        return EventResult::ShortCircuit(
-                            json!({"error": "blocked by content policy"})
-                        );
+            if let EventData::Messages { messages, .. } = &payload.data {
+                for msg in messages {
+                    for pattern in &patterns {
+                        if msg.content.contains(pattern) {
+                            return EventResult::ShortCircuit(
+                                json!({"error": "blocked by content policy"})
+                            );
+                        }
                     }
                 }
             }
@@ -553,7 +553,6 @@ impl Plugin for GuardrailsPlugin {
 ```rust
 pub struct JiraPlugin { /* ... */ }
 
-#[async_trait]
 impl Plugin for JiraPlugin {
     fn name(&self) -> &str { "jira" }
 
@@ -565,22 +564,18 @@ impl Plugin for JiraPlugin {
         }
     }
 
-    async fn init(&self, ctx: &mut PluginContext) -> Result<(), PluginError> {
-        let base_url = ctx.config["url"].as_str().unwrap().to_string();
-        let api_token = ctx.config["token"].as_str().unwrap().to_string();
+    fn init(&self, ctx: &mut PluginContext) -> Result<(), PluginError> {
+        let base_url = ctx.config["url"].as_str()
+            .ok_or(PluginError::Config("missing url".into()))?.to_string();
+        let api_token = ctx.config["token"].as_str()
+            .ok_or(PluginError::Config("missing token".into()))?.to_string();
 
-        ctx.register_host_fn("jira.create_issue", Arc::new(move |args, kwargs, _ctx| {
-            let url = base_url.clone();
-            let token = api_token.clone();
-            Box::pin(async move {
-                let summary = args[0].as_str().ok_or(AgentError::BadArg)?;
-                let issue = jira_api::create(&url, &token, summary).await?;
-                Ok(json!({"key": issue.key, "url": issue.url}).into())
-            })
-        }));
-
-        ctx.register_host_fn("jira.search", Arc::new(move |args, kwargs, _ctx| {
-            // ...
+        ctx.register_host_fn("jira.create_issue", Arc::new(move |args, _kwargs| {
+            let summary = args[0].as_str()
+                .ok_or(PluginError::HostFunction("expected string arg".into()))?;
+            let issue = jira_api::create_sync(&base_url, &api_token, summary)
+                .map_err(|e| PluginError::HostFunction(e.to_string()))?;
+            Ok(json!({"key": issue.key, "url": issue.url}))
         }));
 
         Ok(())
@@ -654,7 +649,6 @@ that ship with Greatwheel. This validates the plugin API against real code.
 
 pub struct OllamaPlugin;
 
-#[async_trait]
 impl Plugin for OllamaPlugin {
     fn name(&self) -> &str { "ollama" }
 
@@ -665,12 +659,14 @@ impl Plugin for OllamaPlugin {
         }
     }
 
-    async fn init(&self, ctx: &mut PluginContext) -> Result<(), PluginError> {
-        let proxy_url = ctx.config["proxy_url"].as_str().unwrap();
-        let direct_url = ctx.config["direct_url"].as_str().unwrap();
+    fn init(&self, ctx: &mut PluginContext) -> Result<(), PluginError> {
+        let proxy_url = ctx.config["proxy_url"].as_str()
+            .ok_or(PluginError::Config("missing proxy_url".into()))?;
+        let direct_url = ctx.config["direct_url"].as_str()
+            .ok_or(PluginError::Config("missing direct_url".into()))?;
         let client = OllamaClient::new(proxy_url, direct_url);
-        ctx.register_llm_backend("ollama", /* factory wrapping client */);
-        ctx.provide(Arc::new(client)); // share with downstream plugins
+        // register_llm_backend is Phase 3 — for now, share via provide()
+        ctx.provide(Arc::new(client));
         Ok(())
     }
 }
