@@ -76,11 +76,19 @@ Deferred: automatic LLM assessment when new facts relate to existing opinions (r
 
 ### Remaining work
 
-All five gw-memory phases are complete. Remaining items across the design:
-- **Async dispatch** (§6.2 Q7) — unblocks LLM fact extraction, LLM entity resolution, LLM opinion assessment, async graph_neighbors host function
-- **Cross-encoder reranker** — optional post-RRF reranking (config-gated in hindsight-recall)
-- **LLM fallback temporal parser** (stage 2) — for expressions rule-based can't handle
-- **BrowseComp Phases B-C** (§5.3) — entity-bridged search, passage-level index, entity graph
+All five gw-memory phases are complete. Remaining items fall into two independent tracks:
+
+**Blocked on async dispatch (§6.2 Q7):**
+- LLM-powered narrative fact extraction (2-5 facts per exchange)
+- LLM-powered entity resolution (fuzzy → canonical)
+- LLM opinion assessment (auto reinforce/weaken/contradict)
+- Async `memory.graph_neighbors` host function
+- LLM fallback temporal parser (stage 2)
+- Cross-encoder reranker (config-gated in hindsight-recall)
+
+**BrowseComp Phases B-C (§5.3) — independent, no async dependency:**
+- Phase B: `entity_search()` REPL tool (Python, no Rust changes)
+- Phase C: passage-level BM25 index, entity co-occurrence graph, multi-strategy RRF
 
 ---
 
