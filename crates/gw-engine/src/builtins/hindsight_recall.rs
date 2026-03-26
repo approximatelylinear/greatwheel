@@ -3,17 +3,18 @@
 //! Provides host functions for Python agents to query the memory graph and
 //! perform temporal queries directly.  The heavy lifting (graph traversal,
 //! temporal filtering, four-channel RRF fusion) is implemented in
-//! `gw-memory::graph` and `gw-memory::temporal` and invoked by
-//! `HybridStore::recall()` when `SearchMode::Full` is used.
+//! `gw-memory::graph` and wired into `HybridStore::recall()` via
+//! `SearchMode::Full`.
 //!
 //! This plugin's role is to:
-//! 1. Expose `memory.temporal_parse` host function
+//! 1. Expose `memory.temporal_parse` host function (uses `gw_core::temporal`)
 //! 2. Expose `memory.graph_neighbors` host function (placeholder until async dispatch)
 //! 3. Provide configuration for the recall pipeline
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use gw_core::temporal as tp;
 use gw_core::{Plugin, PluginContext, PluginError, PluginManifest};
 use serde_json::Value;
 
@@ -40,7 +41,8 @@ impl Plugin for HindsightRecallPlugin {
     fn init(&self, ctx: &mut PluginContext) -> Result<(), PluginError> {
         // --- Host function: memory.temporal_parse ---
         // Parses a temporal expression from a query string and returns the
-        // resolved date range as JSON. Returns null if no temporal expression found.
+        // resolved date range as JSON.  Uses the canonical parser from gw-core.
+        // Returns null if no temporal expression found.
         ctx.register_host_fn(
             "memory.temporal_parse",
             Arc::new(|args: Vec<Value>, _kwargs: HashMap<String, Value>| {
@@ -50,16 +52,12 @@ impl Plugin for HindsightRecallPlugin {
                     .unwrap_or("");
 
                 let now = chrono::Utc::now();
-
-                // Use the gw-memory temporal parser (compiled into gw-engine
-                // would require a dependency — so we inline a lightweight version
-                // that covers the common cases for host function use).
-                let range = parse_temporal_lightweight(query, now);
+                let range = tp::parse_temporal(query, now);
 
                 match range {
-                    Some((start, end)) => Ok(serde_json::json!({
-                        "start": start.to_rfc3339(),
-                        "end": end.to_rfc3339(),
+                    Some(r) => Ok(serde_json::json!({
+                        "start": r.start.to_rfc3339(),
+                        "end": r.end.to_rfc3339(),
                     })),
                     None => Ok(Value::Null),
                 }
@@ -83,66 +81,17 @@ impl Plugin for HindsightRecallPlugin {
     }
 }
 
-/// Lightweight temporal parser for the host function.
-///
-/// Covers the most common patterns without depending on gw-memory.
-/// The full parser in `gw_memory::temporal` handles more cases.
-fn parse_temporal_lightweight(
-    query: &str,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> {
-    let lower = query.to_lowercase();
-
-    if lower.contains("yesterday") {
-        let start = now - chrono::Duration::days(1);
-        let start_day = start.date_naive().and_hms_opt(0, 0, 0)?.and_utc();
-        let end_day = start_day + chrono::Duration::days(1);
-        return Some((start_day, end_day));
-    }
-
-    if lower.contains("today") {
-        let start_day = now.date_naive().and_hms_opt(0, 0, 0)?.and_utc();
-        let end_day = start_day + chrono::Duration::days(1);
-        return Some((start_day, end_day));
-    }
-
-    if lower.contains("last week") {
-        return Some((now - chrono::Duration::weeks(2), now - chrono::Duration::weeks(1)));
-    }
-
-    // "last N days"
-    for prefix in ["last ", "past "] {
-        if let Some(pos) = lower.find(prefix) {
-            let rest = &lower[pos + prefix.len()..];
-            if let Some(space) = rest.find(' ') {
-                if rest[space..].trim_start().starts_with("day") {
-                    if let Ok(n) = rest[..space].parse::<i64>() {
-                        return Some((now - chrono::Duration::days(n), now));
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use chrono::TimeZone;
+    use gw_core::temporal::parse_temporal;
 
     #[test]
-    fn lightweight_parse_yesterday() {
-        let now = chrono::Utc.with_ymd_and_hms(2026, 3, 26, 12, 0, 0).unwrap();
-        let (start, end) = parse_temporal_lightweight("What happened yesterday?", now).unwrap();
-        assert_eq!(start.date_naive().to_string(), "2026-03-25");
-        assert_eq!(end.date_naive().to_string(), "2026-03-26");
-    }
-
-    #[test]
-    fn lightweight_parse_none() {
+    fn host_fn_uses_core_parser() {
         let now = chrono::Utc::now();
-        assert!(parse_temporal_lightweight("Who is Marie Curie?", now).is_none());
+        // Verify the core parser handles the full feature set
+        assert!(parse_temporal("What happened yesterday?", now).is_some());
+        assert!(parse_temporal("Events last month", now).is_some());
+        assert!(parse_temporal("In January 2026?", now).is_some());
+        assert!(parse_temporal("Who is Marie Curie?", now).is_none());
     }
 }

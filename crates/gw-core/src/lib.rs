@@ -7,6 +7,7 @@ pub mod channel;
 pub mod loop_event;
 pub mod plugin;
 pub mod session_tree;
+pub mod temporal;
 
 pub use agent_bus::AgentBus;
 pub use channel::{ChannelAdapter, TaskChannelAdapter};
