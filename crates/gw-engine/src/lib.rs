@@ -17,6 +17,7 @@
 //! initialized.after_startup();
 //! ```
 
+pub mod builtins;
 pub mod dispatcher;
 pub mod engine;
 pub mod host_fn_router;

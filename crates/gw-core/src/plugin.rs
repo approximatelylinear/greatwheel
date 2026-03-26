@@ -168,9 +168,15 @@ pub enum EventData {
     },
 
     /// Memory events.
+    ///
+    /// `meta` carries optional Hindsight metadata as JSON. Plugins handling
+    /// `BeforeMemoryStore` can set this to enrich memories with kind,
+    /// entities, confidence, and temporal fields.  `HybridStore` deserializes
+    /// it back into `MemoryMeta`.
     Memory {
         key: String,
         value: Option<Value>,
+        meta: Option<Value>,
     },
 
     /// Plugin-defined custom events.

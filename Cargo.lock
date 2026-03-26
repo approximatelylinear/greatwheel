@@ -2621,6 +2621,7 @@ name = "gw-engine"
 version = "0.1.0"
 dependencies = [
  "gw-core",
+ "regex",
  "serde_json",
  "thiserror 2.0.18",
  "tracing",

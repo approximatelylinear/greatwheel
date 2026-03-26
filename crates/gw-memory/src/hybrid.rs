@@ -69,17 +69,23 @@ impl HybridStore {
     ) -> Result<(), MemoryError> {
         // Dispatch BeforeMemoryStore event — plugins can enrich the value/meta.
         let (value, meta) = if let Some(ref dispatch) = self.dispatcher {
+            let meta_json = meta.as_ref().and_then(|m| serde_json::to_value(m).ok());
             let mut payload = EventPayload {
                 event: LifecycleEvent::BeforeMemoryStore,
                 data: EventData::Memory {
                     key: key.to_string(),
                     value: Some(value.clone()),
+                    meta: meta_json,
                 },
             };
             dispatch(&mut payload);
-            // Extract potentially modified value from the payload
+            // Extract potentially modified value and meta from the payload
             match payload.data {
-                EventData::Memory { value: Some(v), .. } => (v, meta),
+                EventData::Memory { value: Some(v), meta: Some(m), .. } => {
+                    let enriched_meta = serde_json::from_value::<MemoryMeta>(m).ok();
+                    (v, enriched_meta.or(meta))
+                }
+                EventData::Memory { value: Some(v), meta: None, .. } => (v, meta),
                 _ => (value, meta),
             }
         } else {
@@ -271,6 +277,7 @@ impl HybridStore {
                 data: EventData::Memory {
                     key: query.to_string(),
                     value: None,
+                    meta: None,
                 },
             };
             dispatch(&mut payload);
