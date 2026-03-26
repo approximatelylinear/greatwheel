@@ -1,10 +1,12 @@
 pub mod corpus;
 pub mod error;
 pub mod fusion;
+pub mod graph;
 pub mod hybrid;
 pub mod lance;
 pub mod postgres;
 pub mod tantivy_store;
+pub mod temporal;
 
 use chrono::{DateTime, Utc};
 use gw_core::{AgentId, CallContext, MemoryKind, SessionId, UserId};
@@ -63,7 +65,23 @@ pub enum SearchMode {
     Vector,
     FullText,
     Hybrid { alpha: f32 },
+    /// Four-channel retrieval: vector + BM25 + graph + temporal, fused via RRF.
+    Full {
+        /// Max graph traversal depth (default 2).
+        #[serde(default = "default_graph_hops")]
+        graph_hops: usize,
+        /// Activation decay per hop (default 0.5).
+        #[serde(default = "default_graph_decay")]
+        graph_decay: f32,
+        /// Recency decay sigma in days when no temporal expression detected (default 7).
+        #[serde(default = "default_recency_sigma")]
+        recency_sigma_days: f64,
+    },
 }
+
+fn default_graph_hops() -> usize { 2 }
+fn default_graph_decay() -> f32 { 0.5 }
+fn default_recency_sigma() -> f64 { 7.0 }
 
 /// Scope of memory search.
 #[derive(Debug, Clone, Serialize, Deserialize)]

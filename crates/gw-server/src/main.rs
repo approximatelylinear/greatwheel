@@ -244,7 +244,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize plugin engine.
     let engine = GreatWheelEngine::new()
-        .add_plugin(gw_engine::builtins::hindsight_retain::HindsightRetainPlugin);
+        .add_plugin(gw_engine::builtins::hindsight_retain::HindsightRetainPlugin)
+        .add_plugin(gw_engine::builtins::hindsight_recall::HindsightRecallPlugin);
     let engine = engine.init(&config.plugins).map_err(|e| {
         format!("Plugin engine init failed: {e}")
     })?;

@@ -16,6 +16,11 @@ impl PgMemoryStore {
         Self { pool }
     }
 
+    /// Access the underlying connection pool (needed by graph/temporal queries).
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     /// Flatten a JSON value to a text string for FTS indexing.
     fn flatten_value(value: &serde_json::Value) -> String {
         match value {

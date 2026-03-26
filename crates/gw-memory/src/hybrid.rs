@@ -266,6 +266,115 @@ impl HybridStore {
                     })
                     .collect()
             }
+
+            SearchMode::Full { graph_hops, graph_decay, recency_sigma_days } => {
+                // Four-channel retrieval: vector + BM25 + graph + temporal
+
+                // Channel 1 & 2: vector + BM25 (same as Hybrid)
+                let query_text = query.to_string();
+                let query_vec = self
+                    .llm
+                    .embed(&[query_text])
+                    .await
+                    .map_err(|e| MemoryError::Embedding(e.to_string()))?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| MemoryError::Embedding("No embedding returned".into()))?;
+
+                let vector_fut = self.lance.search(&org_id, query_vec, top_k);
+                let bm25_query = query.to_string();
+                let bm25_scope = opts.scope.clone();
+                let bm25_results = self.tantivy.search(&org_id, &bm25_query, &bm25_scope, top_k)?;
+                let vector_results = vector_fut.await?;
+
+                // Channel 3: graph traversal (spreading activation from vector+BM25 seeds)
+                let seed_fused = fusion::reciprocal_rank_fusion(
+                    &[vector_results.clone(), bm25_results.clone()],
+                    60,
+                );
+                let seeds: Vec<fusion::ScoredKey> = seed_fused
+                    .iter()
+                    .take(top_k)
+                    .map(|(k, s)| fusion::ScoredKey { key: k.clone(), score: *s })
+                    .collect();
+
+                // Parse temporal range for temporal-constrained graph traversal
+                let now = chrono::Utc::now();
+                let temporal_range = crate::temporal::parse_temporal(query, now);
+
+                let temporal_filter = if let Some(ref range) = temporal_range {
+                    crate::graph::fetch_temporal_set(
+                        self.pg.pool(), &org_id, range.start, range.end,
+                    ).await.ok()
+                } else {
+                    None
+                };
+
+                let graph_results = crate::graph::spreading_activation(
+                    self.pg.pool(),
+                    &org_id,
+                    &seeds,
+                    graph_hops,
+                    graph_decay,
+                    temporal_filter.as_ref(),
+                )
+                .await
+                .unwrap_or_default();
+
+                // Channel 4: temporal scoring
+                let temporal_results = if let Some(ref range) = temporal_range {
+                    crate::graph::temporal_score_memories(
+                        self.pg.pool(), &org_id, range.start, range.end, top_k,
+                    )
+                    .await
+                    .unwrap_or_default()
+                } else {
+                    // Recency decay fallback
+                    let rows: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+                        "SELECT key, occurred_at FROM memories WHERE org_id = $1 AND occurred_at IS NOT NULL ORDER BY occurred_at DESC LIMIT $2",
+                    )
+                    .bind(&org_id)
+                    .bind(top_k as i64)
+                    .fetch_all(self.pg.pool())
+                    .await
+                    .unwrap_or_default();
+
+                    rows.into_iter()
+                        .map(|(key, occ)| fusion::ScoredKey {
+                            key,
+                            score: crate::temporal::recency_score(occ, now, recency_sigma_days),
+                        })
+                        .collect()
+                };
+
+                // Fuse all four channels via RRF
+                let fused = fusion::reciprocal_rank_fusion(
+                    &[vector_results, bm25_results, graph_results, temporal_results],
+                    60,
+                );
+
+                let top_keys: Vec<String> = fused
+                    .iter()
+                    .take(top_k)
+                    .map(|(k, _)| k.clone())
+                    .collect();
+
+                let values = self.pg.get_by_keys(&org_id, &top_keys).await?;
+                let value_map: HashMap<String, serde_json::Value> = values.into_iter().collect();
+
+                fused
+                    .into_iter()
+                    .take(top_k)
+                    .filter_map(|(k, score)| {
+                        value_map.get(&k).map(|v| MemoryRecord {
+                            key: k,
+                            value: v.clone(),
+                            score,
+                            ..Default::default()
+                        })
+                    })
+                    .collect()
+            }
         };
 
         // Dispatch AfterMemoryRecall — plugins can augment/re-score/filter results.
