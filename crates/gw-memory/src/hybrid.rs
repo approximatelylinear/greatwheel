@@ -316,55 +316,56 @@ impl HybridStore {
                     None
                 };
 
-                let graph_results = match crate::graph::spreading_activation(
+                // Channel 3 (graph) and Channel 4 (temporal) are independent
+                // DB queries — run them concurrently.
+                let graph_fut = crate::graph::spreading_activation(
                     self.pg.pool(),
                     &org_id,
                     &seeds,
                     graph_hops,
                     graph_decay,
                     temporal_filter.as_ref(),
-                )
-                .await {
+                );
+
+                let temporal_fut = async {
+                    if let Some(ref range) = temporal_range {
+                        crate::graph::temporal_score_memories(
+                            self.pg.pool(), &org_id, range.start, range.end, top_k,
+                        ).await
+                    } else {
+                        // Recency decay fallback
+                        let rows: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+                            "SELECT key, occurred_at FROM memories WHERE org_id = $1 AND occurred_at IS NOT NULL ORDER BY occurred_at DESC LIMIT $2",
+                        )
+                        .bind(&org_id)
+                        .bind(top_k as i64)
+                        .fetch_all(self.pg.pool())
+                        .await?;
+
+                        Ok(rows.into_iter()
+                            .map(|(key, occ)| fusion::ScoredKey {
+                                key,
+                                score: crate::temporal::recency_score(occ, now, recency_sigma_days),
+                            })
+                            .collect())
+                    }
+                };
+
+                let (graph_res, temporal_res) = tokio::join!(graph_fut, temporal_fut);
+
+                let graph_results = match graph_res {
                     Ok(r) => r,
                     Err(e) => {
                         tracing::warn!(error = %e, "graph spreading_activation failed, skipping graph channel");
                         Vec::new()
                     }
                 };
-
-                // Channel 4: temporal scoring
-                let temporal_results = if let Some(ref range) = temporal_range {
-                    match crate::graph::temporal_score_memories(
-                        self.pg.pool(), &org_id, range.start, range.end, top_k,
-                    ).await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "temporal_score_memories failed, skipping temporal channel");
-                            Vec::new()
-                        }
+                let temporal_results = match temporal_res {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "temporal scoring failed, skipping temporal channel");
+                        Vec::new()
                     }
-                } else {
-                    // Recency decay fallback
-                    let rows: Vec<(String, chrono::DateTime<chrono::Utc>)> = match sqlx::query_as(
-                        "SELECT key, occurred_at FROM memories WHERE org_id = $1 AND occurred_at IS NOT NULL ORDER BY occurred_at DESC LIMIT $2",
-                    )
-                    .bind(&org_id)
-                    .bind(top_k as i64)
-                    .fetch_all(self.pg.pool())
-                    .await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "recency fallback query failed, skipping temporal channel");
-                            Vec::new()
-                        }
-                    };
-
-                    rows.into_iter()
-                        .map(|(key, occ)| fusion::ScoredKey {
-                            key,
-                            score: crate::temporal::recency_score(occ, now, recency_sigma_days),
-                        })
-                        .collect()
                 };
 
                 // Fuse all four channels via RRF
