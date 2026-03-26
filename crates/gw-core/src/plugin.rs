@@ -177,6 +177,25 @@ pub enum EventData {
     Custom(Box<dyn Any + Send>),
 }
 
+impl fmt::Debug for EventData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Server => write!(f, "Server"),
+            Self::Session { session_id } => f.debug_struct("Session").field("session_id", session_id).finish(),
+            Self::Turn { session_id, .. } => f.debug_struct("Turn").field("session_id", session_id).finish(),
+            Self::Messages { session_id, messages } => f.debug_struct("Messages").field("session_id", session_id).field("count", &messages.len()).finish(),
+            Self::LlmResponse { session_id, input_tokens, output_tokens, .. } => f.debug_struct("LlmResponse").field("session_id", session_id).field("input_tokens", input_tokens).field("output_tokens", output_tokens).finish(),
+            Self::Code { session_id, .. } => f.debug_struct("Code").field("session_id", session_id).finish(),
+            Self::ExecResult { session_id, is_final, .. } => f.debug_struct("ExecResult").field("session_id", session_id).field("is_final", is_final).finish(),
+            Self::HostCall { session_id, function, .. } => f.debug_struct("HostCall").field("session_id", session_id).field("function", function).finish(),
+            Self::TurnComplete { session_id, iterations, input_tokens, output_tokens, .. } => f.debug_struct("TurnComplete").field("session_id", session_id).field("iterations", iterations).field("input_tokens", input_tokens).field("output_tokens", output_tokens).finish(),
+            Self::Error { session_id, error } => f.debug_struct("Error").field("session_id", session_id).field("error", error).finish(),
+            Self::Memory { key, .. } => f.debug_struct("Memory").field("key", key).finish(),
+            Self::Custom(_) => write!(f, "Custom(..)"),
+        }
+    }
+}
+
 /// Simplified message representation for event payloads.
 #[derive(Debug, Clone)]
 pub struct LlmMessageData {
