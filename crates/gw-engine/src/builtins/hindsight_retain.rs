@@ -263,64 +263,110 @@ impl EntityPatterns {
 /// Classify a memory's kind based on content heuristics.
 ///
 /// Returns one of: "fact", "experience", "opinion", "observation".
+///
+/// Matching is conservative to avoid false positives:
+/// - Opinion/experience markers require first-person subject ("I"/"we") at
+///   sentence boundaries, not inside quoted text.
+/// - Observation markers require sentence-initial position or label syntax.
 fn classify_kind(text: &str) -> &'static str {
-    let lower = text.to_lowercase();
+    // Strip quoted passages to avoid matching first-person speech attributed
+    // to others (e.g., 'Einstein said: "I found the result"').
+    let unquoted = strip_quotes(text);
+    let lower = unquoted.to_lowercase();
 
-    // Opinion indicators: subjective language, belief markers
-    let opinion_markers = [
-        "i think",
-        "i believe",
-        "in my opinion",
-        "i feel",
-        "seems like",
-        "probably",
-        "might be",
-        "i prefer",
-        "i recommend",
-        "should",
-        "better than",
-        "worse than",
-    ];
-    if opinion_markers.iter().any(|m| lower.contains(m)) {
+    // Opinion: first-person belief/preference markers
+    if has_sentence_start(&lower, &[
+        "i think", "i believe", "in my opinion", "i feel that",
+        "i prefer", "i recommend", "i suggest",
+    ]) {
+        return "opinion";
+    }
+    // "seems like" / "it seems" are opinion even without "I"
+    if has_sentence_start(&lower, &["it seems", "seems like"]) {
+        return "opinion";
+    }
+    // "should" only counts as opinion when the subject is first-person
+    if has_sentence_start(&lower, &["i should", "we should", "you should"]) {
         return "opinion";
     }
 
-    // Experience indicators: first-person past actions
-    let experience_markers = [
-        "i did",
-        "i found",
-        "i searched",
-        "i discovered",
-        "i tried",
-        "i ran",
-        "i called",
-        "i asked",
-        "i created",
-        "i learned",
-        "we found",
-        "we discovered",
-    ];
-    if experience_markers.iter().any(|m| lower.contains(m)) {
+    // Experience: first-person past actions (at sentence start)
+    if has_sentence_start(&lower, &[
+        "i did", "i found", "i searched", "i discovered", "i tried",
+        "i ran", "i called", "i asked", "i created", "i learned",
+        "we found", "we discovered", "we tried", "we ran",
+    ]) {
         return "experience";
     }
 
-    // Observation indicators: summaries, patterns
-    let observation_markers = [
-        "summary:",
-        "in summary",
-        "overall",
-        "pattern:",
-        "observation:",
-        "note:",
-        "key finding",
-        "takeaway",
-    ];
-    if observation_markers.iter().any(|m| lower.contains(m)) {
+    // Observation: label-style prefixes (colon-terminated or sentence-initial)
+    if has_label_prefix(&lower, &[
+        "summary", "observation", "pattern", "note", "key finding", "takeaway",
+    ]) {
+        return "observation";
+    }
+    // "in summary" / "to summarize" at sentence start
+    if has_sentence_start(&lower, &["in summary", "to summarize"]) {
         return "observation";
     }
 
     // Default: fact
     "fact"
+}
+
+/// Check if any marker appears at a sentence boundary in the text.
+///
+/// A sentence boundary is: start of string, or after `. ` / `! ` / `? ` / `\n`.
+fn has_sentence_start(lower: &str, markers: &[&str]) -> bool {
+    for marker in markers {
+        // At the very start of text
+        if lower.starts_with(marker) {
+            return true;
+        }
+        // After sentence-ending punctuation + space
+        for sep in [". ", "! ", "? ", "\n"] {
+            if lower.contains(&format!("{sep}{marker}")) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if any label appears as "Label:" or "Label," at the start of text
+/// or after a newline.
+fn has_label_prefix(lower: &str, labels: &[&str]) -> bool {
+    for label in labels {
+        // "summary:" or "summary," at start
+        if lower.starts_with(&format!("{label}:"))
+            || lower.starts_with(&format!("{label},"))
+        {
+            return true;
+        }
+        // After newline
+        if lower.contains(&format!("\n{label}:"))
+            || lower.contains(&format!("\n{label},"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Remove double-quoted and single-quoted passages from text.
+fn strip_quotes(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut in_double = false;
+    let mut in_single = false;
+    for ch in text.chars() {
+        match ch {
+            '"' if !in_single => in_double = !in_double,
+            '\'' if !in_double => in_single = !in_single,
+            _ if !in_double && !in_single => result.push(ch),
+            _ => {} // inside quotes — skip
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -373,18 +419,48 @@ mod tests {
     fn classify_kind_opinion() {
         assert_eq!(classify_kind("I think this approach is better than the alternative"), "opinion");
         assert_eq!(classify_kind("I believe the data shows a trend"), "opinion");
+        assert_eq!(classify_kind("It seems like the API changed"), "opinion");
+        assert_eq!(classify_kind("First sentence. I recommend using Rust"), "opinion");
+    }
+
+    #[test]
+    fn classify_kind_opinion_false_positives() {
+        // "should" without first-person subject is a fact
+        assert_eq!(classify_kind("The experiment should be run at 20°C"), "fact");
+        // "probably" embedded in factual text is not enough
+        assert_eq!(classify_kind("The server probably handles 1000 RPS"), "fact");
+        // Quoted first-person is not the author's opinion
+        assert_eq!(classify_kind(r#"Einstein said: "I believe in God""#), "fact");
     }
 
     #[test]
     fn classify_kind_experience() {
         assert_eq!(classify_kind("I found the document in the archive"), "experience");
         assert_eq!(classify_kind("We discovered a new pattern"), "experience");
+        assert_eq!(classify_kind("Done. I searched for the term"), "experience");
+    }
+
+    #[test]
+    fn classify_kind_experience_false_positives() {
+        // Quoted first-person is attributed speech, not agent experience
+        assert_eq!(classify_kind(r#"The explorer wrote "I found the ruins""#), "fact");
+        // "found" without "I" subject
+        assert_eq!(classify_kind("The team found a bug in production"), "fact");
     }
 
     #[test]
     fn classify_kind_observation() {
         assert_eq!(classify_kind("Summary: the results show improvement"), "observation");
         assert_eq!(classify_kind("Key finding: latency dropped 40%"), "observation");
+        assert_eq!(classify_kind("In summary, the approach works"), "observation");
+    }
+
+    #[test]
+    fn classify_kind_observation_false_positives() {
+        // "overall" in a measurement is a fact
+        assert_eq!(classify_kind("The overall length is 5 meters"), "fact");
+        // "note" in normal prose
+        assert_eq!(classify_kind("Please note the deadline"), "fact");
     }
 
     #[test]
