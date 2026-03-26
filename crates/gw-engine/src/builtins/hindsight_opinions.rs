@@ -26,11 +26,13 @@ use sqlx::PgPool;
 use tracing::{debug, warn};
 
 /// Configuration for the hindsight-opinions plugin.
+///
+/// All values are f32 to match the Postgres FLOAT column and scoring math.
 struct OpinionsConfig {
     reinforce_alpha: f32,
     weaken_alpha: f32,
     contradict_alpha: f32,
-    default_confidence: f64,
+    default_confidence: f32,
 }
 
 impl OpinionsConfig {
@@ -51,7 +53,7 @@ impl OpinionsConfig {
             default_confidence: config
                 .get("default_confidence")
                 .and_then(|v| v.as_f64())
-                .unwrap_or(0.5),
+                .unwrap_or(0.5) as f32,
         }
     }
 }
@@ -109,7 +111,7 @@ impl Plugin for HindsightOpinionsPlugin {
                 }
 
                 if m.get("confidence").is_none() {
-                    if let Some(n) = serde_json::Number::from_f64(default_confidence) {
+                    if let Some(n) = serde_json::Number::from_f64(f64::from(default_confidence)) {
                         m.insert("confidence".into(), Value::Number(n));
                         debug!(confidence = default_confidence, "opinions plugin set default confidence");
                         return EventResult::Modified;
