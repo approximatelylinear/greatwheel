@@ -1,0 +1,62 @@
+[
+  {
+    "i": 0,
+    "selected_program_candidate": 0,
+    "subsample_ids": [
+      0
+    ],
+    "subsample_scores": [
+      0.4166666666666667
+    ],
+    "new_subsample_scores": [
+      0.45833333333333337
+    ],
+    "new_program_idx": 1,
+    "evaluated_val_indices": [
+      0
+    ]
+  },
+  {
+    "i": 1,
+    "selected_program_candidate": 1,
+    "subsample_ids": [
+      0
+    ],
+    "subsample_scores": [
+      0.37500000000000006
+    ],
+    "new_subsample_scores": [
+      0.37499999999999994
+    ]
+  },
+  {
+    "i": 2,
+    "selected_program_candidate": 1,
+    "subsample_ids": [
+      0
+    ],
+    "subsample_scores": [
+      0.3333333333333333
+    ],
+    "new_subsample_scores": [
+      0.4166666666666667
+    ],
+    "new_program_idx": 2,
+    "evaluated_val_indices": [
+      0
+    ]
+  },
+  {
+    "i": 3,
+    "selected_program_candidate": 1,
+    "subsample_ids": [
+      0
+    ],
+    "subsample_scores": [
+      0.375
+    ],
+    "new_subsample_scores": [
+      0.29166666666666663
+    ]
+  }
+]
