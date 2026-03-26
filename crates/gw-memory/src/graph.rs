@@ -63,10 +63,12 @@ pub async fn spreading_activation(
         activations.insert(*id, base);
     }
 
-    let mut visited: HashSet<Uuid> = activations.keys().copied().collect();
+    let seed_ids: HashSet<Uuid> = activations.keys().copied().collect();
     let mut frontier: Vec<Uuid> = activations.keys().copied().collect();
 
-    // Spread activation for each hop
+    // Spread activation for each hop.
+    // Nodes can be revisited if a later hop finds a higher-weight path —
+    // we only add to next_frontier when activation actually improves.
     for _hop in 0..max_hops {
         if frontier.is_empty() {
             break;
@@ -81,9 +83,11 @@ pub async fn spreading_activation(
         .await?;
 
         let mut next_frontier = Vec::new();
+        let mut frontier_set = HashSet::new();
 
         for (from_id, to_id, weight) in edges {
-            if visited.contains(&to_id) {
+            // Don't traverse back into seed nodes
+            if seed_ids.contains(&to_id) {
                 continue;
             }
 
@@ -104,17 +108,17 @@ pub async fn spreading_activation(
             let entry = activations.entry(to_id).or_insert(0.0);
             if new_activation > *entry {
                 *entry = new_activation;
+                // Only re-expand if activation improved
+                if frontier_set.insert(to_id) {
+                    next_frontier.push(to_id);
+                }
             }
-
-            visited.insert(to_id);
-            next_frontier.push(to_id);
         }
 
         frontier = next_frontier;
     }
 
     // Remove seeds from results (caller already has them)
-    let seed_ids: HashSet<Uuid> = seed_rows.iter().map(|(id, _)| *id).collect();
     let mut discovered: Vec<(Uuid, f32)> = activations
         .into_iter()
         .filter(|(id, _)| !seed_ids.contains(id))
