@@ -119,7 +119,7 @@ impl Plugin for HindsightRetainPlugin {
                         }
                         if m.get("confidence").is_none() {
                             if let Some(c) = confidence {
-                                m.insert("confidence".into(), Value::Number(serde_json::Number::from_f64(c).unwrap()));
+                                m.insert("confidence".into(), Value::Number(serde_json::Number::from_f64(c).unwrap_or(serde_json::Number::from(0))));
                             }
                         }
                         Value::Object(m)
@@ -135,7 +135,7 @@ impl Plugin for HindsightRetainPlugin {
                             );
                         }
                         if let Some(c) = confidence {
-                            m.insert("confidence".into(), Value::Number(serde_json::Number::from_f64(c).unwrap()));
+                            m.insert("confidence".into(), Value::Number(serde_json::Number::from_f64(c).unwrap_or(serde_json::Number::from(0))));
                         }
                         Value::Object(m)
                     }
