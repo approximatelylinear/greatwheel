@@ -214,15 +214,17 @@ impl SharedState {
 }
 
 /// Registration context passed to `Plugin::init()`.
+///
+/// Provides read/write access to shared state (so Plugin B can read what
+/// Plugin A provided) and methods to register capabilities.
 pub struct PluginContext<'a> {
     /// This plugin's config section from TOML.
     pub config: &'a Value,
 
-    /// Shared state from previously-initialized plugins.
-    pub shared: &'a SharedState,
-
-    /// Mutable handle to the shared state (for providing values).
-    shared_mut: &'a mut SharedState,
+    /// Shared state — readable and writable. Plugins initialized earlier
+    /// have already inserted their values; this plugin can read those
+    /// and insert its own for downstream plugins.
+    pub shared: &'a mut SharedState,
 
     /// Collected registrations.
     pub(crate) registrations: &'a mut PluginRegistrations,
@@ -231,14 +233,12 @@ pub struct PluginContext<'a> {
 impl<'a> PluginContext<'a> {
     pub fn new(
         config: &'a Value,
-        shared: &'a SharedState,
-        shared_mut: &'a mut SharedState,
+        shared: &'a mut SharedState,
         registrations: &'a mut PluginRegistrations,
     ) -> Self {
         Self {
             config,
             shared,
-            shared_mut,
             registrations,
         }
     }
@@ -261,7 +261,7 @@ impl<'a> PluginContext<'a> {
 
     /// Expose a typed value for downstream plugins to access.
     pub fn provide<T: Send + Sync + 'static>(&mut self, value: T) {
-        self.shared_mut.insert(value);
+        self.shared.insert(value);
     }
 }
 

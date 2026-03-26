@@ -75,12 +75,8 @@ impl PluginRegistry {
             let config = plugin_configs.get(name).unwrap_or(&empty_config);
             let mut registrations = PluginRegistrations::default();
 
-            // We need two references to shared: immutable for reading, mutable for writing.
-            // Since init() is sequential, we use a temporary clone for the read reference.
-            let shared_snapshot = SharedState::default(); // plugins see prior state via provide()
             let mut ctx = PluginContext::new(
                 config,
-                &shared_snapshot,
                 &mut self.shared,
                 &mut registrations,
             );
