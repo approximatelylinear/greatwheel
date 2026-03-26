@@ -20,6 +20,19 @@ use crate::fusion::ScoredKey;
 /// visited (temporal-constrained graph traversal, §2.4.4).
 ///
 /// Returns scored keys sorted by activation (highest first).
+///
+/// TODO(perf): This issues N+1 queries (1 per hop + seed/key resolution).
+/// For large graphs, collapse into a single recursive CTE:
+/// ```sql
+/// WITH RECURSIVE spread AS (
+///     SELECT to_id, weight, 1 AS hop FROM memory_edges WHERE from_id = ANY($1)
+///     UNION ALL
+///     SELECT e.to_id, s.weight * $2 * e.weight, s.hop + 1
+///     FROM spread s JOIN memory_edges e ON e.from_id = s.to_id
+///     WHERE s.hop < $3
+/// )
+/// SELECT DISTINCT ON (to_id) to_id, weight FROM spread ORDER BY to_id, weight DESC
+/// ```
 pub async fn spreading_activation(
     pool: &PgPool,
     org_id: &Uuid,
