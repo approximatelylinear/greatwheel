@@ -162,7 +162,7 @@ impl Plugin for HindsightRetainPlugin {
                     .first()
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let entities = patterns_for_host.extract(text, 30);
+                let entities = patterns_for_host.extract(text, max_entities);
                 Ok(Value::Array(
                     entities.into_iter().map(Value::String).collect(),
                 ))
