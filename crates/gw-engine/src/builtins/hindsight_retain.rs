@@ -58,12 +58,13 @@ impl Plugin for HindsightRetainPlugin {
     fn init(&self, ctx: &mut PluginContext) -> Result<(), PluginError> {
         let config = RetainConfig::from_plugin_config(ctx.config);
 
-        // Pre-compile regexes once at init time
-        let patterns = EntityPatterns::new();
+        // Pre-compile regexes once at init time, shared across handlers
+        let patterns = Arc::new(EntityPatterns::new());
 
         let max_entities = config.max_entities;
 
         // --- BeforeMemoryStore handler ---
+        let patterns_for_store = Arc::clone(&patterns);
         ctx.on(
             LifecycleEvent::BeforeMemoryStore,
             Arc::new(move |payload: &mut EventPayload| {
@@ -91,7 +92,7 @@ impl Plugin for HindsightRetainPlugin {
                 }
 
                 // Extract entities
-                let entities = patterns.extract(&text, max_entities);
+                let entities = patterns_for_store.extract(&text, max_entities);
 
                 // Classify memory kind
                 let kind = classify_kind(&text);
@@ -153,7 +154,7 @@ impl Plugin for HindsightRetainPlugin {
 
         // --- Host function: memory.entities ---
         // Returns the entity list from a given text (for Python agents to use)
-        let patterns_for_host = EntityPatterns::new();
+        let patterns_for_host = Arc::clone(&patterns);
         ctx.register_host_fn(
             "memory.extract_entities",
             Arc::new(move |args: Vec<Value>, _kwargs: HashMap<String, Value>| {
