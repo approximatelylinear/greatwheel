@@ -1,6 +1,6 @@
 # Design: Structured Agent Memory — Hindsight Integration
 
-**Status:** In Progress — BrowseComp Phase A + gw-memory Phases 1-4 implemented
+**Status:** Complete — BrowseComp Phase A + gw-memory Phases 1-5 implemented
 **Date:** 2026-03-26
 **Paper:** [Hindsight is 20/20: Building Agent Memory that Retains, Recalls, and Reflects](https://arxiv.org/abs/2512.12818) — Vectorize.io & Virginia Tech
 
@@ -63,11 +63,24 @@ LLM entity resolution, causal edges, graph edge computation.
 Deferred: LLM fallback temporal parser (stage 2), cross-encoder reranking,
 async `memory.graph_neighbors` host function.
 
-### gw-memory Phase 5: Not started
+### gw-memory Phase 5: Implemented (2026-03-26)
 
-- `hindsight-opinions` — confidence evolution
+| File | What |
+|---|---|
+| `gw-engine/src/builtins/hindsight_opinions.rs` | Plugin: `BeforeMemoryStore` handler (priority 55) sets default confidence for opinions. Host functions: `memory.opinion_reinforce`, `memory.opinion_weaken`, `memory.opinion_contradict`. Pure `confidence_delta()` function. Configurable alphas. 4 unit tests |
+| `gw-memory/src/lib.rs` | `confidence_threshold: Option<f32>` on `RecallOpts` |
+| `gw-memory/src/postgres.rs` | `update_confidence()` — atomic UPDATE with GREATEST/LEAST clamping. `find_opinions_by_entities()` — finds opinions sharing entities |
+| `gw-memory/src/hybrid.rs` | `apply_confidence_filter()` — excludes low-confidence opinions from recall results (batch query) |
 
-See Section 3 for the full implementation plan.
+Deferred: automatic LLM assessment when new facts relate to existing opinions (requires async dispatch).
+
+### Remaining work
+
+All five gw-memory phases are complete. Remaining items across the design:
+- **Async dispatch** (§6.2 Q7) — unblocks LLM fact extraction, LLM entity resolution, LLM opinion assessment, async graph_neighbors host function
+- **Cross-encoder reranker** — optional post-RRF reranking (config-gated in hindsight-recall)
+- **LLM fallback temporal parser** (stage 2) — for expressions rule-based can't handle
+- **BrowseComp Phases B-C** (§5.3) — entity-bridged search, passage-level index, entity graph
 
 ---
 
