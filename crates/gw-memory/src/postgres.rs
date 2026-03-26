@@ -38,12 +38,7 @@ impl PgMemoryStore {
         let text_content = Self::flatten_value(value);
 
         // Extract metadata fields (default to Fact with no extras)
-        let kind_str = meta.map(|m| match m.kind {
-            gw_core::MemoryKind::Fact => "fact",
-            gw_core::MemoryKind::Experience => "experience",
-            gw_core::MemoryKind::Opinion => "opinion",
-            gw_core::MemoryKind::Observation => "observation",
-        }).unwrap_or("fact");
+        let kind = meta.map(|m| m.kind).unwrap_or_default();
         let confidence: Option<f32> = meta.and_then(|m| m.confidence);
         let occurred_at: Option<DateTime<Utc>> = meta.and_then(|m| m.occurred_at);
         let occurred_end: Option<DateTime<Utc>> = meta.and_then(|m| m.occurred_end);
@@ -56,7 +51,7 @@ impl PgMemoryStore {
             INSERT INTO memories (org_id, user_id, agent_id, session_id, key, value, text_content,
                                   kind, confidence, occurred_at, occurred_end, entities)
             VALUES ($1, $2, $3, $4, $5, $6, $7,
-                    $8::memory_kind, $9, $10, $11, $12)
+                    $8, $9, $10, $11, $12)
             ON CONFLICT (org_id, key) DO UPDATE SET
                 value = EXCLUDED.value,
                 text_content = EXCLUDED.text_content,
@@ -78,7 +73,7 @@ impl PgMemoryStore {
         .bind(key)
         .bind(value)
         .bind(&text_content)
-        .bind(kind_str)
+        .bind(kind)
         .bind(confidence)
         .bind(occurred_at)
         .bind(occurred_end)

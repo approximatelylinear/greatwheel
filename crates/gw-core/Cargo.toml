@@ -3,9 +3,13 @@ name = "gw-core"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+sqlx = ["dep:sqlx"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
+sqlx = { workspace = true, optional = true }

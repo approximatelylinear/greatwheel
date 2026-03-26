@@ -120,6 +120,8 @@ pub struct RateLimitConfig {
 /// Distinguishes objective facts from agent experiences, subjective opinions,
 /// and synthesized observations.  See `docs/design-hindsight-memory.md` §2.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(feature = "sqlx", sqlx(type_name = "memory_kind", rename_all = "snake_case"))]
 pub enum MemoryKind {
     /// Objective facts about the external world.
     Fact,

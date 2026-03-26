@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-gw-core = { workspace = true }
+gw-core = { workspace = true, features = ["sqlx"] }
 gw-llm = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
