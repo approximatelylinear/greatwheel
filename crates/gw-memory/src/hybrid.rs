@@ -303,14 +303,20 @@ impl HybridStore {
                 let temporal_range = crate::temporal::parse_temporal(query, now);
 
                 let temporal_filter = if let Some(ref range) = temporal_range {
-                    crate::graph::fetch_temporal_set(
+                    match crate::graph::fetch_temporal_set(
                         self.pg.pool(), &org_id, range.start, range.end,
-                    ).await.ok()
+                    ).await {
+                        Ok(set) => Some(set),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "fetch_temporal_set failed, falling back to unfiltered graph traversal");
+                            None
+                        }
+                    }
                 } else {
                     None
                 };
 
-                let graph_results = crate::graph::spreading_activation(
+                let graph_results = match crate::graph::spreading_activation(
                     self.pg.pool(),
                     &org_id,
                     &seeds,
@@ -318,26 +324,40 @@ impl HybridStore {
                     graph_decay,
                     temporal_filter.as_ref(),
                 )
-                .await
-                .unwrap_or_default();
+                .await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "graph spreading_activation failed, skipping graph channel");
+                        Vec::new()
+                    }
+                };
 
                 // Channel 4: temporal scoring
                 let temporal_results = if let Some(ref range) = temporal_range {
-                    crate::graph::temporal_score_memories(
+                    match crate::graph::temporal_score_memories(
                         self.pg.pool(), &org_id, range.start, range.end, top_k,
-                    )
-                    .await
-                    .unwrap_or_default()
+                    ).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "temporal_score_memories failed, skipping temporal channel");
+                            Vec::new()
+                        }
+                    }
                 } else {
                     // Recency decay fallback
-                    let rows: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+                    let rows: Vec<(String, chrono::DateTime<chrono::Utc>)> = match sqlx::query_as(
                         "SELECT key, occurred_at FROM memories WHERE org_id = $1 AND occurred_at IS NOT NULL ORDER BY occurred_at DESC LIMIT $2",
                     )
                     .bind(&org_id)
                     .bind(top_k as i64)
                     .fetch_all(self.pg.pool())
-                    .await
-                    .unwrap_or_default();
+                    .await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "recency fallback query failed, skipping temporal channel");
+                            Vec::new()
+                        }
+                    };
 
                     rows.into_iter()
                         .map(|(key, occ)| fusion::ScoredKey {
