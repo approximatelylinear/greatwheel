@@ -4,7 +4,12 @@
 //! in `gw-core` alongside the other core abstractions.
 
 use crate::{LoopEvent, SessionId, Task, TaskId};
-use tokio::sync::mpsc;
+
+/// A sender for loop events, runtime-agnostic.
+///
+/// Implementations can wrap `tokio::sync::mpsc::UnboundedSender`,
+/// `std::sync::mpsc::Sender`, or any other channel type.
+pub type EventSender = Box<dyn Fn(LoopEvent) -> Result<(), LoopEvent> + Send + Sync>;
 
 /// Trait for channel adapters (HTTP, WebSocket, CLI, Slack, etc.).
 ///
@@ -15,11 +20,11 @@ pub trait ChannelAdapter: Send + Sync {
     /// Unique channel identifier (e.g., "http", "ws", "slack-C04N8BKRM").
     fn channel_id(&self) -> &str;
 
-    /// Start listening for inbound messages. Send LoopEvents to event_tx.
+    /// Start listening for inbound messages. Send LoopEvents via event_tx.
     async fn start(
         &self,
         session_id: SessionId,
-        event_tx: mpsc::UnboundedSender<LoopEvent>,
+        event_tx: EventSender,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     /// Handle an outbound event (Response, InputRequest, TurnComplete, etc.).
