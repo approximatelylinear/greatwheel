@@ -279,6 +279,8 @@ def main():
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--runs", type=int, default=1,
                         help="Evaluate each query N times and average (reduces variance, N× cost)")
+    parser.add_argument("--seed-prompt", default=None,
+                        help="Path to seed prompt file (default: configs/system_prompt.txt)")
     parser.add_argument("--run-dir", default=None,
                         help="Directory to save GEPA state (default: auto)")
     args = parser.parse_args()
@@ -290,7 +292,10 @@ def main():
     print(f"Evaluating on {len(examples)} queries")
 
     # Load seed prompt
-    prompt_path = REPO_ROOT / "bench" / "browsecomp" / "configs" / "system_prompt.txt"
+    if args.seed_prompt:
+        prompt_path = Path(args.seed_prompt)
+    else:
+        prompt_path = REPO_ROOT / "bench" / "browsecomp" / "configs" / "system_prompt.txt"
     seed_prompt = prompt_path.read_text()
     print(f"Seed prompt: {len(seed_prompt)} chars")
 
