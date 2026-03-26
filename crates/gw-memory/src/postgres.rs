@@ -1,10 +1,23 @@
 use chrono::{DateTime, Utc};
+use gw_core::MemoryKind;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::MemoryError;
 use crate::fusion::ScoredKey;
 use crate::{MemoryMeta, MemoryScope};
+
+/// A fully hydrated memory row from Postgres, including Hindsight metadata.
+#[derive(Debug, Clone)]
+pub struct HydratedMemory {
+    pub key: String,
+    pub value: serde_json::Value,
+    pub kind: MemoryKind,
+    pub confidence: Option<f32>,
+    pub occurred_at: Option<DateTime<Utc>>,
+    pub occurred_end: Option<DateTime<Utc>>,
+    pub entities: Vec<String>,
+}
 
 /// Postgres-backed full-text search store.
 pub struct PgMemoryStore {
@@ -147,7 +160,7 @@ impl PgMemoryStore {
             .collect())
     }
 
-    /// Look up memory values by keys.
+    /// Look up memory values by keys (lightweight — value only).
     pub async fn get_by_keys(
         &self,
         org_id: &Uuid,
@@ -166,6 +179,58 @@ impl PgMemoryStore {
         .await?;
 
         Ok(rows)
+    }
+
+    /// Look up memories by keys with full Hindsight metadata.
+    ///
+    /// Returns all columns needed to populate `MemoryRecord` including kind,
+    /// confidence, temporal fields, and entities.
+    pub async fn get_by_keys_hydrated(
+        &self,
+        org_id: &Uuid,
+        keys: &[String],
+    ) -> Result<Vec<HydratedMemory>, MemoryError> {
+        if keys.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let rows: Vec<(
+            String,                   // key
+            serde_json::Value,        // value
+            String,                   // kind (as text)
+            Option<f32>,              // confidence
+            Option<DateTime<Utc>>,    // occurred_at
+            Option<DateTime<Utc>>,    // occurred_end
+            Option<Vec<String>>,      // entities
+        )> = sqlx::query_as(
+            r#"SELECT key, value, kind::text, confidence, occurred_at, occurred_end, entities
+               FROM memories WHERE org_id = $1 AND key = ANY($2)"#,
+        )
+        .bind(org_id)
+        .bind(keys)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(key, value, kind_str, confidence, occurred_at, occurred_end, entities)| {
+                let kind = match kind_str.as_str() {
+                    "experience" => MemoryKind::Experience,
+                    "opinion" => MemoryKind::Opinion,
+                    "observation" => MemoryKind::Observation,
+                    _ => MemoryKind::Fact,
+                };
+                HydratedMemory {
+                    key,
+                    value,
+                    kind,
+                    confidence,
+                    occurred_at,
+                    occurred_end,
+                    entities: entities.unwrap_or_default(),
+                }
+            })
+            .collect())
     }
 
     /// Delete a memory by key.

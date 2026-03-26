@@ -6,7 +6,7 @@ use gw_core::{CallContext, EventData, EventPayload, EventResult, LifecycleEvent}
 use crate::error::MemoryError;
 use crate::fusion;
 use crate::lance::LanceStore;
-use crate::postgres::PgMemoryStore;
+use crate::postgres::{HydratedMemory, PgMemoryStore};
 use crate::tantivy_store::TantivyStore;
 use crate::{MemoryMeta, MemoryRecord, RecallOpts, SearchMode};
 use gw_llm::OllamaClient;
@@ -56,6 +56,34 @@ impl HybridStore {
     pub fn with_dispatcher(mut self, dispatch: Arc<DispatchFn>) -> Self {
         self.dispatcher = Some(dispatch);
         self
+    }
+
+    /// Build MemoryRecords from hydrated rows and a score map.
+    ///
+    /// Preserves the order of `ordered_keys`, populating all Hindsight
+    /// metadata fields from the hydrated data.
+    fn build_records(
+        ordered_keys: &[(String, f32)],
+        hydrated: Vec<HydratedMemory>,
+    ) -> Vec<MemoryRecord> {
+        let hmap: HashMap<String, HydratedMemory> =
+            hydrated.into_iter().map(|h| (h.key.clone(), h)).collect();
+
+        ordered_keys
+            .iter()
+            .filter_map(|(key, score)| {
+                hmap.get(key).map(|h| MemoryRecord {
+                    key: key.clone(),
+                    value: h.value.clone(),
+                    score: *score,
+                    kind: h.kind,
+                    confidence: h.confidence,
+                    occurred_at: h.occurred_at,
+                    occurred_end: h.occurred_end,
+                    entities: h.entities.clone(),
+                })
+            })
+            .collect()
     }
 
     /// Store a memory: embed, then upsert to Postgres + LanceDB + tantivy.
@@ -175,44 +203,18 @@ impl HybridStore {
 
                 let scored = self.lance.search(&org_id, query_vec, top_k).await?;
                 let keys: Vec<String> = scored.iter().map(|s| s.key.clone()).collect();
-                let values = self.pg.get_by_keys(&org_id, &keys).await?;
-
-                let value_map: HashMap<String, serde_json::Value> = values.into_iter().collect();
-                let score_map: HashMap<&str, f32> =
-                    scored.iter().map(|s| (s.key.as_str(), s.score)).collect();
-
-                keys.iter()
-                    .filter_map(|k| {
-                        value_map.get(k).map(|v| MemoryRecord {
-                            key: k.clone(),
-                            value: v.clone(),
-                            score: *score_map.get(k.as_str()).unwrap_or(&0.0),
-                            ..Default::default()
-                        })
-                    })
-                    .collect()
+                let ordered: Vec<(String, f32)> = scored.into_iter().map(|s| (s.key, s.score)).collect();
+                let hydrated = self.pg.get_by_keys_hydrated(&org_id, &keys).await?;
+                Self::build_records(&ordered, hydrated)
             }
 
             SearchMode::FullText => {
                 // BM25 search via tantivy
                 let scored = self.tantivy.search(&org_id, query, &opts.scope, top_k)?;
                 let keys: Vec<String> = scored.iter().map(|s| s.key.clone()).collect();
-                let values = self.pg.get_by_keys(&org_id, &keys).await?;
-
-                let value_map: HashMap<String, serde_json::Value> = values.into_iter().collect();
-                let score_map: HashMap<&str, f32> =
-                    scored.iter().map(|s| (s.key.as_str(), s.score)).collect();
-
-                keys.iter()
-                    .filter_map(|k| {
-                        value_map.get(k).map(|v| MemoryRecord {
-                            key: k.clone(),
-                            value: v.clone(),
-                            score: *score_map.get(k.as_str()).unwrap_or(&0.0),
-                            ..Default::default()
-                        })
-                    })
-                    .collect()
+                let ordered: Vec<(String, f32)> = scored.into_iter().map(|s| (s.key, s.score)).collect();
+                let hydrated = self.pg.get_by_keys_hydrated(&org_id, &keys).await?;
+                Self::build_records(&ordered, hydrated)
             }
 
             SearchMode::Hybrid { alpha: _ } => {
@@ -244,27 +246,10 @@ impl HybridStore {
                     60,
                 );
 
-                let top_keys: Vec<String> = fused
-                    .iter()
-                    .take(top_k)
-                    .map(|(k, _)| k.clone())
-                    .collect();
-
-                let values = self.pg.get_by_keys(&org_id, &top_keys).await?;
-                let value_map: HashMap<String, serde_json::Value> = values.into_iter().collect();
-
-                fused
-                    .into_iter()
-                    .take(top_k)
-                    .filter_map(|(k, score)| {
-                        value_map.get(&k).map(|v| MemoryRecord {
-                            key: k,
-                            value: v.clone(),
-                            score,
-                            ..Default::default()
-                        })
-                    })
-                    .collect()
+                let ordered: Vec<(String, f32)> = fused.into_iter().take(top_k).collect();
+                let top_keys: Vec<String> = ordered.iter().map(|(k, _)| k.clone()).collect();
+                let hydrated = self.pg.get_by_keys_hydrated(&org_id, &top_keys).await?;
+                Self::build_records(&ordered, hydrated)
             }
 
             SearchMode::Full { graph_hops, graph_decay, recency_sigma_days } => {
@@ -374,34 +359,17 @@ impl HybridStore {
                     60,
                 );
 
-                let top_keys: Vec<String> = fused
-                    .iter()
-                    .take(top_k)
-                    .map(|(k, _)| k.clone())
-                    .collect();
-
-                let values = self.pg.get_by_keys(&org_id, &top_keys).await?;
-                let value_map: HashMap<String, serde_json::Value> = values.into_iter().collect();
-
-                fused
-                    .into_iter()
-                    .take(top_k)
-                    .filter_map(|(k, score)| {
-                        value_map.get(&k).map(|v| MemoryRecord {
-                            key: k,
-                            value: v.clone(),
-                            score,
-                            ..Default::default()
-                        })
-                    })
-                    .collect()
+                let ordered: Vec<(String, f32)> = fused.into_iter().take(top_k).collect();
+                let top_keys: Vec<String> = ordered.iter().map(|(k, _)| k.clone()).collect();
+                let hydrated = self.pg.get_by_keys_hydrated(&org_id, &top_keys).await?;
+                Self::build_records(&ordered, hydrated)
             }
         };
 
         // Apply confidence threshold: exclude opinion memories below the threshold.
         // This implements Hindsight §2.5 — low-confidence opinions are suppressed.
         let results = if let Some(threshold) = opts.confidence_threshold {
-            self.apply_confidence_filter(results, &org_id, threshold).await
+            Self::apply_confidence_filter(results, threshold)
         } else {
             results
         };
@@ -426,47 +394,16 @@ impl HybridStore {
 
     /// Filter out opinion memories with confidence below the threshold.
     ///
-    /// Queries Postgres for the confidence of each result key that is an opinion.
-    /// Non-opinion memories pass through unfiltered.
-    async fn apply_confidence_filter(
-        &self,
-        results: Vec<MemoryRecord>,
-        org_id: &uuid::Uuid,
-        threshold: f32,
-    ) -> Vec<MemoryRecord> {
-        let keys: Vec<String> = results.iter().map(|r| r.key.clone()).collect();
-        if keys.is_empty() {
-            return results;
-        }
-
-        // Fetch kind + confidence for all result keys in one query
-        let rows: Vec<(String, String, Option<f32>)> = match sqlx::query_as(
-            "SELECT key, kind::text, confidence FROM memories WHERE org_id = $1 AND key = ANY($2)",
-        )
-        .bind(org_id)
-        .bind(&keys)
-        .fetch_all(self.pg.pool())
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "confidence filter query failed, returning unfiltered");
-                return results;
-            }
-        };
-
-        let filter_map: HashMap<String, bool> = rows
-            .into_iter()
-            .map(|(key, kind, conf)| {
-                let dominated = kind == "opinion"
-                    && conf.unwrap_or(0.5) < threshold;
-                (key, dominated)
-            })
-            .collect();
-
+    /// Works in-memory using the kind and confidence fields already populated
+    /// on MemoryRecord during hydration. No additional DB query needed.
+    fn apply_confidence_filter(results: Vec<MemoryRecord>, threshold: f32) -> Vec<MemoryRecord> {
+        use gw_core::MemoryKind;
         results
             .into_iter()
-            .filter(|r| !filter_map.get(&r.key).copied().unwrap_or(false))
+            .filter(|r| {
+                r.kind != MemoryKind::Opinion
+                    || r.confidence.unwrap_or(0.5) >= threshold
+            })
             .collect()
     }
 
