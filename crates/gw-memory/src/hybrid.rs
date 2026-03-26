@@ -1,15 +1,22 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use gw_core::CallContext;
+use gw_core::{CallContext, EventData, EventPayload, EventResult, LifecycleEvent};
 
 use crate::error::MemoryError;
 use crate::fusion;
 use crate::lance::LanceStore;
 use crate::postgres::PgMemoryStore;
 use crate::tantivy_store::TantivyStore;
-use crate::{MemoryRecord, RecallOpts, SearchMode};
+use crate::{MemoryMeta, MemoryRecord, RecallOpts, SearchMode};
 use gw_llm::OllamaClient;
+
+/// Function type for dispatching lifecycle events.
+///
+/// Accepts a mutable event payload and returns an `EventResult`.
+/// Provided by `gw-engine`'s `EventDispatcher`; `gw-memory` does not
+/// depend on `gw-engine` directly to avoid circular dependencies.
+pub type DispatchFn = dyn Fn(&mut EventPayload) -> EventResult + Send + Sync;
 
 /// Hybrid memory store backed by LanceDB (vector) + tantivy (BM25) + Postgres (persistence).
 pub struct HybridStore {
@@ -17,6 +24,10 @@ pub struct HybridStore {
     lance: LanceStore,
     tantivy: TantivyStore,
     llm: Arc<OllamaClient>,
+    /// Optional event dispatcher for plugin lifecycle hooks.
+    /// When set, `BeforeMemoryStore` and `AfterMemoryRecall` events are
+    /// dispatched, allowing plugins to enrich/augment memory operations.
+    dispatcher: Option<Arc<DispatchFn>>,
 }
 
 impl HybridStore {
@@ -31,17 +42,44 @@ impl HybridStore {
             lance,
             tantivy,
             llm,
+            dispatcher: None,
         }
     }
 
+    /// Attach an event dispatcher for plugin lifecycle hooks.
+    pub fn with_dispatcher(mut self, dispatch: Arc<DispatchFn>) -> Self {
+        self.dispatcher = Some(dispatch);
+        self
+    }
+
     /// Store a memory: embed, then upsert to Postgres + LanceDB + tantivy.
-    #[tracing::instrument(name = "memory.store", skip(self, ctx, value), fields(gw.memory.key = key))]
+    #[tracing::instrument(name = "memory.store", skip(self, ctx, value, meta), fields(gw.memory.key = key))]
     pub async fn store(
         &self,
         ctx: &CallContext,
         key: &str,
         value: serde_json::Value,
+        meta: Option<MemoryMeta>,
     ) -> Result<(), MemoryError> {
+        // Dispatch BeforeMemoryStore event — plugins can enrich the value/meta.
+        let (value, meta) = if let Some(ref dispatch) = self.dispatcher {
+            let mut payload = EventPayload {
+                event: LifecycleEvent::BeforeMemoryStore,
+                data: EventData::Memory {
+                    key: key.to_string(),
+                    value: Some(value.clone()),
+                },
+            };
+            dispatch(&mut payload);
+            // Extract potentially modified value from the payload
+            match payload.data {
+                EventData::Memory { value: Some(v), .. } => (v, meta),
+                _ => (value, meta),
+            }
+        } else {
+            (value, meta)
+        };
+
         let text = match &value {
             serde_json::Value::String(s) => s.clone(),
             other => other.to_string(),
@@ -69,6 +107,7 @@ impl HybridStore {
             Some(&ctx.session_id.0),
             key,
             &value,
+            meta.as_ref(),
         );
         let lance_fut = self.lance.upsert(&org_id, key, &text, vector);
 
@@ -111,7 +150,7 @@ impl HybridStore {
         span.record("gw.memory.search_mode", tracing::field::debug(&opts.mode));
         span.record("gw.memory.top_k", top_k);
 
-        match opts.mode {
+        let results = match opts.mode {
             SearchMode::Vector => {
                 let query_vec = self
                     .llm
@@ -130,16 +169,16 @@ impl HybridStore {
                 let score_map: HashMap<&str, f32> =
                     scored.iter().map(|s| (s.key.as_str(), s.score)).collect();
 
-                Ok(keys
-                    .iter()
+                keys.iter()
                     .filter_map(|k| {
                         value_map.get(k).map(|v| MemoryRecord {
                             key: k.clone(),
                             value: v.clone(),
                             score: *score_map.get(k.as_str()).unwrap_or(&0.0),
+                            ..Default::default()
                         })
                     })
-                    .collect())
+                    .collect()
             }
 
             SearchMode::FullText => {
@@ -152,16 +191,16 @@ impl HybridStore {
                 let score_map: HashMap<&str, f32> =
                     scored.iter().map(|s| (s.key.as_str(), s.score)).collect();
 
-                Ok(keys
-                    .iter()
+                keys.iter()
                     .filter_map(|k| {
                         value_map.get(k).map(|v| MemoryRecord {
                             key: k.clone(),
                             value: v.clone(),
                             score: *score_map.get(k.as_str()).unwrap_or(&0.0),
+                            ..Default::default()
                         })
                     })
-                    .collect())
+                    .collect()
             }
 
             SearchMode::Hybrid { alpha: _ } => {
@@ -202,7 +241,7 @@ impl HybridStore {
                 let values = self.pg.get_by_keys(&org_id, &top_keys).await?;
                 let value_map: HashMap<String, serde_json::Value> = values.into_iter().collect();
 
-                Ok(fused
+                fused
                     .into_iter()
                     .take(top_k)
                     .filter_map(|(k, score)| {
@@ -210,11 +249,28 @@ impl HybridStore {
                             key: k,
                             value: v.clone(),
                             score,
+                            ..Default::default()
                         })
                     })
-                    .collect())
+                    .collect()
             }
+        };
+
+        // Dispatch AfterMemoryRecall — plugins can augment/re-score/filter results.
+        // Currently a notification; plugins that need to modify results will use
+        // the Custom EventData variant with the result set once Phase 3 plugins land.
+        if let Some(ref dispatch) = self.dispatcher {
+            let mut payload = EventPayload {
+                event: LifecycleEvent::AfterMemoryRecall,
+                data: EventData::Memory {
+                    key: query.to_string(),
+                    value: None,
+                },
+            };
+            dispatch(&mut payload);
         }
+
+        Ok(results)
     }
 
     /// Forget a memory: delete from all three stores.

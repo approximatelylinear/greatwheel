@@ -36,8 +36,10 @@ sys.path.insert(0, str(VENDOR_ROOT / "search_agent"))
 
 from utils import extract_retrieved_docids_from_result
 
-# Local searcher implementations (not in BrowseComp-Plus)
+# Local imports
 BENCH_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(BENCH_DIR))
+from fact_registry import FactRegistry
 LOCAL_SEARCHERS = {"bm25s", "lancedb-local"}  # names we handle ourselves
 
 
@@ -62,14 +64,30 @@ Your REPL has these built-in functions:
 - search(query) -> list of {docid, score, snippet} dicts. BM25 keyword search — use 2-4 specific terms.
 - get_document(docid) -> full document text as string
 - llm_query(prompt) -> ask a sub-LLM to analyze text (useful for long documents)
+- facts — a FactRegistry for structured evidence tracking (see below)
+
+FACT TRACKING:
+Use `facts` to organize evidence and track candidate answers. This prevents losing findings across iterations.
+
+  facts.add(text, source="docid")          — Record extracted facts (auto-extracts entities)
+  facts.propose("answer", confidence=0.7, evidence="reason")  — Propose a candidate answer
+  facts.reinforce("answer", evidence="new evidence")   — Strengthen a candidate (+0.15)
+  facts.contradict("answer", reason="why")             — Weaken a candidate (-0.25)
+  facts.summary()          — View all facts grouped by entity
+  facts.candidates()       — View ranked candidates by confidence
+  facts.best_candidate()   — Get (answer, confidence) of top candidate
+  facts.for_entity("Name") — All facts mentioning an entity
+  facts.entities()         — All discovered entities by frequency
 
 STRATEGY FOR MULTI-HOP QUESTIONS:
 1. Identify the most distinctive clues (specific dates, places, events, organizations)
 2. Search for those clues with SHORT keyword queries (2-4 terms)
 3. Read promising documents with get_document()
-4. Use llm_query() to analyze long documents: e.g. llm_query(f"Who is mentioned in this document? {doc[:5000]}")
-5. Use discovered names/facts to search again
-6. Chain your findings until you can answer
+4. Use llm_query() to extract facts, then store them: facts.add(extracted, source=docid)
+5. Propose candidate answers: facts.propose("candidate", evidence="from doc X")
+6. Search for discovered entities to find more evidence
+7. Reinforce or contradict candidates as you find more evidence
+8. When confident, submit your best candidate
 
 Example:
 ```python
@@ -80,17 +98,30 @@ for r in results:
 ```
 Then:
 ```python
-# Step 2: Read a promising document
+# Step 2: Read and extract facts
 doc = get_document("12345")
-answer = llm_query(f"What person is described in this article? {doc[:5000]}")
-print(answer)
+extracted = llm_query(f"Extract all relevant facts: {doc[:5000]}")
+facts.add(extracted, source="12345")
+print(facts.summary())
 ```
 Then:
 ```python
-# Step 3: Search for the discovered person
-results = search("Jane Smith Michigan convent")
+# Step 3: Propose a candidate and search for confirmation
+facts.propose("Sister Mary Joseph", confidence=0.6, evidence="doc 12345 mentions her founding the convent")
+results = search("Sister Mary Joseph Michigan")
 for r in results:
-    print(r['docid'], r['snippet'][:200])
+    doc = get_document(r['docid'])
+    extracted = llm_query(f"Does this confirm Sister Mary Joseph founded the convent? {doc[:5000]}")
+    facts.add(extracted, source=r['docid'])
+    if "confirm" in extracted.lower():
+        facts.reinforce("Sister Mary Joseph", evidence=f"confirmed in {r['docid']}")
+print(facts.candidates())
+```
+Then:
+```python
+# Step 4: Submit best candidate
+best = facts.best_candidate()
+print(f"Best: {best}")
 ```
 
 When you have enough evidence, provide your answer as:
@@ -98,7 +129,7 @@ Exact Answer: <precise answer>"""
 
 QUERY_TEMPLATE = """Question: {question}
 
-Search the corpus step by step. Use short keyword queries. Read full documents. Use llm_query() to analyze long text.
+Search the corpus step by step. Use short keyword queries. Read full documents. Use llm_query() to extract facts into `facts.add()`. Track candidates with `facts.propose()`.
 When done: Exact Answer: <answer>"""
 
 # --------------------------------------------------------------------------- #
@@ -170,7 +201,7 @@ PYTHON_TOOL = {
 
 
 class OllamaAgent:
-    """Agent that uses Ollama for reasoning and a BrowseComp-Plus searcher for retrieval."""
+    """Agent that uses Ollama or SGLang for reasoning and a BrowseComp-Plus searcher for retrieval."""
 
     def __init__(
         self,
@@ -181,6 +212,7 @@ class OllamaAgent:
         max_turns: int = 10,
         include_get_document: bool = False,
         snippet_max_chars: int = 2000,
+        backend: str = "ollama",
     ):
         self.ollama_url = ollama_url.rstrip("/")
         self.model = model
@@ -189,9 +221,23 @@ class OllamaAgent:
         self.max_turns = max_turns
         self.include_get_document = include_get_document
         self.snippet_max_chars = snippet_max_chars
+        self.backend = backend
 
     def _chat(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
-        """Send a chat request to Ollama and return the response."""
+        """Send a chat request and return a normalized response.
+
+        Returns a dict with:
+          - message.content (str)
+          - prompt_eval_count (int) — input tokens
+          - eval_count (int) — output tokens
+        Regardless of backend, the response shape is normalized to this format.
+        """
+        if self.backend == "sglang":
+            return self._chat_openai(messages, tools)
+        return self._chat_ollama(messages, tools)
+
+    def _chat_ollama(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
+        """Send a chat request via Ollama's native /api/chat endpoint."""
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -207,6 +253,35 @@ class OllamaAgent:
         )
         resp.raise_for_status()
         return resp.json()
+
+    def _chat_openai(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
+        """Send a chat request via OpenAI-compatible /v1/chat/completions (SGLang/vLLM)."""
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+        }
+        if tools:
+            payload["tools"] = tools
+
+        resp = requests.post(
+            f"{self.ollama_url}/v1/chat/completions",
+            json=payload,
+            timeout=300,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        # Normalize to Ollama-style response shape
+        usage = data.get("usage", {})
+        content = ""
+        if data.get("choices"):
+            content = data["choices"][0].get("message", {}).get("content", "")
+        return {
+            "message": {"role": "assistant", "content": content},
+            "prompt_eval_count": usage.get("prompt_tokens", 0),
+            "eval_count": usage.get("completion_tokens", 0),
+        }
 
     def _execute_tool(self, name: str, arguments: dict, repl_namespace: dict | None = None, context: dict | None = None, tool_counts: dict | None = None) -> str:
         """Execute a tool call against the searcher and return JSON string result."""
@@ -265,17 +340,34 @@ class OllamaAgent:
         def llm_query(prompt: str) -> str:
             """Query a sub-LLM to analyze text. Useful for extracting info from long documents."""
             try:
-                resp = requests.post(
-                    f"{self.ollama_url}/api/chat",
-                    json={
-                        "model": self.model,
-                        "messages": [{"role": "user", "content": prompt[:8000]}],
-                        "stream": False,
-                    },
-                    timeout=60,
-                )
-                resp.raise_for_status()
-                return resp.json().get("message", {}).get("content", "")
+                messages = [{"role": "user", "content": prompt[:8000]}]
+                if self.backend == "sglang":
+                    resp = requests.post(
+                        f"{self.ollama_url}/v1/chat/completions",
+                        json={
+                            "model": self.model,
+                            "messages": messages,
+                            "stream": False,
+                        },
+                        timeout=60,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    if data.get("choices"):
+                        return data["choices"][0].get("message", {}).get("content", "")
+                    return ""
+                else:
+                    resp = requests.post(
+                        f"{self.ollama_url}/api/chat",
+                        json={
+                            "model": self.model,
+                            "messages": messages,
+                            "stream": False,
+                        },
+                        timeout=60,
+                    )
+                    resp.raise_for_status()
+                    return resp.json().get("message", {}).get("content", "")
             except Exception as e:
                 return f"Error: {e}"
 
@@ -283,6 +375,7 @@ class OllamaAgent:
             "search": search,
             "get_document": get_document,
             "llm_query": llm_query,
+            "facts": FactRegistry(),
             "search_results": context["search_results"],
             "documents": context["documents"],
             "re": re,
@@ -414,7 +507,8 @@ class OllamaAgent:
         record = {
             "metadata": {
                 "model": self.model,
-                "ollama_url": self.ollama_url,
+                "backend": self.backend,
+                "llm_url": self.ollama_url,
                 "searcher_type": self.searcher.search_type,
                 "max_turns": self.max_turns,
                 "k": self.k,
@@ -498,10 +592,23 @@ def process_tsv(agent: OllamaAgent, tsv_path: Path, output_dir: Path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Greatwheel BrowseComp-Plus agent client (Ollama)"
+        description="Greatwheel BrowseComp-Plus agent client (Ollama/SGLang)"
     )
 
     # Agent config
+    parser.add_argument(
+        "--backend",
+        choices=["ollama", "sglang"],
+        default=os.getenv("GW_LLM_BACKEND", "ollama"),
+        help="LLM backend: ollama (native API) or sglang (OpenAI-compatible). "
+             "(default: $GW_LLM_BACKEND or ollama)",
+    )
+    parser.add_argument(
+        "--llm-url",
+        default=None,
+        help="LLM server URL. Overrides --ollama-url. "
+             "(default: $GW_LLM_URL or backend-specific default)",
+    )
     parser.add_argument(
         "--ollama-url",
         default=os.getenv("OLLAMA_URL", "http://localhost:11434"),
@@ -510,7 +617,7 @@ def main():
     parser.add_argument(
         "--model",
         default=os.getenv("GW_MODEL", "qwen2.5:7b"),
-        help="Ollama model name (default: $GW_MODEL or qwen2.5:7b)",
+        help="Model name (default: $GW_MODEL or qwen2.5:7b)",
     )
     parser.add_argument(
         "--max-turns",
@@ -575,17 +682,26 @@ def main():
     searcher = searcher_class(args)
     print(f"Searcher ready ({searcher.search_type})")
 
+    # Resolve LLM URL: --llm-url > $GW_LLM_URL > --ollama-url (with backend-specific default)
+    llm_url = args.llm_url or os.getenv("GW_LLM_URL")
+    if not llm_url:
+        if args.backend == "sglang":
+            llm_url = os.getenv("SGLANG_URL", "http://localhost:30000")
+        else:
+            llm_url = args.ollama_url
+
     # Initialize agent
     agent = OllamaAgent(
-        ollama_url=args.ollama_url,
+        ollama_url=llm_url,
         model=args.model,
         searcher=searcher,
         k=args.k,
         max_turns=args.max_turns,
         include_get_document=args.include_get_document,
         snippet_max_chars=args.snippet_max_chars,
+        backend=args.backend,
     )
-    print(f"Agent ready (model={args.model}, max_turns={args.max_turns}, k={args.k})")
+    print(f"Agent ready (backend={args.backend}, model={args.model}, url={llm_url}, max_turns={args.max_turns}, k={args.k})")
 
     # Resolve output dir relative to BrowseComp-Plus vendor dir for evaluation compat
     output_dir = Path(args.output_dir)

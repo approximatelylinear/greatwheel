@@ -812,6 +812,182 @@ impl HostBridge for BrowseCompBridge {
 }
 
 // -------------------------------------------------------------------------- //
+// FactRegistry — injected into ouros REPL before the rLM loop starts
+// -------------------------------------------------------------------------- //
+
+const FACT_REGISTRY_BOOTSTRAP: &str = r#"
+import re as _re
+
+_REINFORCE_ALPHA = 0.15
+_CONTRADICT_ALPHA = 0.25
+_WEAKEN_ALPHA = 0.10
+
+def _extract_entities(text):
+    entities = []
+    for m in _re.finditer(r'"([^"]{2,60})"', text):
+        entities.append(m.group(1).strip())
+    for m in _re.finditer(r'\b([A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|of|the|and|de|von|van|le|la|del|al))+)\b', text):
+        phrase = m.group(1).strip()
+        if len(phrase) > 3 and phrase not in ("The", "This", "That", "These", "Those"):
+            entities.append(phrase)
+    for m in _re.finditer(r'(?<=[a-z,;:]\s)([A-Z][a-z]{2,})\b', text):
+        word = m.group(1)
+        if word not in ("The","This","That","However","Also","Additionally","Furthermore","Moreover","Therefore","Because","Although"):
+            entities.append(word)
+    for m in _re.finditer(r'\b(1[5-9]\d{2}|20[0-2]\d)\b', text):
+        entities.append(m.group(1))
+    seen = set()
+    unique = []
+    for e in entities:
+        key = e.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(e)
+    return unique
+
+def _normalize_answer(a):
+    return _re.sub(r'\s+', ' ', a.strip().lower())
+
+class FactRegistry:
+    def __init__(self):
+        self._facts = []
+        self._candidates = []
+        self._entity_index = {}
+        self._iteration = 0
+
+    def set_iteration(self, n):
+        self._iteration = n
+
+    def add(self, text, source="", kind="fact"):
+        lines = [ln.strip().lstrip("*-\u2022").strip() for ln in str(text).strip().split("\n") if ln.strip()]
+        added = 0
+        for line in lines:
+            if len(line) < 5:
+                continue
+            entities = _extract_entities(line)
+            idx = len(self._facts)
+            self._facts.append({"text": line, "source": source, "kind": kind, "entities": entities, "iteration": self._iteration})
+            for ent in entities:
+                self._entity_index.setdefault(ent.lower(), []).append(idx)
+            added += 1
+        return f"Added {added} fact(s) from {source or 'unknown'}. Total: {len(self._facts)} facts."
+
+    def for_entity(self, entity):
+        indices = self._entity_index.get(entity.lower(), [])
+        return [f"[{self._facts[i]['source']}] {self._facts[i]['text']}" for i in indices]
+
+    def entities(self):
+        counts = {}
+        canonical = {}
+        for f in self._facts:
+            for ent in f["entities"]:
+                key = ent.lower()
+                counts[key] = counts.get(key, 0) + 1
+                if key not in canonical:
+                    canonical[key] = ent
+        return [canonical[k] for k, _ in sorted(counts.items(), key=lambda x: -x[1])]
+
+    def propose(self, answer, confidence=0.5, evidence=""):
+        norm = _normalize_answer(answer)
+        for c in self._candidates:
+            if _normalize_answer(c["answer"]) == norm:
+                c["confidence"] = max(c["confidence"], confidence)
+                if evidence:
+                    c["evidence"].append(evidence)
+                return f"Updated '{c['answer']}' -> confidence {c['confidence']:.2f} ({len(c['evidence'])} evidence)"
+        cand = {"answer": answer.strip(), "confidence": min(max(confidence, 0.0), 1.0), "evidence": [evidence] if evidence else [], "iteration": self._iteration}
+        self._candidates.append(cand)
+        return f"Proposed '{cand['answer']}' with confidence {cand['confidence']:.2f}"
+
+    def reinforce(self, answer, evidence=""):
+        norm = _normalize_answer(answer)
+        for c in self._candidates:
+            if _normalize_answer(c["answer"]) == norm:
+                c["confidence"] = min(c["confidence"] + _REINFORCE_ALPHA, 1.0)
+                if evidence:
+                    c["evidence"].append(evidence)
+                return f"Reinforced '{c['answer']}' -> {c['confidence']:.2f}"
+        return self.propose(answer, confidence=0.5 + _REINFORCE_ALPHA, evidence=evidence)
+
+    def contradict(self, answer, reason=""):
+        norm = _normalize_answer(answer)
+        for c in self._candidates:
+            if _normalize_answer(c["answer"]) == norm:
+                c["confidence"] = max(c["confidence"] - _CONTRADICT_ALPHA, 0.0)
+                if reason:
+                    c["evidence"].append(f"[CONTRADICTED] {reason}")
+                return f"Contradicted '{c['answer']}' -> {c['confidence']:.2f}"
+        return f"No candidate '{answer}' found to contradict."
+
+    def weaken(self, answer, reason=""):
+        norm = _normalize_answer(answer)
+        for c in self._candidates:
+            if _normalize_answer(c["answer"]) == norm:
+                c["confidence"] = max(c["confidence"] - _WEAKEN_ALPHA, 0.0)
+                if reason:
+                    c["evidence"].append(f"[WEAKENED] {reason}")
+                return f"Weakened '{c['answer']}' -> {c['confidence']:.2f}"
+        return f"No candidate '{answer}' found to weaken."
+
+    def candidates(self):
+        if not self._candidates:
+            return "No candidates proposed yet."
+        sc = sorted(self._candidates, key=lambda c: -c["confidence"])
+        lines = ["Candidate answers (ranked by confidence):"]
+        for i, c in enumerate(sc):
+            m = "->" if i == 0 else "  "
+            lines.append(f"  {m} {c['answer']} (confidence: {c['confidence']:.2f}, evidence: {len(c['evidence'])} items)")
+        return "\n".join(lines)
+
+    def best_candidate(self):
+        if not self._candidates:
+            return None
+        best = max(self._candidates, key=lambda c: c["confidence"])
+        return (best["answer"], best["confidence"])
+
+    def summary(self):
+        if not self._facts:
+            return "No facts collected yet."
+        lines = [f"=== Fact Summary ({len(self._facts)} facts, {len(self._entity_index)} entities) ===\n"]
+        top_ents = self.entities()[:10]
+        shown = set()
+        for ent in top_ents:
+            indices = self._entity_index.get(ent.lower(), [])
+            if not indices:
+                continue
+            lines.append(f"[{ent}]")
+            for idx in indices[:5]:
+                f = self._facts[idx]
+                lines.append(f"  * {f['text']} (from {f['source']})")
+                shown.add(idx)
+            if len(indices) > 5:
+                lines.append(f"  ... and {len(indices) - 5} more")
+            lines.append("")
+        ungrouped = [i for i in range(len(self._facts)) if i not in shown]
+        if ungrouped:
+            lines.append("[Other facts]")
+            for idx in ungrouped[:10]:
+                f = self._facts[idx]
+                lines.append(f"  * {f['text']} (from {f['source']})")
+            if len(ungrouped) > 10:
+                lines.append(f"  ... and {len(ungrouped) - 10} more")
+        if self._candidates:
+            lines.append("")
+            lines.append(self.candidates())
+        return "\n".join(lines)
+
+    def __repr__(self):
+        n = len(self._facts)
+        nc = len(self._candidates)
+        ne = len(self._entity_index)
+        best = self.best_candidate()
+        bs = f", best='{best[0]}' ({best[1]:.2f})" if best else ""
+        return f"FactRegistry({n} facts, {ne} entities, {nc} candidates{bs})"
+
+facts = FactRegistry()
+"#;
+
+// -------------------------------------------------------------------------- //
 // rLM System Prompt & Iteration Prompts
 // -------------------------------------------------------------------------- //
 
@@ -825,8 +1001,20 @@ TOOLS AVAILABLE:
 - `get_document(docid)` — retrieve full document text. ALWAYS READ FULL DOCUMENTS before answering.
 - `llm_query(prompt)` — sub-LLM analysis (~10K char context). YOUR MOST POWERFUL TOOL for extracting specific facts.
 - `batch_llm_query([p1, p2, ...])` — parallel LLM queries (use to analyze multiple docs at once)
+- `facts` — FactRegistry for structured evidence tracking (see FACT TRACKING below)
 - `print()` — view output to continue reasoning
 - `FINAL("answer")` — submit your final answer. Answer must be a precise name, number, date, or short phrase.
+
+FACT TRACKING (use `facts` to organize evidence and track candidates):
+  facts.add(text, source="docid")          — Record extracted facts (auto-extracts entities)
+  facts.propose("answer", confidence=0.7, evidence="reason")  — Propose a candidate answer
+  facts.reinforce("answer", evidence="new supporting evidence")  — Strengthen a candidate (+0.15)
+  facts.contradict("answer", reason="why wrong")  — Weaken a candidate (-0.25)
+  facts.summary()          — View all facts grouped by entity
+  facts.candidates()       — View ranked candidates by confidence
+  facts.best_candidate()   — Get (answer, confidence) of top candidate
+  facts.for_entity("Name") — All facts mentioning an entity
+  facts.entities()         — All discovered entities sorted by frequency
 
 Write Python code in ```repl``` blocks. Variables persist between blocks.
 
@@ -835,14 +1023,21 @@ CRITICAL: The answer MUST come from the documents, not from your own knowledge. 
 WORKFLOW (follow this order):
 1. EXPLORE — examine context snippets. Identify 3+ promising documents.
 2. READ — use get_document() to load the full text of promising documents. Snippets are NOT enough.
-3. EXTRACT — use llm_query() to extract specific facts from each document:
-   llm_query(f"Question: {question}\n\nRead this document and extract any facts relevant to answering the question. Quote exact names, dates, and numbers.\n\nDocument:\n{doc[:8000]}")
-4. SEARCH MORE — if you haven't found the answer, search with COMPLETELY DIFFERENT keywords. Try:
-   - Specific names/entities found in documents you read
+3. EXTRACT — use llm_query() to extract specific facts, then store them:
+   extracted = llm_query(f"Question: {question}\n\nRead this document and extract any facts relevant to answering the question. Quote exact names, dates, and numbers.\n\nDocument:\n{doc[:8000]}")
+   facts.add(extracted, source=docid)
+4. PROPOSE — when you find a plausible answer, register it:
+   facts.propose("candidate answer", confidence=0.6, evidence="found in docid")
+5. SEARCH MORE — if you haven't found the answer, search with COMPLETELY DIFFERENT keywords. Try:
+   - Entities from facts.entities() — discovered names, dates, places
    - Synonyms and alternate phrasings
    - Dates, numbers, locations mentioned in the query
-5. VERIFY — search for your candidate answer BY NAME to find confirming documents. The answer must appear in at least one document.
-6. SUBMIT — call FINAL("answer") with a precise name, number, date, or short phrase.
+6. VERIFY — search for your candidate answer BY NAME. Reinforce or contradict:
+   facts.reinforce("candidate", evidence="confirmed in doc X")
+   facts.contradict("candidate", reason="doc Y says otherwise")
+7. SUBMIT — call FINAL() with your best candidate:
+   best = facts.best_candidate()
+   FINAL(best[0] if best else "your answer")
 
 SEARCH STRATEGY:
 - BM25 search matches keywords. Use 2-5 distinctive nouns, names, or numbers.
@@ -862,34 +1057,44 @@ for i, h in enumerate(context[:8]):
     print(f"{i}: {h['docid']} — {h['snippet'][:150]}")
 ```
 ```repl
-# Step 2: Read top documents in parallel with batch_llm_query
+# Step 2: Read top documents and extract facts
 docs = [get_document(context[i]["docid"]) for i in [0, 2, 4]]
+docids = [context[i]["docid"] for i in [0, 2, 4]]
 prompts = [f"Question: {question}\n\nExtract ALL facts relevant to this question. Quote exact names, dates, numbers.\n\nDocument:\n{d[:8000]}" for d in docs]
 evidence = batch_llm_query(prompts)
 for i, e in enumerate(evidence):
+    facts.add(e, source=docids[i])
     print(f"=== Doc {i} ===\n{e}\n")
+# Propose candidate if we found one
+facts.propose("discovered answer", confidence=0.6, evidence=f"found in {docids[0]}")
 ```
 ```repl
 # Step 3: Search for entities discovered in the documents
-hits2 = search("discovered person name")
-for h in hits2[:3]:
-    doc = get_document(h["docid"])
-    print(h["docid"], doc[:500])
+top_entities = facts.entities()[:3]
+for ent in top_entities:
+    hits2 = search(ent)
+    for h in hits2[:2]:
+        doc = get_document(h["docid"])
+        extracted = llm_query(f"Question: {question}\n\nExtract relevant facts.\n\nDocument:\n{doc[:8000]}")
+        facts.add(extracted, source=h["docid"])
+print(facts.summary())
 ```
 ```repl
-# Step 4: Verify candidate answer appears in a document
-verify = llm_query(f"Does this document confirm that [candidate] answers: {question}?\n\nDocument:\n{doc[:8000]}")
-print(verify)
-FINAL("verified answer")
+# Step 4: Verify and submit best candidate
+print(facts.candidates())
+best = facts.best_candidate()
+if best:
+    FINAL(best[0])
 ```
 
 RULES:
 - NEVER answer "Unable to determine". Always give your BEST GUESS from the documents.
 - NEVER repeat a search query. Each search must use different keywords.
 - ALWAYS read at least 2 full documents before submitting an answer.
-- Store evidence in variables; don't repeat work.
+- ALWAYS use facts.add() to store extracted evidence — don't lose findings in ad-hoc variables.
+- ALWAYS use facts.propose() when you find a plausible answer. Use facts.reinforce()/contradict() as evidence accumulates.
 - You MUST call FINAL("answer") before running out of iterations. A wrong answer is better than no answer.
-- After iteration 4, you should have a candidate. Call FINAL() as soon as you do.
+- After iteration 4, you should have a candidate. Use facts.best_candidate() and call FINAL().
 
 /no_think"#;
 
@@ -912,17 +1117,18 @@ pub(crate) fn iteration_prompt(query: &str, iteration: usize, max_iterations: us
             format!("\n\nVariables in scope:\n{variables_info}\n")
         };
         let nudge = if iteration >= max_iterations - 2 {
-            "\n⚠️ LAST CHANCE — you MUST call FINAL(\"answer\") in this code block. \
-             Pick your best candidate from the evidence so far. Do NOT search again. \
-             Do NOT say unable to determine. Submit your best guess NOW with FINAL()."
+            "\n⚠️ LAST CHANCE — you MUST call FINAL() in this code block. \
+             Check facts.best_candidate() and submit it. Do NOT search again. \
+             Do NOT say unable to determine. Submit NOW:\n\
+             best = facts.best_candidate()\n\
+             FINAL(best[0] if best else \"your best guess\")"
         } else if iteration >= max_iterations / 2 {
-            "\n⚠️ HALFWAY — you should have a candidate answer by now. \
-             If you do, call FINAL(\"answer\") immediately. \
+            "\n⚠️ HALFWAY — check facts.candidates(). If you have a candidate, call FINAL() now. \
              If not, do ONE more targeted search, then FINAL() in the next iteration. \
              Do NOT waste iterations — submit as soon as you have any plausible answer."
         } else if iteration >= 3 {
-            "\nREMINDER: Each iteration is expensive. If you've found a plausible answer, \
-             call FINAL(\"answer\") now. Don't over-research — a good guess beats no answer."
+            "\nREMINDER: Each iteration is expensive. Check facts.candidates(). \
+             If you have a plausible answer, call FINAL() now. A good guess beats no answer."
         } else {
             ""
         };
@@ -948,9 +1154,10 @@ pub(crate) fn final_prompt(query: &str, variables_info: &str) -> String {
          {vars_section}\n\
          Write ONLY this:\n\
          ```repl\n\
-         FINAL(\"your best answer\")\n\
+         best = facts.best_candidate()\n\
+         FINAL(best[0] if best else \"your best guess\")\n\
          ```\n\
-         Replace \"your best answer\" with a specific name, number, date, or short phrase. \
+         If facts has no candidates, replace with a specific name, number, date, or short phrase. \
          NEVER say unable to determine. Give your BEST GUESS."
     )
 }
@@ -1819,10 +2026,24 @@ fn run_rlm_loop(
         }
     }
 
-    // Max iterations reached — try fallback extraction (DSPy-style extract_sig)
+    // Max iterations reached — first try facts.best_candidate(), then LLM fallback
     info!("Max iterations reached, attempting fallback extraction");
-    let (fallback_answer, fb_input, fb_output) =
-        fallback_extract(llm, model, query, &messages, rt);
+
+    // Try extracting the best candidate from the FactRegistry
+    let facts_answer = match agent.execute("_bc = facts.best_candidate()\nif _bc:\n    print(_bc[0])") {
+        Ok(result) if !result.stdout.trim().is_empty() && !is_refusal_answer(result.stdout.trim()) => {
+            let ans = result.stdout.trim().to_string();
+            info!(answer = ans.as_str(), "FactRegistry fallback candidate");
+            Some(ans)
+        }
+        _ => None,
+    };
+
+    let (fallback_answer, fb_input, fb_output) = if facts_answer.is_some() {
+        (facts_answer, 0, 0)
+    } else {
+        fallback_extract(llm, model, query, &messages, rt)
+    };
     total_input += fb_input;
     total_output += fb_output;
 
@@ -2084,6 +2305,11 @@ fn run_single_query(
     agent.set_variable("context", context_obj).ok();
     agent.set_variable("answer_type", Object::String(answer_type.clone())).ok();
 
+    // Bootstrap FactRegistry into the REPL namespace
+    if let Err(e) = agent.execute(FACT_REGISTRY_BOOTSTRAP) {
+        warn!(error = %e, "Failed to bootstrap FactRegistry");
+    }
+
     let rlm_start = std::time::Instant::now();
     let rlm_result = if cli.use_conv_loop {
         // Use ConversationLoop-based runner.
@@ -2115,6 +2341,9 @@ fn run_single_query(
         agent2.set_variable("context", context_obj2).ok();
         agent2.set_variable("question", Object::String(query_text.to_string())).ok();
         agent2.set_variable("answer_type", Object::String(answer_type.clone())).ok();
+        if let Err(e) = agent2.execute(FACT_REGISTRY_BOOTSTRAP) {
+            warn!(error = %e, "Failed to bootstrap FactRegistry (conv_loop)");
+        }
         conv_loop_runner::run_rlm_loop_v2_with_agent(
             llm, &cli.model, agent2, query_text, cli.max_turns, rt, &context_text, bench_config,
         )

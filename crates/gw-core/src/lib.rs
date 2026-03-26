@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -114,4 +113,39 @@ pub struct CallContext {
 pub struct RateLimitConfig {
     pub soft_token_limit: Option<u64>,
     pub hard_token_limit: Option<u64>,
+}
+
+/// Hindsight-inspired memory classification.
+///
+/// Distinguishes objective facts from agent experiences, subjective opinions,
+/// and synthesized observations.  See `docs/design-hindsight-memory.md` §2.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MemoryKind {
+    /// Objective facts about the external world.
+    Fact,
+    /// Agent's own biographical history (first-person).
+    Experience,
+    /// Subjective beliefs with confidence scores.
+    Opinion,
+    /// Preference-neutral entity summaries synthesized from facts.
+    Observation,
+}
+
+impl Default for MemoryKind {
+    fn default() -> Self {
+        Self::Fact
+    }
+}
+
+/// Edge type in the memory graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MemoryEdgeKind {
+    /// Shared canonical entity between two memories.
+    Entity,
+    /// Temporal proximity (weighted by time distance).
+    Temporal,
+    /// Semantic similarity above threshold.
+    Semantic,
+    /// Explicit cause-effect relationship.
+    Causal,
 }

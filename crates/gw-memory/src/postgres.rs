@@ -1,9 +1,10 @@
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::MemoryError;
 use crate::fusion::ScoredKey;
-use crate::MemoryScope;
+use crate::{MemoryMeta, MemoryScope};
 
 /// Postgres-backed full-text search store.
 pub struct PgMemoryStore {
@@ -32,19 +33,41 @@ impl PgMemoryStore {
         session_id: Option<&Uuid>,
         key: &str,
         value: &serde_json::Value,
+        meta: Option<&MemoryMeta>,
     ) -> Result<(), MemoryError> {
         let text_content = Self::flatten_value(value);
 
+        // Extract metadata fields (default to Fact with no extras)
+        let kind_str = meta.map(|m| match m.kind {
+            gw_core::MemoryKind::Fact => "fact",
+            gw_core::MemoryKind::Experience => "experience",
+            gw_core::MemoryKind::Opinion => "opinion",
+            gw_core::MemoryKind::Observation => "observation",
+        }).unwrap_or("fact");
+        let confidence: Option<f32> = meta.and_then(|m| m.confidence);
+        let occurred_at: Option<DateTime<Utc>> = meta.and_then(|m| m.occurred_at);
+        let occurred_end: Option<DateTime<Utc>> = meta.and_then(|m| m.occurred_end);
+        let entities: Option<&[String]> = meta
+            .map(|m| m.entities.as_slice())
+            .filter(|e| !e.is_empty());
+
         sqlx::query(
             r#"
-            INSERT INTO memories (org_id, user_id, agent_id, session_id, key, value, text_content)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO memories (org_id, user_id, agent_id, session_id, key, value, text_content,
+                                  kind, confidence, occurred_at, occurred_end, entities)
+            VALUES ($1, $2, $3, $4, $5, $6, $7,
+                    $8::memory_kind, $9, $10, $11, $12)
             ON CONFLICT (org_id, key) DO UPDATE SET
                 value = EXCLUDED.value,
                 text_content = EXCLUDED.text_content,
                 user_id = EXCLUDED.user_id,
                 agent_id = EXCLUDED.agent_id,
                 session_id = EXCLUDED.session_id,
+                kind = EXCLUDED.kind,
+                confidence = EXCLUDED.confidence,
+                occurred_at = EXCLUDED.occurred_at,
+                occurred_end = EXCLUDED.occurred_end,
+                entities = EXCLUDED.entities,
                 updated_at = now()
             "#,
         )
@@ -55,6 +78,11 @@ impl PgMemoryStore {
         .bind(key)
         .bind(value)
         .bind(&text_content)
+        .bind(kind_str)
+        .bind(confidence)
+        .bind(occurred_at)
+        .bind(occurred_end)
+        .bind(entities)
         .execute(&self.pool)
         .await?;
 
