@@ -1,11 +1,36 @@
 # Design: Plugin & Lifecycle Framework
 
-**Status:** Proposal
+**Status:** In progress (Phases 1-2 implemented)
 **Date:** 2026-03-26
 
 ---
 
-## 0. Motivation
+## 0. Implementation Status
+
+Phases 1 and 2 from the implementation plan are complete. The foundational
+types and engine crate are implemented and wired into the server.
+
+| Component | Status | Location |
+|-----------|--------|----------|
+| `Plugin` trait (sync) | Done | `gw-core/src/plugin.rs` |
+| `PluginManifest` | Done | `gw-core/src/plugin.rs` |
+| `PluginContext` | Partial | `gw-core/src/plugin.rs` — `on()`, `register_host_fn()`, `provide()` implemented; `register_llm_backend()`, `register_memory_store()`, `register_channel()`, `register_bus()`, `register_routes()` deferred to Phase 3 |
+| `LifecycleEvent` (23 variants) | Done | `gw-core/src/plugin.rs` |
+| `EventData` (typed enum) | Done | `gw-core/src/plugin.rs` |
+| `SharedState` | Done | `gw-core/src/plugin.rs` |
+| `AgentBus` trait | Done (migrated) | `gw-core/src/agent_bus.rs` |
+| `ChannelAdapter` trait | Done (migrated) | `gw-core/src/channel.rs` |
+| `PluginRegistry` | Done | `gw-engine/src/registry.rs` |
+| `EventDispatcher` | Done | `gw-engine/src/dispatcher.rs` |
+| `HostFnRouter` | Done | `gw-engine/src/host_fn_router.rs` |
+| `GreatWheelEngine` | Done | `gw-engine/src/engine.rs` |
+| Server integration | Done | `gw-server/src/main.rs` — init, lifecycle events, shutdown |
+| Built-in plugins (Ollama, HybridStore, OTel) | Not started | Phase 3 |
+| Event dispatch in `ConversationLoop` | Not started | Phase 4 |
+
+---
+
+## 0b. Motivation
 
 Greatwheel is currently a single integrated system — every component (LLM,
 memory, channels, tracing) is wired together in `gw-server/main.rs`. This
@@ -53,7 +78,6 @@ A plugin is a struct implementing one trait in `gw-core`:
 ```rust
 // gw-core/src/plugin.rs
 
-#[async_trait]
 pub trait Plugin: Send + Sync + 'static {
     /// Unique name (e.g., "slack-channel", "pinecone-memory")
     fn name(&self) -> &str;
@@ -65,12 +89,18 @@ pub trait Plugin: Send + Sync + 'static {
     fn manifest(&self) -> PluginManifest { PluginManifest::default() }
 
     /// Called once at startup. Register capabilities via ctx.
-    async fn init(&self, ctx: &mut PluginContext) -> Result<(), PluginError>;
+    fn init(&self, ctx: &mut PluginContext) -> Result<(), PluginError>;
 
     /// Called on graceful shutdown. Flush state, close connections.
-    async fn shutdown(&self) -> Result<(), PluginError> { Ok(()) }
+    fn shutdown(&self) -> Result<(), PluginError> { Ok(()) }
 }
 ```
+
+> **Note:** `init` and `shutdown` are sync. This was a deliberate decision —
+> most plugins only inspect config and register handlers during init, which
+> doesn't require async. An `async` variant (`init_async`) will be added
+> when needed (e.g., for plugins that must connect to external services
+> during startup).
 
 This is deliberately minimal. A plugin doesn't need to implement every
 subsystem — it registers only what it provides.
@@ -104,17 +134,29 @@ During `init`, the plugin receives a mutable context to register capabilities:
 ```rust
 pub struct PluginContext<'a> {
     /// This plugin's config section from TOML (e.g., [plugins.slack])
-    pub config: &'a toml::Value,
+    pub config: &'a Value,
 
-    /// Shared state from previously-initialized plugins
-    pub shared: &'a SharedState,
+    /// Shared state — readable and writable. Plugins initialized earlier
+    /// have already inserted their values.
+    pub shared: &'a mut SharedState,
 
-    // Private — registration methods below
-    registry: &'a mut PluginRegistry,
+    /// Collected registrations (internal).
+    pub(crate) registrations: &'a mut PluginRegistrations,
 }
 
 impl<'a> PluginContext<'a> {
-    // --- Subsystem registration ---
+    // --- Implemented ---
+
+    /// Register a host function callable from the Python REPL.
+    pub fn register_host_fn(&mut self, name: &str, handler: HostFnHandler);    // ✓
+
+    /// Subscribe to a lifecycle event.
+    pub fn on(&mut self, event: LifecycleEvent, handler: EventHandler);         // ✓
+
+    /// Expose a value for downstream plugins to access.
+    pub fn provide<T: Send + Sync + 'static>(&mut self, value: T);              // ✓
+
+    // --- Planned (Phase 3) ---
 
     /// Register an LLM backend by name (e.g., "openai", "anthropic")
     pub fn register_llm_backend(&mut self, name: &str, factory: LlmClientFactory);
@@ -125,29 +167,11 @@ impl<'a> PluginContext<'a> {
     /// Register a channel adapter (Slack, Discord, CLI, etc.)
     pub fn register_channel(&mut self, adapter: Box<dyn ChannelAdapter>);
 
-    /// Register an agent bus implementation
+    /// Register an agent bus implementation.
     pub fn register_bus(&mut self, bus: Box<dyn AgentBus>);
-
-    // --- Host function extension ---
-
-    /// Register a host function callable from the Python REPL.
-    /// Namespaced by convention (e.g., "weather.forecast", "jira.create_issue").
-    pub fn register_host_fn(&mut self, name: &str, handler: HostFnHandler);
-
-    // --- Lifecycle events ---
-
-    /// Subscribe to a lifecycle event
-    pub fn on(&mut self, event: LifecycleEvent, handler: EventHandler);
-
-    // --- HTTP routes ---
 
     /// Mount an Axum router at /plugins/{prefix}/*
     pub fn register_routes(&mut self, prefix: &str, router: axum::Router);
-
-    // --- Shared state ---
-
-    /// Expose a value for downstream plugins to access
-    pub fn provide<T: Send + Sync + 'static>(&mut self, value: T);
 }
 ```
 
