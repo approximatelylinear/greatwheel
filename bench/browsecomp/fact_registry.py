@@ -58,7 +58,7 @@ def _extract_entities(text):
             entities.append(word)
 
     # Years (4-digit numbers that look like years)
-    for m in _re.finditer(r'\b(1[5-9]\d{2}|20[0-2]\d)\b', text):
+    for m in _re.finditer(r'\b(1[5-9]\d{2}|20\d{2})\b', text):
         entities.append(m.group(1))
 
     # Deduplicate preserving order
