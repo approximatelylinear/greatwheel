@@ -1,6 +1,6 @@
 # Design: Structured Agent Memory — Hindsight Integration
 
-**Status:** In Progress — BrowseComp Phase A + gw-memory Phases 1-3 implemented
+**Status:** In Progress — BrowseComp Phase A + gw-memory Phases 1-4 implemented
 **Date:** 2026-03-26
 **Paper:** [Hindsight is 20/20: Building Agent Memory that Retains, Recalls, and Reflects](https://arxiv.org/abs/2512.12818) — Vectorize.io & Virginia Tech
 
@@ -50,10 +50,22 @@ Awaiting benchmark evaluation against the 40% (12/30) baseline.
 Deferred to async dispatch resolution (§6.2 Q7): LLM-powered fact extraction,
 LLM entity resolution, causal edges, graph edge computation.
 
-### gw-memory Phases 4-5: Not started
+### gw-memory Phase 4: Implemented (2026-03-26)
 
-- `hindsight-recall` (Phase 4) — graph traversal, temporal parsing, optional reranking
-- `hindsight-opinions` (Phase 5) — confidence evolution
+| File | What |
+|---|---|
+| `gw-memory/src/temporal.rs` | Rule-based temporal parser (yesterday, today, last week, last N days, last month, Month Year). Temporal proximity scoring, recency decay, interval overlap. 12 unit tests |
+| `gw-memory/src/graph.rs` | Spreading activation over `memory_edges` (async PgPool). Temporal-constrained traversal via `R_temp` set. `fetch_temporal_set`, `temporal_score_memories` |
+| `gw-memory/src/hybrid.rs` | `SearchMode::Full` — four-channel RRF (vector + BM25 + graph + temporal). Configurable graph_hops, graph_decay, recency_sigma_days |
+| `gw-memory/src/lib.rs` | `SearchMode::Full` variant, `graph` and `temporal` modules |
+| `gw-engine/src/builtins/hindsight_recall.rs` | Plugin: `memory.temporal_parse` and `memory.graph_neighbors` host functions. 2 unit tests |
+
+Deferred: LLM fallback temporal parser (stage 2), cross-encoder reranking,
+async `memory.graph_neighbors` host function.
+
+### gw-memory Phase 5: Not started
+
+- `hindsight-opinions` — confidence evolution
 
 See Section 3 for the full implementation plan.
 
