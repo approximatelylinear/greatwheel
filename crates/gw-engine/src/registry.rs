@@ -28,11 +28,16 @@ pub struct PluginRegistry {
 
 impl PluginRegistry {
     pub fn new() -> Self {
+        Self::new_with_shared(SharedState::default())
+    }
+
+    /// Create a registry with pre-seeded shared state.
+    pub fn new_with_shared(shared: SharedState) -> Self {
         Self {
             plugins: Vec::new(),
             event_handlers: HashMap::new(),
             host_functions: HashMap::new(),
-            shared: SharedState::default(),
+            shared,
             capabilities: Vec::new(),
         }
     }

@@ -3,13 +3,13 @@
 //! Implements Hindsight CARA opinion tracking (design-hindsight-memory.md §2.5).
 //!
 //! Provides host functions for Python agents to:
-//! - Propose opinions with confidence scores
-//! - Reinforce / weaken / contradict existing opinions
+//! - Reinforce / weaken / contradict existing opinions (persisted to Postgres)
 //! - Query opinions by entity
 //!
-//! The actual confidence updates go through `PgMemoryStore::update_confidence()`
-//! via the host functions. The `BeforeMemoryStore` handler at priority 55 detects
-//! opinion-type memories and ensures they have a default confidence.
+//! The `BeforeMemoryStore` handler at priority 55 detects opinion-type memories
+//! and ensures they have a default confidence.
+//!
+//! **Requires:** PgPool provided via `engine.provide(pool)` in gw-server.
 //!
 //! Full LLM-powered assessment (automatically detecting reinforce/weaken/contradict
 //! when new facts arrive) is deferred to async dispatch resolution (§6.2 Q7).
@@ -22,17 +22,14 @@ use gw_core::{
     PluginManifest,
 };
 use serde_json::Value;
-use tracing::debug;
+use sqlx::PgPool;
+use tracing::{debug, warn};
 
 /// Configuration for the hindsight-opinions plugin.
 struct OpinionsConfig {
-    /// Confidence adjustment for reinforcement.
-    reinforce_alpha: f64,
-    /// Confidence adjustment for weakening.
-    weaken_alpha: f64,
-    /// Confidence adjustment for contradiction.
-    contradict_alpha: f64,
-    /// Default confidence for new opinions.
+    reinforce_alpha: f32,
+    weaken_alpha: f32,
+    contradict_alpha: f32,
     default_confidence: f64,
 }
 
@@ -42,15 +39,15 @@ impl OpinionsConfig {
             reinforce_alpha: config
                 .get("reinforce_alpha")
                 .and_then(|v| v.as_f64())
-                .unwrap_or(0.15),
+                .unwrap_or(0.15) as f32,
             weaken_alpha: config
                 .get("weaken_alpha")
                 .and_then(|v| v.as_f64())
-                .unwrap_or(0.10),
+                .unwrap_or(0.10) as f32,
             contradict_alpha: config
                 .get("contradict_alpha")
                 .and_then(|v| v.as_f64())
-                .unwrap_or(0.25),
+                .unwrap_or(0.25) as f32,
             default_confidence: config
                 .get("default_confidence")
                 .and_then(|v| v.as_f64())
@@ -83,9 +80,13 @@ impl Plugin for HindsightOpinionsPlugin {
         let config = OpinionsConfig::from_plugin_config(ctx.config);
         let default_confidence = config.default_confidence;
 
+        // Grab PgPool from SharedState (provided by gw-server via engine.provide())
+        let pool: Option<PgPool> = ctx.shared.get::<PgPool>().cloned();
+        if pool.is_none() {
+            warn!("hindsight-opinions: PgPool not found in SharedState — host functions will be no-ops");
+        }
+
         // --- BeforeMemoryStore handler ---
-        // Ensures opinion-type memories have a default confidence if none was set.
-        // Runs after hindsight-retain (priority 50) which classifies the kind.
         ctx.on(
             LifecycleEvent::BeforeMemoryStore,
             Arc::new(move |payload: &mut EventPayload| {
@@ -97,7 +98,6 @@ impl Plugin for HindsightOpinionsPlugin {
                     return EventResult::Continue;
                 };
 
-                // Only touch opinions
                 let is_opinion = m
                     .get("kind")
                     .and_then(|v| v.as_str())
@@ -108,7 +108,6 @@ impl Plugin for HindsightOpinionsPlugin {
                     return EventResult::Continue;
                 }
 
-                // Set default confidence if not already present
                 if m.get("confidence").is_none() {
                     if let Some(n) = serde_json::Number::from_f64(default_confidence) {
                         m.insert("confidence".into(), Value::Number(n));
@@ -122,56 +121,33 @@ impl Plugin for HindsightOpinionsPlugin {
         );
 
         // --- Host functions ---
-        // These provide the confidence update API for Python agents.
-        // The actual DB update is deferred — host functions currently return
-        // the computed delta. When the host function router gains DB access
-        // (via SharedState), these will call PgMemoryStore::update_confidence().
+        // Each calls PgMemoryStore::update_confidence() via block_in_place.
+        // The org_id is required as the first arg, key as the second.
 
-        let reinforce_alpha = config.reinforce_alpha;
+        let reinforce_delta = config.reinforce_alpha;
+        let pool_r = pool.clone();
         ctx.register_host_fn(
             "memory.opinion_reinforce",
             Arc::new(move |args: Vec<Value>, _kwargs: HashMap<String, Value>| {
-                let key = args.first().and_then(|v| v.as_str()).unwrap_or("");
-                if key.is_empty() {
-                    return Err(PluginError::HostFunction("key required".into()));
-                }
-                Ok(serde_json::json!({
-                    "key": key,
-                    "action": "reinforce",
-                    "delta": reinforce_alpha,
-                }))
+                update_opinion(&pool_r, &args, reinforce_delta, "reinforce")
             }),
         );
 
-        let weaken_alpha = config.weaken_alpha;
+        let weaken_delta = -config.weaken_alpha;
+        let pool_w = pool.clone();
         ctx.register_host_fn(
             "memory.opinion_weaken",
             Arc::new(move |args: Vec<Value>, _kwargs: HashMap<String, Value>| {
-                let key = args.first().and_then(|v| v.as_str()).unwrap_or("");
-                if key.is_empty() {
-                    return Err(PluginError::HostFunction("key required".into()));
-                }
-                Ok(serde_json::json!({
-                    "key": key,
-                    "action": "weaken",
-                    "delta": -weaken_alpha,
-                }))
+                update_opinion(&pool_w, &args, weaken_delta, "weaken")
             }),
         );
 
-        let contradict_alpha = config.contradict_alpha;
+        let contradict_delta = -config.contradict_alpha;
+        let pool_c = pool;
         ctx.register_host_fn(
             "memory.opinion_contradict",
             Arc::new(move |args: Vec<Value>, _kwargs: HashMap<String, Value>| {
-                let key = args.first().and_then(|v| v.as_str()).unwrap_or("");
-                if key.is_empty() {
-                    return Err(PluginError::HostFunction("key required".into()));
-                }
-                Ok(serde_json::json!({
-                    "key": key,
-                    "action": "contradict",
-                    "delta": -contradict_alpha,
-                }))
+                update_opinion(&pool_c, &args, contradict_delta, "contradict")
             }),
         );
 
@@ -179,9 +155,78 @@ impl Plugin for HindsightOpinionsPlugin {
     }
 }
 
-/// Compute confidence reinforcement rules (pure function, no DB).
+/// Execute an opinion confidence update against Postgres.
 ///
-/// Used by both the plugin and `PgMemoryStore::update_confidence()`.
+/// Args: [org_id (UUID string), key (string)]
+fn update_opinion(
+    pool: &Option<PgPool>,
+    args: &[Value],
+    delta: f32,
+    action: &str,
+) -> Result<Value, PluginError> {
+    let Some(pool) = pool else {
+        return Ok(serde_json::json!({
+            "error": "PgPool not available — opinion updates require database access",
+            "action": action,
+            "delta": delta,
+        }));
+    };
+
+    let org_id_str = args
+        .first()
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| PluginError::HostFunction("org_id (UUID string) required as first arg".into()))?;
+    let org_id: uuid::Uuid = org_id_str
+        .parse()
+        .map_err(|e| PluginError::HostFunction(format!("invalid org_id: {e}")))?;
+
+    let key = args
+        .get(1)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| PluginError::HostFunction("key required as second arg".into()))?;
+
+    // Run the async DB update synchronously within the tokio runtime.
+    let result = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            sqlx::query_as::<_, (f32,)>(
+                r#"
+                UPDATE memories
+                SET confidence = GREATEST(0.0, LEAST(1.0, COALESCE(confidence, 0.5) + $3)),
+                    updated_at = now()
+                WHERE org_id = $1 AND key = $2 AND kind = 'opinion'
+                RETURNING confidence
+                "#,
+            )
+            .bind(org_id)
+            .bind(key)
+            .bind(delta)
+            .fetch_optional(pool)
+            .await
+        })
+    });
+
+    match result {
+        Ok(Some((new_confidence,))) => {
+            debug!(key, action, new_confidence, "opinion confidence updated");
+            Ok(serde_json::json!({
+                "key": key,
+                "action": action,
+                "confidence": new_confidence,
+            }))
+        }
+        Ok(None) => Ok(serde_json::json!({
+            "key": key,
+            "action": action,
+            "error": "not found or not an opinion",
+        })),
+        Err(e) => {
+            warn!(key, action, error = %e, "opinion update failed");
+            Err(PluginError::HostFunction(format!("DB error: {e}")))
+        }
+    }
+}
+
+/// Compute confidence reinforcement delta (pure function).
 pub fn confidence_delta(action: &str, config: &OpinionsDelta) -> f32 {
     match action {
         "reinforce" => config.reinforce_alpha,
@@ -234,5 +279,11 @@ mod tests {
     fn confidence_delta_neutral() {
         let d = OpinionsDelta::default();
         assert!((confidence_delta("neutral", &d)).abs() < 0.001);
+    }
+
+    #[test]
+    fn update_opinion_no_pool() {
+        let result = update_opinion(&None, &[Value::String("org".into()), Value::String("key".into())], 0.15, "reinforce").unwrap();
+        assert!(result.get("error").is_some());
     }
 }

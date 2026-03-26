@@ -2624,8 +2624,11 @@ dependencies = [
  "gw-core",
  "regex",
  "serde_json",
+ "sqlx",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

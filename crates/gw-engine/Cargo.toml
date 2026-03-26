@@ -8,5 +8,8 @@ chrono = { workspace = true }
 gw-core = { workspace = true }
 regex = { workspace = true }
 serde_json = { workspace = true }
+sqlx = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }

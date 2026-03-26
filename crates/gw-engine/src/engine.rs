@@ -4,7 +4,7 @@
 //! engine that loads plugins, wires components, and manages lifecycle.
 
 use gw_core::{
-    EventData, EventPayload, EventResult, LifecycleEvent, Plugin, PluginError,
+    EventData, EventPayload, EventResult, LifecycleEvent, Plugin, PluginError, SharedState,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -25,12 +25,14 @@ use crate::registry::PluginRegistry;
 /// ```
 pub struct GreatWheelEngine {
     plugins: Vec<Box<dyn Plugin>>,
+    shared: SharedState,
 }
 
 impl GreatWheelEngine {
     pub fn new() -> Self {
         Self {
             plugins: Vec::new(),
+            shared: SharedState::default(),
         }
     }
 
@@ -46,6 +48,15 @@ impl GreatWheelEngine {
         self
     }
 
+    /// Pre-seed a typed value into SharedState before plugin initialization.
+    ///
+    /// Use this to provide infrastructure (e.g., PgPool, runtime handles)
+    /// that plugins need during init or in their host function handlers.
+    pub fn provide<T: Send + Sync + 'static>(mut self, value: T) -> Self {
+        self.shared.insert(value);
+        self
+    }
+
     /// Initialize all plugins and return the initialized engine.
     ///
     /// `plugin_configs` maps plugin name → its TOML config section.
@@ -54,7 +65,7 @@ impl GreatWheelEngine {
         self,
         plugin_configs: &HashMap<String, Value>,
     ) -> Result<InitializedEngine, PluginError> {
-        let mut registry = PluginRegistry::new();
+        let mut registry = PluginRegistry::new_with_shared(self.shared);
         registry.init_plugins(self.plugins, plugin_configs)?;
 
         // Build event dispatcher from registry's collected handlers.
