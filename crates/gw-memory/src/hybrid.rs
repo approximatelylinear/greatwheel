@@ -16,6 +16,12 @@ use gw_llm::OllamaClient;
 /// Accepts a mutable event payload and returns an `EventResult`.
 /// Provided by `gw-engine`'s `EventDispatcher`; `gw-memory` does not
 /// depend on `gw-engine` directly to avoid circular dependencies.
+///
+/// TODO(phase-3): This is sync but called inside async store()/recall().
+/// Phase 3 plugins (hindsight-retain) need async LLM calls for entity
+/// extraction. Options: (a) make this an async trait, (b) have handlers
+/// spawn async work via tokio::spawn and a runtime handle in SharedState,
+/// or (c) add a parallel AsyncDispatchFn. See design-hindsight-memory.md §6.2 Q7.
 pub type DispatchFn = dyn Fn(&mut EventPayload) -> EventResult + Send + Sync;
 
 /// Hybrid memory store backed by LanceDB (vector) + tantivy (BM25) + Postgres (persistence).
