@@ -69,3 +69,4 @@ a6d682c-colbert	0.2667	~12	115047	keep	ColBERT-only search (Mode A). 8/30 — wo
 8414fef	0.2667	~12	120902	keep	Refusal filter v1. 26/30 completed, 1 refusal rejected. New: Q894+Q1106. 8/30
 5946fae-sglang	0.1333	~12	113165	discard	SGLang fp8 Qwen3.5-9B. 4/30 — significant regression from Ollama (8-11/30). fp8 quality loss
 gepa-v1	0.1667	~12	119474	discard	GEPA-optimized prompt (5 calls, 8-query subset). 5/30 — regression from baseline 8-11/30. Needs more iterations.
+gepa-v2	0.2333	~12	137674	keep	GEPA v2 prompt (3x avg, GPT-5). 7/30 exact, 8/30 fuzzy. New: Q1030+Q572+Q885. Union across runs: 13+/30
