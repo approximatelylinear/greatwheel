@@ -876,7 +876,10 @@ impl PassageIndex {
 ///
 /// All byte offsets are snapped to UTF-8 character boundaries via
 /// [`snap_to_char_boundary`], so this never panics on multi-byte content.
-/// Splits on sentence boundaries (`. `, `\n`) when possible.
+/// Splits on sentence boundaries (`. `, `\n`) when possible. The `. `
+/// heuristic can false-positive on abbreviations ("Dr. Smith", "U.S."),
+/// but the overlap between passages ensures the full term appears intact
+/// in at least one passage.
 fn split_into_passages(text: &str, chunk_bytes: usize, overlap_bytes: usize) -> Vec<String> {
     if text.len() <= chunk_bytes {
         return vec![text.to_string()];
