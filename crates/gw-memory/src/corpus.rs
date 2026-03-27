@@ -662,13 +662,13 @@ impl CorpusSearcher {
 
     /// Build a passage-level tantivy index from the same JSONL corpus.
     ///
-    /// Each document is split into ~`chunk_chars`-character passages with
-    /// `overlap_chars` overlap. Passages inherit the parent's docid.
+    /// Each document is split into ~`chunk_bytes`-byte passages with
+    /// `overlap_bytes` overlap. Passages inherit the parent's docid.
     pub fn build_passage_index(
         jsonl_path: &Path,
         tantivy_out: &Path,
-        chunk_chars: usize,
-        overlap_chars: usize,
+        chunk_bytes: usize,
+        overlap_bytes: usize,
     ) -> Result<usize, MemoryError> {
         let mut schema_builder = Schema::builder();
         let f_passage_id = schema_builder.add_text_field("passage_id", STRING | STORED);
@@ -716,7 +716,7 @@ impl CorpusSearcher {
                 .ok_or_else(|| MemoryError::Tantivy(format!("missing 'text' at line {line_num}")))?;
 
             // Split into passages
-            let passages = split_into_passages(text, chunk_chars, overlap_chars);
+            let passages = split_into_passages(text, chunk_bytes, overlap_bytes);
             for (i, passage) in passages.iter().enumerate() {
                 let pid = format!("{docid}#p{i}");
                 writer
@@ -871,12 +871,14 @@ impl PassageIndex {
     }
 }
 
-/// Split text into passages of approximately `chunk_chars` characters
-/// with `overlap_chars` overlap between consecutive passages.
+/// Split text into passages of approximately `chunk_bytes` bytes
+/// with `overlap_bytes` overlap between consecutive passages.
 ///
+/// All byte offsets are snapped to UTF-8 character boundaries via
+/// [`snap_to_char_boundary`], so this never panics on multi-byte content.
 /// Splits on sentence boundaries (`. `, `\n`) when possible.
-fn split_into_passages(text: &str, chunk_chars: usize, overlap_chars: usize) -> Vec<String> {
-    if text.len() <= chunk_chars {
+fn split_into_passages(text: &str, chunk_bytes: usize, overlap_bytes: usize) -> Vec<String> {
+    if text.len() <= chunk_bytes {
         return vec![text.to_string()];
     }
 
@@ -884,14 +886,14 @@ fn split_into_passages(text: &str, chunk_chars: usize, overlap_chars: usize) -> 
     let mut start = 0;
 
     while start < text.len() {
-        let end = (start + chunk_chars).min(text.len());
+        let end = snap_to_char_boundary(text, (start + chunk_bytes).min(text.len()));
 
         // Try to break at a sentence boundary within the last 20% of the chunk
-        let break_zone_start = start + (chunk_chars * 4 / 5);
+        let break_zone_start = snap_to_char_boundary(text, start + (chunk_bytes * 4 / 5));
         let actual_end = if end < text.len() {
-            text[break_zone_start.min(end)..end]
-                .rfind(". ")
-                .or_else(|| text[break_zone_start.min(end)..end].rfind('\n'))
+            let zone = &text[break_zone_start.min(end)..end];
+            zone.rfind(". ")
+                .or_else(|| zone.rfind('\n'))
                 .map(|offset| break_zone_start.min(end) + offset + 2)
                 .unwrap_or(end)
         } else {
@@ -904,15 +906,25 @@ fn split_into_passages(text: &str, chunk_chars: usize, overlap_chars: usize) -> 
             break;
         }
 
-        // Advance with overlap
-        start = if actual_end > overlap_chars {
-            actual_end - overlap_chars
-        } else {
-            actual_end
-        };
+        // Advance with overlap, snapping to char boundary
+        start = snap_to_char_boundary(text, actual_end.saturating_sub(overlap_bytes));
     }
 
     passages
+}
+
+/// Snap a byte offset to the nearest valid UTF-8 character boundary.
+/// Moves forward (toward end of string) to find a valid boundary.
+fn snap_to_char_boundary(text: &str, offset: usize) -> usize {
+    if offset >= text.len() {
+        return text.len();
+    }
+    // Find the next char boundary at or after offset
+    let mut pos = offset;
+    while pos < text.len() && !text.is_char_boundary(pos) {
+        pos += 1;
+    }
+    pos
 }
 
 /// Sanitize a query string for tantivy's query parser.
@@ -945,7 +957,7 @@ mod tests {
         let text = "A".repeat(1200);
         let passages = split_into_passages(&text, 512, 100);
         assert!(passages.len() >= 2, "should produce multiple passages, got {}", passages.len());
-        // Each passage should be roughly chunk_chars
+        // Each passage should be roughly chunk_bytes
         for p in &passages {
             assert!(p.len() <= 600, "passage too long: {}", p.len());
         }
@@ -959,6 +971,18 @@ mod tests {
         assert!(passages.iter().any(|p| p.contains("quick")));
         assert!(passages.iter().any(|p| p.contains("lazy")));
         assert!(passages.iter().any(|p| p.contains("overlap")));
+    }
+
+    #[test]
+    fn split_multibyte_utf8() {
+        // Each char here is 2-4 bytes — slicing on arbitrary byte offsets would panic
+        let text = "Ünïcödé tëxt wïth äccënts. Más información aquí. 日本語テスト。";
+        let passages = split_into_passages(text, 30, 10);
+        assert!(passages.len() >= 2, "should split, got {} passages", passages.len());
+        // All passages should be valid UTF-8 (no panic)
+        for p in &passages {
+            assert!(p.len() <= 50, "passage too long: {} bytes", p.len());
+        }
     }
 
     #[test]
