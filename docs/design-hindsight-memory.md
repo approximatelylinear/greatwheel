@@ -86,9 +86,9 @@ All five gw-memory phases are complete. Remaining items fall into two independen
 - LLM fallback temporal parser (stage 2)
 - Cross-encoder reranker (config-gated in hindsight-recall)
 
-**BrowseComp Phases B-C (§5.3) — independent, no async dependency:**
-- Phase B: `entity_search()` REPL tool (Python, no Rust changes)
-- Phase C: passage-level BM25 index, entity co-occurrence graph, multi-strategy RRF
+**BrowseComp (§5.3):**
+- Phases A-B + C (BC-4, BC-6): Implemented — awaiting benchmark evaluation
+- BC-5 (entity co-occurrence graph): Planned, deferred
 
 ---
 
@@ -1126,10 +1126,10 @@ Ordered by expected impact / effort ratio:
 |---|---|---|---|---|---|
 | BC-1 | FactRegistry (structured accumulation) | Extraction errors (30%) | Small | +1-3 queries (reduce extraction errors by 30-50%) | **Implemented** |
 | BC-2 | Confidence-scored candidates | Hedges (10%) + extraction | Small | +1-2 queries (eliminate hedges, better candidate selection) | **Implemented** |
-| BC-3 | Entity-bridged search tool | Retrieval misses (60%) | Small-medium | +1-3 queries (helps multi-hop queries) | Planned |
-| BC-4 | Passage-level BM25 index | Retrieval misses (60%) | Medium | +2-4 queries (catches buried answers in long docs) | Planned |
+| BC-3 | Entity-bridged search tool | Retrieval misses (60%) | Small-medium | +1-3 queries (helps multi-hop queries) | **Implemented** |
+| BC-4 | Passage-level BM25 index | Retrieval misses (60%) | Medium | +2-4 queries (catches buried answers in long docs) | **Implemented** |
 | BC-5 | Entity co-occurrence graph | Retrieval misses (60%) | Large | +2-5 queries (expands candidate pool for ColBERT) | Planned |
-| BC-6 | Multi-strategy RRF (entity + passage channels) | Retrieval misses (60%) | Medium | +2-4 queries (diverse retrieval covers more docs) | Planned |
+| BC-6 | Multi-strategy RRF (entity + passage channels) | Retrieval misses (60%) | Medium | +2-4 queries (diverse retrieval covers more docs) | **Implemented** (via `search_with_passages`) |
 
 **Phase A (prompt-only, no index changes):** BC-1 + BC-2 — **IMPLEMENTED**
 - FactRegistry Python class with entity extraction, fact storage, candidate confidence tracking
@@ -1138,16 +1138,19 @@ Ordered by expected impact / effort ratio:
 - Iteration nudges reference `facts.candidates()` and `facts.best_candidate()`
 - **Target: 43-47% (13-14/30)** — awaiting evaluation
 
-**Phase B (new REPL tools):** BC-3
-- Implement entity_search() as a REPL tool
-- One-hop entity chain expansion via BM25
-- **Target: 47-50% (14-15/30)**
+**Phase B (new REPL tools):** BC-3 — **IMPLEMENTED**
+- `entity_search.py`: one-hop entity-bridged BM25 search (single source, `include_str!` in gw-bench)
+- Searches for entity → extracts co-occurring entities from snippets → searches for those (capped at 8/hop)
+- System prompts updated in both paths
+- **Target: 47-50% (14-15/30)** — awaiting evaluation
 
-**Phase C (index-time changes):** BC-4 + BC-5 + BC-6
-- Build passage-level tantivy index (512-token chunks)
-- Build entity co-occurrence graph (regex NER over 100K docs)
-- Fuse all channels via RRF before ColBERT reranking
-- **Target: 50-57% (15-17/30)**
+**Phase C (index-time changes):** BC-4 + BC-6 — **IMPLEMENTED**, BC-5 planned
+- `CorpusSearcher::build_passage_index()`: splits docs into ~512-char chunks with 100-char overlap at sentence boundaries
+- `PassageIndex`: separate tantivy index with passage_id, docid, text fields
+- `search_passages()`: BM25 on passage index, deduplicated by docid
+- `search_with_passages()`: doc-level + passage-level BM25 fused via RRF (BC-6)
+- BC-5 (entity co-occurrence graph) deferred — BC-4+BC-6 address the same failure mode
+- **Target: 50-57% (15-17/30)** — awaiting evaluation
 
 ### 5.4 FactRegistry Implementation
 
