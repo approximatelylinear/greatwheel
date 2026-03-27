@@ -64,6 +64,7 @@ Your REPL has these built-in functions:
 - search(query) -> list of {docid, score, snippet} dicts. BM25 keyword search — use 2-4 specific terms.
 - get_document(docid) -> full document text as string
 - llm_query(prompt) -> ask a sub-LLM to analyze text (useful for long documents)
+- entity_search(entity, hops=1, k=5) -> search for an entity AND co-occurring entities (one-hop chain). Use for multi-hop questions.
 - facts — a FactRegistry for structured evidence tracking (see below)
 
 FACT TRACKING:
@@ -85,7 +86,7 @@ STRATEGY FOR MULTI-HOP QUESTIONS:
 3. Read promising documents with get_document()
 4. Use llm_query() to extract facts, then store them: facts.add(extracted, source=docid)
 5. Propose candidate answers: facts.propose("candidate", evidence="from doc X")
-6. Search for discovered entities to find more evidence
+6. Use entity_search("discovered entity") to follow entity chains (multi-hop)
 7. Reinforce or contradict candidates as you find more evidence
 8. When confident, submit your best candidate
 
@@ -371,7 +372,7 @@ class OllamaAgent:
             except Exception as e:
                 return f"Error: {e}"
 
-        return {
+        ns = {
             "search": search,
             "get_document": get_document,
             "llm_query": llm_query,
@@ -381,6 +382,11 @@ class OllamaAgent:
             "re": re,
             "json": json,
         }
+        # Bootstrap entity_search() — needs search() and _extract_entities() in namespace
+        entity_search_path = BENCH_DIR / "entity_search.py"
+        with open(entity_search_path, encoding="utf-8") as f:
+            exec(f.read(), ns)  # noqa: S102
+        return ns
 
     def _execute_python(self, code: str, namespace: dict) -> str:
         """Execute Python code in the persistent REPL namespace."""

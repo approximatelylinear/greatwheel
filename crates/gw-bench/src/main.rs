@@ -820,6 +820,9 @@ impl HostBridge for BrowseCompBridge {
 const FACT_REGISTRY_BOOTSTRAP: &str =
     include_str!("../../../bench/browsecomp/fact_registry.py");
 
+const ENTITY_SEARCH_BOOTSTRAP: &str =
+    include_str!("../../../bench/browsecomp/entity_search.py");
+
 // -------------------------------------------------------------------------- //
 // rLM System Prompt & Iteration Prompts
 // -------------------------------------------------------------------------- //
@@ -835,6 +838,7 @@ TOOLS AVAILABLE:
 - `llm_query(prompt)` — sub-LLM analysis (~10K char context). YOUR MOST POWERFUL TOOL for extracting specific facts.
 - `batch_llm_query([p1, p2, ...])` — parallel LLM queries (use to analyze multiple docs at once)
 - `facts` — FactRegistry for structured evidence tracking (see FACT TRACKING below)
+- `entity_search(entity, hops=1, k=5)` — search for an entity AND entities that co-occur with it (one-hop chain). Returns deduplicated list of {docid, score, snippet} dicts. Use when a direct search misses but you know a related entity.
 - `print()` — view output to continue reasoning
 - `FINAL("answer")` — submit your final answer. Answer must be a precise name, number, date, or short phrase.
 
@@ -876,6 +880,7 @@ SEARCH STRATEGY:
 - BM25 search matches keywords. Use 2-5 distinctive nouns, names, or numbers.
 - NEVER repeat a similar search. Each search must target different information.
 - When stuck, search for entities DISCOVERED in documents, not just from the query.
+- For MULTI-HOP questions: use entity_search("discovered entity") to automatically follow entity chains. It searches for the entity AND co-occurring entities in one call.
 
 COMMON MISTAKES TO AVOID:
 - Don't guess from snippets alone — READ FULL DOCUMENTS with get_document().
@@ -2138,9 +2143,12 @@ fn run_single_query(
     agent.set_variable("context", context_obj).ok();
     agent.set_variable("answer_type", Object::String(answer_type.clone())).ok();
 
-    // Bootstrap FactRegistry into the REPL namespace
+    // Bootstrap FactRegistry and entity_search into the REPL namespace
     if let Err(e) = agent.execute(FACT_REGISTRY_BOOTSTRAP) {
         warn!(error = %e, "Failed to bootstrap FactRegistry");
+    }
+    if let Err(e) = agent.execute(ENTITY_SEARCH_BOOTSTRAP) {
+        warn!(error = %e, "Failed to bootstrap entity_search");
     }
 
     let rlm_start = std::time::Instant::now();
@@ -2176,6 +2184,9 @@ fn run_single_query(
         agent2.set_variable("answer_type", Object::String(answer_type.clone())).ok();
         if let Err(e) = agent2.execute(FACT_REGISTRY_BOOTSTRAP) {
             warn!(error = %e, "Failed to bootstrap FactRegistry (conv_loop)");
+        }
+        if let Err(e) = agent2.execute(ENTITY_SEARCH_BOOTSTRAP) {
+            warn!(error = %e, "Failed to bootstrap entity_search (conv_loop)");
         }
         conv_loop_runner::run_rlm_loop_v2_with_agent(
             llm, &cli.model, agent2, query_text, cli.max_turns, rt, &context_text, bench_config,
