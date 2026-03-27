@@ -432,13 +432,15 @@ class OllamaAgent:
                     "output": content,
                 })
 
+            # Check for "Exact Answer:" anywhere in the response (including
+            # after code blocks, in comments, or in plain text)
+            if "exact answer:" in content.lower():
+                break
+
             # Extract and execute code blocks from the response
             code_blocks = self._extract_code_blocks(content)
 
             if not code_blocks:
-                # No code blocks — check if model gave a final answer
-                if "exact answer:" in content.lower():
-                    break
                 # Steer the model
                 if turn == 0:
                     messages.append(msg)
@@ -490,6 +492,22 @@ class OllamaAgent:
             })
         else:
             status = "max_turns"
+            # Fallback: try to extract answer from facts.best_candidate() or
+            # ask the model one more time with a forced answer prompt
+            best = repl_namespace.get("facts", None)
+            if best is not None:
+                try:
+                    candidate = best.best_candidate()
+                    if candidate:
+                        results.append({
+                            "type": "output_text",
+                            "tool_name": None,
+                            "arguments": None,
+                            "output": f"Exact Answer: {candidate[0]}",
+                        })
+                        status = "fallback_facts"
+                except Exception:
+                    pass
 
         record = {
             "metadata": {
