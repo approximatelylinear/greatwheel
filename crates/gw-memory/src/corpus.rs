@@ -196,15 +196,7 @@ impl CorpusSearcher {
         let searcher = self.reader.searcher();
         let query_parser = QueryParser::for_index(&self.index, vec![self.f_text]);
 
-        // Sanitize query: strip characters that tantivy's query parser treats as syntax
-        let sanitized: String = query
-            .chars()
-            .map(|c| match c {
-                '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '~' | '^' | '\\' => ' ',
-                _ => c,
-            })
-            .collect();
-
+        let sanitized = sanitize_query(query);
         let parsed = query_parser.parse_query(&sanitized).map_err(|e| {
             MemoryError::Tantivy(format!("query parse error: {e}"))
         })?;
