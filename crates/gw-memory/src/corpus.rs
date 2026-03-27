@@ -739,6 +739,11 @@ impl CorpusSearcher {
     /// Uses the passage index for retrieval, then maps passage hits back to
     /// their parent documents. Returns `CorpusHit`s with the passage text as
     /// the snippet (more focused than document-level snippets).
+    /// Whether a passage-level index is available.
+    pub fn has_passage_index(&self) -> bool {
+        self.passage_index.is_some()
+    }
+
     pub fn search_passages(&self, query: &str, k: usize) -> Result<Vec<CorpusHit>, MemoryError> {
         let pi = match &self.passage_index {
             Some(pi) => pi,
@@ -886,7 +891,7 @@ fn split_into_passages(text: &str, chunk_bytes: usize, overlap_bytes: usize) -> 
             let zone = &text[break_zone_start..end];
             zone.rfind(". ")
                 .or_else(|| zone.rfind('\n'))
-                .map(|offset| break_zone_start + offset + 2)
+                .map(|offset| snap_to_char_boundary(text, break_zone_start + offset + 2))
                 .unwrap_or(end)
         } else {
             end

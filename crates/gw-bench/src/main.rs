@@ -473,12 +473,22 @@ impl BrowseCompBridge {
                             // Default to boosted BM25 — retrieve more if reranking
                             let retrieve_k = if rerank_url.is_some() { std::cmp::max(k, 200) } else { k };
                             let t0 = std::time::Instant::now();
-                            let hits = searcher.search_bm25_boosted(&query_str, retrieve_k).map_err(|e| {
-                                AgentError::HostFunction {
-                                    function: "search".into(),
-                                    message: format!("{e}"),
-                                }
-                            })?;
+                            // Use passage-level RRF when passage index is available
+                            let hits = if searcher.has_passage_index() {
+                                searcher.search_with_passages(&query_str, retrieve_k).map_err(|e| {
+                                    AgentError::HostFunction {
+                                        function: "search".into(),
+                                        message: format!("{e}"),
+                                    }
+                                })?
+                            } else {
+                                searcher.search_bm25_boosted(&query_str, retrieve_k).map_err(|e| {
+                                    AgentError::HostFunction {
+                                        function: "search".into(),
+                                        message: format!("{e}"),
+                                    }
+                                })?
+                            };
                             bm25_ms = t0.elapsed().as_millis() as u64;
                             hits
                         }
@@ -2021,7 +2031,15 @@ struct Cli {
     #[arg(long)]
     build_index: bool,
 
-    /// Path to corpus JSONL file (for --build-index)
+    /// Build passage-level tantivy index from corpus JSONL, then exit
+    #[arg(long)]
+    build_passage_index: bool,
+
+    /// Path to passage-level tantivy index (for native backend)
+    #[arg(long)]
+    passage_index: Option<String>,
+
+    /// Path to corpus JSONL file (for --build-index / --build-passage-index)
     #[arg(long)]
     corpus_jsonl: Option<String>,
 
@@ -2425,6 +2443,23 @@ async fn main() {
         return;
     }
 
+    // Handle --build-passage-index: build passage-level tantivy index and exit
+    if cli.build_passage_index {
+        let jsonl_path = cli.corpus_jsonl.as_deref().expect(
+            "--corpus-jsonl is required with --build-passage-index"
+        );
+        let out_path = cli.passage_index.as_deref().unwrap_or("data/tantivy-passages/");
+        info!(jsonl = jsonl_path, out = out_path, "Building passage-level tantivy index");
+        let count = CorpusSearcher::build_passage_index(
+            Path::new(jsonl_path),
+            Path::new(out_path),
+            512,  // chunk_bytes
+            100,  // overlap_bytes
+        ).expect("Failed to build passage index");
+        info!(count, "Passage index built successfully");
+        return;
+    }
+
     let backend: gw_llm::LlmBackend = cli.llm_backend.parse().unwrap_or_else(|e| {
         eprintln!("Error: {e}");
         std::process::exit(1);
@@ -2449,8 +2484,10 @@ async fn main() {
     // Open native searcher if requested
     let native_searcher: Option<Arc<CorpusSearcher>> = if cli.search_backend == "native" {
         let tantivy_path = PathBuf::from(&cli.tantivy_index);
-        let searcher = CorpusSearcher::open(
+        let passage_path = cli.passage_index.as_ref().map(PathBuf::from);
+        let searcher = CorpusSearcher::open_with_passages(
             &tantivy_path,
+            passage_path.as_deref(),
             cli.lancedb_path.as_deref(),
             Some(&cli.lancedb_table),
             cli.colbert_lance.as_deref(),
