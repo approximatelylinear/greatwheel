@@ -55,21 +55,44 @@ pub struct CorpusHit {
 
 /// In-process corpus searcher using tantivy BM25 and optional LanceDB vectors.
 pub struct CorpusSearcher {
-    // tantivy BM25
+    // tantivy BM25 (document-level)
     index: Index,
     reader: IndexReader,
     f_docid: Field,
     f_text: Field,
+    // optional passage-level tantivy index
+    passage_index: Option<PassageIndex>,
     // optional LanceDB single-vector table (nomic-embed-text)
     lance_table: Option<lancedb::Table>,
     // optional LanceDB multi-vector table (ColBERT)
     colbert_table: Option<lancedb::Table>,
 }
 
+/// Passage-level tantivy index — documents split into ~512-char chunks.
+struct PassageIndex {
+    index: Index,
+    reader: IndexReader,
+    f_passage_id: Field,
+    f_docid: Field,
+    f_text: Field,
+}
+
 impl CorpusSearcher {
     /// Open existing tantivy index (read-only) with optional LanceDB tables.
     pub async fn open(
         tantivy_path: &Path,
+        lance_db_path: Option<&str>,
+        lance_table_name: Option<&str>,
+        colbert_lance_path: Option<&str>,
+        colbert_table_name: Option<&str>,
+    ) -> Result<Self, MemoryError> {
+        Self::open_with_passages(tantivy_path, None, lance_db_path, lance_table_name, colbert_lance_path, colbert_table_name).await
+    }
+
+    /// Open existing tantivy index with optional passage index and LanceDB tables.
+    pub async fn open_with_passages(
+        tantivy_path: &Path,
+        passage_path: Option<&Path>,
         lance_db_path: Option<&str>,
         lance_table_name: Option<&str>,
         colbert_lance_path: Option<&str>,
@@ -96,6 +119,22 @@ impl CorpusSearcher {
         let f_text = schema
             .get_field("text")
             .map_err(|e| MemoryError::Tantivy(format!("missing 'text' field: {e}")))?;
+
+        // Optionally open passage-level index
+        let passage_index = if let Some(p_path) = passage_path {
+            match PassageIndex::open(p_path) {
+                Ok(pi) => {
+                    tracing::info!(path = %p_path.display(), "Opened passage-level index");
+                    Some(pi)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Passage index unavailable, passage search disabled");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         // Optionally open LanceDB table
         let lance_table = if let Some(db_path) = lance_db_path {
@@ -135,6 +174,7 @@ impl CorpusSearcher {
 
         tracing::info!(
             tantivy_path = %tantivy_path.display(),
+            has_passages = passage_index.is_some(),
             has_lance = lance_table.is_some(),
             has_colbert = colbert_table.is_some(),
             "CorpusSearcher opened"
@@ -145,6 +185,7 @@ impl CorpusSearcher {
             reader,
             f_docid,
             f_text,
+            passage_index,
             lance_table,
             colbert_table,
         })
@@ -617,5 +658,317 @@ impl CorpusSearcher {
 
         tracing::info!(count, "Corpus tantivy index built");
         Ok(count)
+    }
+
+    /// Build a passage-level tantivy index from the same JSONL corpus.
+    ///
+    /// Each document is split into ~`chunk_chars`-character passages with
+    /// `overlap_chars` overlap. Passages inherit the parent's docid.
+    pub fn build_passage_index(
+        jsonl_path: &Path,
+        tantivy_out: &Path,
+        chunk_chars: usize,
+        overlap_chars: usize,
+    ) -> Result<usize, MemoryError> {
+        let mut schema_builder = Schema::builder();
+        let f_passage_id = schema_builder.add_text_field("passage_id", STRING | STORED);
+        let f_docid = schema_builder.add_text_field("docid", STRING | STORED);
+        let f_text = schema_builder.add_text_field("text", text_field_options());
+        let schema = schema_builder.build();
+
+        std::fs::create_dir_all(tantivy_out).map_err(|e| {
+            MemoryError::Tantivy(format!("failed to create passage index dir: {e}"))
+        })?;
+
+        let index = Index::create_in_dir(tantivy_out, schema).map_err(|e| {
+            MemoryError::Tantivy(format!("failed to create passage index: {e}"))
+        })?;
+        register_tokenizer(&index);
+
+        let mut writer = index
+            .writer(256_000_000)
+            .map_err(|e| MemoryError::Tantivy(format!("{e}")))?;
+
+        let file = std::fs::File::open(jsonl_path).map_err(|e| {
+            MemoryError::Tantivy(format!("failed to open JSONL: {e}"))
+        })?;
+        let reader = std::io::BufReader::new(file);
+
+        let mut passage_count = 0usize;
+        let mut doc_count = 0usize;
+        for (line_num, line) in reader.lines().enumerate() {
+            let line = line.map_err(|e| {
+                MemoryError::Tantivy(format!("read error at line {line_num}: {e}"))
+            })?;
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let parsed: serde_json::Value = serde_json::from_str(&line).map_err(|e| {
+                MemoryError::Tantivy(format!("JSON parse error at line {line_num}: {e}"))
+            })?;
+
+            let docid = parsed["docid"]
+                .as_str()
+                .ok_or_else(|| MemoryError::Tantivy(format!("missing 'docid' at line {line_num}")))?;
+            let text = parsed["text"]
+                .as_str()
+                .ok_or_else(|| MemoryError::Tantivy(format!("missing 'text' at line {line_num}")))?;
+
+            // Split into passages
+            let passages = split_into_passages(text, chunk_chars, overlap_chars);
+            for (i, passage) in passages.iter().enumerate() {
+                let pid = format!("{docid}#p{i}");
+                writer
+                    .add_document(doc!(
+                        f_passage_id => pid.as_str(),
+                        f_docid => docid,
+                        f_text => passage.as_str(),
+                    ))
+                    .map_err(|e| MemoryError::Tantivy(format!("add_document failed: {e}")))?;
+                passage_count += 1;
+            }
+
+            doc_count += 1;
+            if doc_count % 10_000 == 0 {
+                tracing::info!(doc_count, passage_count, "Passage indexing progress");
+            }
+        }
+
+        writer.commit().map_err(|e| {
+            MemoryError::Tantivy(format!("commit failed: {e}"))
+        })?;
+
+        tracing::info!(doc_count, passage_count, "Passage tantivy index built");
+        Ok(passage_count)
+    }
+
+    /// Search passages, returning document-level hits (deduplicated by docid).
+    ///
+    /// Uses the passage index for retrieval, then maps passage hits back to
+    /// their parent documents. Returns `CorpusHit`s with the passage text as
+    /// the snippet (more focused than document-level snippets).
+    pub fn search_passages(&self, query: &str, k: usize) -> Result<Vec<CorpusHit>, MemoryError> {
+        let pi = match &self.passage_index {
+            Some(pi) => pi,
+            None => return Ok(vec![]),
+        };
+        pi.search(query, k)
+    }
+
+    /// Multi-strategy search: doc-level BM25 + passage-level BM25, fused via RRF.
+    ///
+    /// Returns deduplicated results from both indexes, ranked by RRF score.
+    /// Passage hits that surface documents not in the doc-level top-k are the
+    /// key win — they catch answers buried in long documents.
+    pub fn search_with_passages(&self, query: &str, k: usize) -> Result<Vec<CorpusHit>, MemoryError> {
+        // Doc-level BM25
+        let doc_hits = self.search_bm25_boosted(query, k)?;
+        let doc_scored: Vec<ScoredKey> = doc_hits.iter()
+            .map(|h| ScoredKey { key: h.docid.clone(), score: h.score })
+            .collect();
+
+        // Passage-level BM25 (if available)
+        let passage_hits = self.search_passages(query, k)?;
+        let passage_scored: Vec<ScoredKey> = passage_hits.iter()
+            .map(|h| ScoredKey { key: h.docid.clone(), score: h.score })
+            .collect();
+
+        if passage_scored.is_empty() {
+            return Ok(doc_hits);
+        }
+
+        // RRF fusion
+        let fused = reciprocal_rank_fusion(&[doc_scored, passage_scored], 60);
+
+        // Build result list — prefer passage snippets for passage-surfaced docs
+        let doc_map: std::collections::HashMap<&str, &CorpusHit> =
+            doc_hits.iter().map(|h| (h.docid.as_str(), h)).collect();
+        let passage_map: std::collections::HashMap<&str, &CorpusHit> =
+            passage_hits.iter().map(|h| (h.docid.as_str(), h)).collect();
+
+        let results: Vec<CorpusHit> = fused
+            .into_iter()
+            .take(k)
+            .map(|(docid, score)| {
+                // Use passage snippet if available (more focused), else doc snippet
+                let text = passage_map
+                    .get(docid.as_str())
+                    .or_else(|| doc_map.get(docid.as_str()))
+                    .map(|h| h.text.clone())
+                    .unwrap_or_default();
+                CorpusHit { docid, text, score }
+            })
+            .collect();
+
+        Ok(results)
+    }
+}
+
+impl PassageIndex {
+    fn open(path: &Path) -> Result<Self, MemoryError> {
+        let index = Index::open_in_dir(path)
+            .map_err(|e| MemoryError::Tantivy(format!("failed to open passage index: {e}")))?;
+        register_tokenizer(&index);
+
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()
+            .map_err(|e: tantivy::TantivyError| MemoryError::Tantivy(format!("{e}")))?;
+
+        let schema = index.schema();
+        let f_passage_id = schema.get_field("passage_id")
+            .map_err(|e| MemoryError::Tantivy(format!("missing 'passage_id' field: {e}")))?;
+        let f_docid = schema.get_field("docid")
+            .map_err(|e| MemoryError::Tantivy(format!("missing 'docid' field: {e}")))?;
+        let f_text = schema.get_field("text")
+            .map_err(|e| MemoryError::Tantivy(format!("missing 'text' field: {e}")))?;
+
+        Ok(Self { index, reader, f_passage_id, f_docid, f_text })
+    }
+
+    fn search(&self, query: &str, k: usize) -> Result<Vec<CorpusHit>, MemoryError> {
+        let searcher = self.reader.searcher();
+        let query_parser = QueryParser::for_index(&self.index, vec![self.f_text]);
+        let sanitized = sanitize_query(query);
+        let parsed = query_parser.parse_query(&sanitized)
+            .map_err(|e| MemoryError::Tantivy(format!("passage query parse error: {e}")))?;
+
+        // Retrieve more than k to account for dedup by docid
+        let top_docs = searcher
+            .search(&parsed, &TopDocs::with_limit(k * 3))
+            .map_err(|e| MemoryError::Tantivy(format!("passage search failed: {e}")))?;
+
+        let mut seen_docids = std::collections::HashSet::new();
+        let mut hits = Vec::with_capacity(k);
+
+        for (score, doc_address) in top_docs {
+            let doc = searcher.doc::<tantivy::TantivyDocument>(doc_address)
+                .map_err(|e| MemoryError::Tantivy(format!("doc retrieval failed: {e}")))?;
+
+            let docid = doc.get_first(self.f_docid)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            if docid.is_empty() || !seen_docids.insert(docid.clone()) {
+                continue; // Skip duplicates
+            }
+
+            let text = doc.get_first(self.f_text)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            hits.push(CorpusHit { docid, text, score });
+            if hits.len() >= k {
+                break;
+            }
+        }
+
+        Ok(hits)
+    }
+}
+
+/// Split text into passages of approximately `chunk_chars` characters
+/// with `overlap_chars` overlap between consecutive passages.
+///
+/// Splits on sentence boundaries (`. `, `\n`) when possible.
+fn split_into_passages(text: &str, chunk_chars: usize, overlap_chars: usize) -> Vec<String> {
+    if text.len() <= chunk_chars {
+        return vec![text.to_string()];
+    }
+
+    let mut passages = Vec::new();
+    let mut start = 0;
+
+    while start < text.len() {
+        let end = (start + chunk_chars).min(text.len());
+
+        // Try to break at a sentence boundary within the last 20% of the chunk
+        let break_zone_start = start + (chunk_chars * 4 / 5);
+        let actual_end = if end < text.len() {
+            text[break_zone_start.min(end)..end]
+                .rfind(". ")
+                .or_else(|| text[break_zone_start.min(end)..end].rfind('\n'))
+                .map(|offset| break_zone_start.min(end) + offset + 2)
+                .unwrap_or(end)
+        } else {
+            end
+        };
+
+        passages.push(text[start..actual_end].to_string());
+
+        if actual_end >= text.len() {
+            break;
+        }
+
+        // Advance with overlap
+        start = if actual_end > overlap_chars {
+            actual_end - overlap_chars
+        } else {
+            actual_end
+        };
+    }
+
+    passages
+}
+
+/// Sanitize a query string for tantivy's query parser.
+fn sanitize_query(query: &str) -> String {
+    query
+        .chars()
+        .map(|c| {
+            if "+-&|!(){}[]^\"~*?:\\/".contains(c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_short_text() {
+        let passages = split_into_passages("Hello world", 512, 100);
+        assert_eq!(passages.len(), 1);
+        assert_eq!(passages[0], "Hello world");
+    }
+
+    #[test]
+    fn split_into_multiple_passages() {
+        let text = "A".repeat(1200);
+        let passages = split_into_passages(&text, 512, 100);
+        assert!(passages.len() >= 2, "should produce multiple passages, got {}", passages.len());
+        // Each passage should be roughly chunk_chars
+        for p in &passages {
+            assert!(p.len() <= 600, "passage too long: {}", p.len());
+        }
+    }
+
+    #[test]
+    fn split_preserves_all_content() {
+        let text = "The quick brown fox. Jumps over the lazy dog. More text here for testing passage splitting with overlap.";
+        let passages = split_into_passages(text, 50, 10);
+        // All content should appear in at least one passage
+        assert!(passages.iter().any(|p| p.contains("quick")));
+        assert!(passages.iter().any(|p| p.contains("lazy")));
+        assert!(passages.iter().any(|p| p.contains("overlap")));
+    }
+
+    #[test]
+    fn split_respects_overlap() {
+        let text = "A".repeat(200);
+        let passages = split_into_passages(&text, 100, 20);
+        assert!(passages.len() >= 2);
+        // With overlap, the second passage should start before the first ends
+        // Total coverage should exceed text length
+        let total_chars: usize = passages.iter().map(|p| p.len()).sum();
+        assert!(total_chars > text.len(), "overlap should cause total > original");
     }
 }
