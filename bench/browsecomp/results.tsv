@@ -76,3 +76,4 @@ hindsight-ab-v2	0.2333	~12	69383	keep	Hindsight Phase A+B re-run. 7/30 exact, 8/
 hindsight-ab-v3	0.2333	~12	70457	keep	Hindsight Phase A+B v3 (tweaked). 7/30 exact. Gained Q625+Q797+Q853+Q885, lost Q152+Q572+Q643+Q1128
 hindsight-rust	0.2667	~12	121864	keep	Hindsight Rust (native tantivy). 8/30 exact. Q830+Q1030+Q853 exact.
 hindsight-passages	0.3333	~12	109556	NEW-BEST	Passage index + native tantivy. 10/30 exact, 12/30 fuzzy. NEW ALL-TIME BEST (fuzzy). Q1106+Q1144 new!
+hindsight-passages-rerank	0.2333	~12	105930	discard	Passage+ColBERT rerank. 7/30 exact, 8/30 fuzzy. Reranking hurts — regression from passage-only (12/30). Q747 new!
