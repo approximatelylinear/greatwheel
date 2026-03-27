@@ -128,7 +128,7 @@ Passage-level BM25 is the biggest single retrieval improvement in the project.
 
 ---
 
-## Completed Experiments (mar16-mar21)
+## Completed Experiments (mar16-mar27)
 
 ### Retrieval (Rust: gw-memory, gw-bench)
 - [x] **Boosted BM25** — phrase match (4x), slop phrase (2x), AND'd terms (1.5x), OR'd terms (1x). **Biggest contributor.**
@@ -145,11 +145,20 @@ Passage-level BM25 is the biggest single retrieval improvement in the project.
 - [x] **Search query coaching** — BM25 formulation advice. No benefit.
 - [x] **Answer type classification** — classify expected answer type before REPL loop. Within variance, no clear benefit.
 
+### Hindsight Integration (mar26-mar27)
+- [x] **FactRegistry (Phase A)** — structured evidence tracking in REPL. Available but not prompt-mandated (bloated prompts regress 9B model).
+- [x] **entity_search (Phase B)** — one-hop entity chain BM25 search. Available in namespace for multi-hop questions.
+- [x] **Passage-level BM25 index (Phase C/BC-4)** — 8.5M passages (512-byte chunks, 100-byte overlap). **New all-time best: 12/30 fuzzy.**
+- [x] **Passage + doc RRF (BC-6)** — fused via RRF. +2 exact, +4 fuzzy over doc-only.
+- [x] **Passage + ColBERT rerank** — reranking hurts passages (7/30). ColBERT drops keyword-matched gold docs.
+- [ ] **Entity co-occurrence graph (BC-5)** — deferred, see P4 in Planned Experiments.
+
 ### Infrastructure
 - [x] **Per-query timing breakdown** — pre_search_ms, rlm_loop_ms, bridge component timers
 - [x] **Re-embedded LanceDB index** — `browsecomp_docs_prefixed` with `search_document:` prefix (100K docs, 37 min)
 - [x] **ColBERT rerank server** — `bench/browsecomp/rerank_server.py` + `colbert_reranker.py`. Python sidecar, Rust calls via HTTP.
 - [x] **FINAL() extraction fix** — skip code blocks, require quoted strings (prevents variable names as answers)
+- [x] **Passage index CLI** — `--build-passage-index` and `--passage-index` flags on gw-bench
 
 ---
 
@@ -227,6 +236,46 @@ Passage-level BM25 is the biggest single retrieval improvement in the project.
 - **Effort:** Large — needs model + index infrastructure
 - **Expected impact:** Medium-high — addresses vocabulary mismatch without the noise of dense vectors
 - **Status:** Research needed
+
+### Passage Index Extensions (mar27 — builds on new best)
+
+Current best: **passage + doc BM25 via RRF (12/30 fuzzy)**. These experiments build on that baseline.
+
+#### P1. Wider passage retrieval pool
+- **What:** Increase passage retrieval from k=10 to k=200, take union with doc-level top-200 before RRF. Currently both channels retrieve k results; widening the passage pool may surface more buried documents.
+- **Where:** `crates/gw-memory/src/corpus.rs` — `search_with_passages()`, or make pool size configurable via CLI
+- **Effort:** Small — parameter change
+- **Expected impact:** Medium — more passage candidates means more chances to find buried answers. Risk: too many candidates could dilute precision (same pattern as ColBERT top-500).
+
+#### P2. PRF on passage-level results
+- **What:** Apply pseudo-relevance feedback to passage hits — extract distinctive terms from top passage snippets, use them as additional BM25 queries. Passage snippets are more focused than doc-level snippets, so PRF terms should be higher quality.
+- **Where:** `crates/gw-bench/src/main.rs` — pre_search, adapted for passage results
+- **Effort:** Medium — reuse existing PRF infrastructure with passage searcher
+- **Expected impact:** Medium — passage PRF should produce better expansion terms than doc-level PRF
+
+#### P3. Python client with passage index
+- **What:** Add passage search support to the Python path (`ollama_client.py` / `search_server.py`). Currently passages only work on the Rust native path.
+- **Where:** `bench/browsecomp/search_server.py` — add passage tantivy index, `bench/browsecomp/bm25s_searcher.py` — build passage-level bm25s index
+- **Effort:** Medium — either wrap Rust passage searcher via HTTP, or build a pure-Python passage index with bm25s
+- **Expected impact:** Low-medium — enables passage experiments on the faster/cheaper Python path (69K tokens vs 110K)
+
+#### P4. Entity co-occurrence graph (BC-5)
+- **What:** Regex NER over all 100K docs at index time → sparse entity-document matrix. At search time, extract entities from top-10 BM25 results, find other documents sharing those entities, add to retrieval pool.
+- **Where:** `crates/gw-memory/src/corpus.rs` — new entity index, or SQLite adjacency list
+- **Effort:** Large — requires corpus-wide NER + graph construction
+- **Expected impact:** Medium-high — directly addresses retrieval misses where gold doc shares entities with a top-10 result but isn't in BM25's top-k itself
+
+#### P5. Passage chunk size tuning
+- **What:** Current chunks are 512 bytes with 100-byte overlap. Test different sizes: 256/50, 1024/200, 2048/256. Smaller chunks = more precise matching but more fragmentation. Larger chunks = more context but less focused.
+- **Where:** `crates/gw-bench/src/main.rs` — `--build-passage-index` params
+- **Effort:** Small — rebuild index with different params, re-run
+- **Expected impact:** Low-medium — current 512/100 was a reasonable first guess, tuning may help
+
+#### P6. Passage-aware pre-search
+- **What:** Use passage index during pre-search (before the rLM loop). Currently pre-search uses doc-level BM25 only. Passage-level pre-search could inject more focused context snippets.
+- **Where:** `crates/gw-bench/src/main.rs` — `pre_search()` function
+- **Effort:** Small — swap `search_bm25_boosted` for `search_with_passages` in pre-search
+- **Expected impact:** Medium — better pre-search context = better starting point for the rLM loop. The 12/30 run already benefited from passage search during the loop; extending to pre-search could compound the effect.
 
 ---
 
