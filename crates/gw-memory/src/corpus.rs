@@ -889,12 +889,12 @@ fn split_into_passages(text: &str, chunk_bytes: usize, overlap_bytes: usize) -> 
         let end = snap_to_char_boundary(text, (start + chunk_bytes).min(text.len()));
 
         // Try to break at a sentence boundary within the last 20% of the chunk
-        let break_zone_start = snap_to_char_boundary(text, start + (chunk_bytes * 4 / 5));
+        let break_zone_start = snap_to_char_boundary(text, (start + (chunk_bytes * 4 / 5)).min(end));
         let actual_end = if end < text.len() {
-            let zone = &text[break_zone_start.min(end)..end];
+            let zone = &text[break_zone_start..end];
             zone.rfind(". ")
                 .or_else(|| zone.rfind('\n'))
-                .map(|offset| break_zone_start.min(end) + offset + 2)
+                .map(|offset| break_zone_start + offset + 2)
                 .unwrap_or(end)
         } else {
             end
