@@ -72,3 +72,4 @@ gepa-v1	0.1667	~12	119474	discard	GEPA-optimized prompt (5 calls, 8-query subset
 gepa-v2	0.2333	~12	137674	keep	GEPA v2 prompt (3x avg, GPT-5). 7/30 exact, 8/30 fuzzy. New: Q1030+Q572+Q885. Union across runs: 13+/30
 gepa-v3	0.3333	~12	138141	NEW-BEST-TIE	GEPA v3 prompt (18KB). 10/30 exact, 11/30 fuzzy. New: Q830! Ties all-time best.
 hindsight-ab	0.1000	~12	91281	discard	Hindsight Phase A+B (Python client, BM25s). 3/30 exact, 5/30 LLM. Almost all max_turns — FINAL() not called.
+hindsight-ab-v2	0.2333	~12	69383	keep	Hindsight Phase A+B re-run. 7/30 exact, 8/30 fuzzy. Q152 new! 69K tokens (efficient)
