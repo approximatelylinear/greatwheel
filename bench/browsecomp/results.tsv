@@ -74,3 +74,4 @@ gepa-v3	0.3333	~12	138141	NEW-BEST-TIE	GEPA v3 prompt (18KB). 10/30 exact, 11/30
 hindsight-ab	0.1000	~12	91281	discard	Hindsight Phase A+B (Python client, BM25s). 3/30 exact, 5/30 LLM. Almost all max_turns — FINAL() not called.
 hindsight-ab-v2	0.2333	~12	69383	keep	Hindsight Phase A+B re-run. 7/30 exact, 8/30 fuzzy. Q152 new! 69K tokens (efficient)
 hindsight-ab-v3	0.2333	~12	70457	keep	Hindsight Phase A+B v3 (tweaked). 7/30 exact. Gained Q625+Q797+Q853+Q885, lost Q152+Q572+Q643+Q1128
+hindsight-rust	0.2667	~12	121864	keep	Hindsight Rust (native tantivy). 8/30 exact. Q830+Q1030+Q853 exact.
