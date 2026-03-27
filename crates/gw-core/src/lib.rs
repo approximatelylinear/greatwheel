@@ -140,15 +140,3 @@ impl Default for MemoryKind {
     }
 }
 
-/// Edge type in the memory graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum MemoryEdgeKind {
-    /// Shared canonical entity between two memories.
-    Entity,
-    /// Temporal proximity (weighted by time distance).
-    Temporal,
-    /// Semantic similarity above threshold.
-    Semantic,
-    /// Explicit cause-effect relationship.
-    Causal,
-}

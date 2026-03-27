@@ -103,16 +103,6 @@ pub fn recency_score(occurred_at: DateTime<Utc>, now: DateTime<Utc>, sigma_days:
     (-(age_secs / sigma_secs)).exp() as f32
 }
 
-/// Check whether two intervals overlap: `[a_start, a_end] ∩ [b_start, b_end] ≠ ∅`
-pub fn intervals_overlap(
-    a_start: DateTime<Utc>,
-    a_end: DateTime<Utc>,
-    b_start: DateTime<Utc>,
-    b_end: DateTime<Utc>,
-) -> bool {
-    a_start <= b_end && a_end >= b_start
-}
-
 // ---- Internal helpers ---- //
 
 fn day_range(date: NaiveDate) -> TemporalRange {
@@ -294,13 +284,4 @@ mod tests {
         assert!(score < 0.01, "3-month-old memory should score near 0, got {score}");
     }
 
-    #[test]
-    fn intervals_overlap_yes() {
-        assert!(intervals_overlap(utc(2026, 3, 1), utc(2026, 3, 15), utc(2026, 3, 10), utc(2026, 3, 20)));
-    }
-
-    #[test]
-    fn intervals_overlap_no() {
-        assert!(!intervals_overlap(utc(2026, 3, 1), utc(2026, 3, 5), utc(2026, 3, 10), utc(2026, 3, 20)));
-    }
 }

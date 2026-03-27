@@ -68,11 +68,10 @@ pub struct CorpusSearcher {
     colbert_table: Option<lancedb::Table>,
 }
 
-/// Passage-level tantivy index — documents split into ~512-char chunks.
+/// Passage-level tantivy index — documents split into ~512-byte chunks.
 struct PassageIndex {
     index: Index,
     reader: IndexReader,
-    f_passage_id: Field,
     f_docid: Field,
     f_text: Field,
 }
@@ -810,14 +809,12 @@ impl PassageIndex {
             .map_err(|e: tantivy::TantivyError| MemoryError::Tantivy(format!("{e}")))?;
 
         let schema = index.schema();
-        let f_passage_id = schema.get_field("passage_id")
-            .map_err(|e| MemoryError::Tantivy(format!("missing 'passage_id' field: {e}")))?;
         let f_docid = schema.get_field("docid")
             .map_err(|e| MemoryError::Tantivy(format!("missing 'docid' field: {e}")))?;
         let f_text = schema.get_field("text")
             .map_err(|e| MemoryError::Tantivy(format!("missing 'text' field: {e}")))?;
 
-        Ok(Self { index, reader, f_passage_id, f_docid, f_text })
+        Ok(Self { index, reader, f_docid, f_text })
     }
 
     fn search(&self, query: &str, k: usize) -> Result<Vec<CorpusHit>, MemoryError> {

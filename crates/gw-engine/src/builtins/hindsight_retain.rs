@@ -91,63 +91,23 @@ impl Plugin for HindsightRetainPlugin {
                     return EventResult::Continue;
                 }
 
-                // Extract entities
                 let entities = patterns_for_store.extract(&text, max_entities);
-
-                // Classify memory kind
                 let kind = classify_kind(&text);
 
-                // Detect confidence for opinion-type memories
-                let confidence = if kind == "opinion" {
-                    Some(0.5_f64) // Default confidence for new opinions
-                } else {
-                    None
+                // Start from existing meta or empty object; don't overwrite caller-set fields
+                let mut m = match meta.take() {
+                    Some(Value::Object(m)) => m,
+                    _ => serde_json::Map::new(),
                 };
+                m.entry("kind").or_insert_with(|| Value::String(kind.into()));
+                if !entities.is_empty() {
+                    m.entry("entities").or_insert_with(|| {
+                        Value::Array(entities.iter().map(|e| Value::String(e.clone())).collect())
+                    });
+                }
 
-                // Build or enrich the meta JSON
-                let meta_obj = match meta.take() {
-                    Some(Value::Object(mut m)) => {
-                        // Enrich existing meta — don't overwrite fields the caller set
-                        if m.get("kind").is_none() {
-                            m.insert("kind".into(), Value::String(kind.into()));
-                        }
-                        if m.get("entities").is_none() && !entities.is_empty() {
-                            m.insert(
-                                "entities".into(),
-                                Value::Array(entities.iter().map(|e| Value::String(e.clone())).collect()),
-                            );
-                        }
-                        if m.get("confidence").is_none() {
-                            if let Some(c) = confidence {
-                                m.insert("confidence".into(), Value::Number(serde_json::Number::from_f64(c).unwrap_or(serde_json::Number::from(0))));
-                            }
-                        }
-                        Value::Object(m)
-                    }
-                    _ => {
-                        // Create new meta
-                        let mut m = serde_json::Map::new();
-                        m.insert("kind".into(), Value::String(kind.into()));
-                        if !entities.is_empty() {
-                            m.insert(
-                                "entities".into(),
-                                Value::Array(entities.iter().map(|e| Value::String(e.clone())).collect()),
-                            );
-                        }
-                        if let Some(c) = confidence {
-                            m.insert("confidence".into(), Value::Number(serde_json::Number::from_f64(c).unwrap_or(serde_json::Number::from(0))));
-                        }
-                        Value::Object(m)
-                    }
-                };
-
-                debug!(
-                    kind = kind,
-                    entity_count = entities.len(),
-                    "hindsight-retain enriched memory"
-                );
-
-                *meta = Some(meta_obj);
+                debug!(kind, entity_count = entities.len(), "hindsight-retain enriched memory");
+                *meta = Some(Value::Object(m));
                 EventResult::Modified
             }),
         );
