@@ -1,9 +1,9 @@
 # BrowseComp-Plus Experiment Designs
 
-## Current Best: 40.0% (12/30) — commit 7f431fc
+## Current Best: 40.0% fuzzy (12/30) — commit 1331262
 
-Native boosted BM25 top-200 → Reason-ModernColBERT rerank → top-10.
-Previous best: 36.7% (11/30, commit f6d4868) with boosted BM25 + PRF only.
+Passage-level BM25 + doc-level boosted BM25 fused via RRF (no reranking).
+Previous best: 40.0% exact (12/30, commit 7f431fc) with BM25 top-200 → ColBERT rerank.
 
 ## What We've Learned
 
@@ -97,6 +97,31 @@ ColBERT (Reason-ModernColBERT, 149M params) as a reranker on BM25 results is the
 - The right documents *are* in BM25's top-200, just not ranked highly enough — ColBERT surfaces them
 
 **Model note:** qwen3.5:9b is required for competitive results. qwen2.5:7b scores ~3x worse (3-4/30 vs 8-12/30) with identical code.
+
+### Passage Index Findings (mar27)
+
+Passage-level BM25 is the biggest single retrieval improvement in the project.
+
+**Architecture:** 100K documents split into ~512-byte chunks with 100-byte overlap at sentence boundaries → 8.5M passages indexed in a separate tantivy index. At search time, both doc-level boosted BM25 and passage-level BM25 run in parallel, results fused via RRF.
+
+| Configuration | Exact | Fuzzy | Notes |
+|---|---|---|---|
+| Doc-level BM25 only | 8/30 | — | Baseline (no passages, no rerank) |
+| **Passage + doc RRF** | **10/30** | **12/30** | **New all-time best (fuzzy). +2 exact, +4 fuzzy over baseline** |
+| Passage + doc RRF + ColBERT rerank | 7/30 | 8/30 | Reranking hurts — regression from passage-only |
+
+**Why passages help:**
+- Long documents where the answer is in a small section get diluted by doc-level BM25 — the passage index matches the relevant paragraph directly
+- Q1106 (Illusion) and Q1144 (dangerous driving) are new solves: answers were buried in documents too long for doc-level BM25 to rank highly
+- Passage-level snippets are more focused — the model gets the relevant paragraph instead of scanning a full document
+
+**Why ColBERT reranking hurts passages:**
+- 10 queries lost gold doc access after reranking (passage RRF had the gold doc, rerank dropped it)
+- ColBERT's semantic similarity ≠ BM25's keyword relevance for entity-heavy BrowseComp queries
+- The gold documents contain specific keywords that BM25 matches perfectly; ColBERT favors topically similar but wrong documents
+- 5 previously correct answers lost, only 2 gained
+
+**Conclusion:** For BrowseComp's entity-heavy queries, BM25 keyword matching (doc + passage) is the right strategy. Semantic reranking consistently hurts by diluting keyword precision. ColBERT reranking should not be used with passage-level retrieval.
 
 ### Key insight
 86% of failures are **retrieval** (right documents never found), not extraction. The 9B model reasons well once it has the right documents. Dense vector search doesn't help — but ColBERT reranking of a wider BM25 pool does, because the right documents are often in BM25's top-200 but ranked too low for the agent to see.
