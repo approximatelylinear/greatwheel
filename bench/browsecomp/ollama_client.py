@@ -64,73 +64,47 @@ Your REPL has these built-in functions:
 - search(query) -> list of {docid, score, snippet} dicts. BM25 keyword search — use 2-4 specific terms.
 - get_document(docid) -> full document text as string
 - llm_query(prompt) -> ask a sub-LLM to analyze text (useful for long documents)
-- entity_search(entity, hops=1, k=5) -> search for an entity AND co-occurring entities (one-hop chain). Use for multi-hop questions.
-- facts — a FactRegistry for structured evidence tracking (see below)
+- entity_search(entity, hops=1, k=5) -> one-hop entity chain search. Use for multi-hop questions.
 
-FACT TRACKING:
-Use `facts` to organize evidence and track candidate answers. This prevents losing findings across iterations.
-
-  facts.add(text, source="docid")          — Record extracted facts (auto-extracts entities)
-  facts.propose("answer", confidence=0.7, evidence="reason")  — Propose a candidate answer
-  facts.reinforce("answer", evidence="new evidence")   — Strengthen a candidate (+0.15)
-  facts.contradict("answer", reason="why")             — Weaken a candidate (-0.25)
-  facts.summary()          — View all facts grouped by entity
-  facts.candidates()       — View ranked candidates by confidence
-  facts.best_candidate()   — Get (answer, confidence) of top candidate
-  facts.for_entity("Name") — All facts mentioning an entity
-  facts.entities()         — All discovered entities by frequency
-
-STRATEGY FOR MULTI-HOP QUESTIONS:
-1. Identify the most distinctive clues (specific dates, places, events, organizations)
+STRATEGY:
+1. Identify the most distinctive clues (specific dates, places, events, names)
 2. Search for those clues with SHORT keyword queries (2-4 terms)
 3. Read promising documents with get_document()
-4. Use llm_query() to extract facts, then store them: facts.add(extracted, source=docid)
-5. Propose candidate answers: facts.propose("candidate", evidence="from doc X")
-6. Use entity_search("discovered entity") to follow entity chains (multi-hop)
-7. Reinforce or contradict candidates as you find more evidence
-8. When confident, submit your best candidate
+4. Use llm_query() to analyze long documents: llm_query(f"Who is mentioned? {doc[:5000]}")
+5. Use discovered names/facts to search again
+6. Chain your findings until you can answer
+7. SUBMIT YOUR ANSWER as soon as you have a plausible candidate
 
 Example:
 ```python
-# Step 1: Search for distinctive clues
 results = search("convent Michigan 1932")
 for r in results:
     print(r['docid'], r['snippet'][:200])
 ```
-Then:
 ```python
-# Step 2: Read and extract facts
 doc = get_document("12345")
-extracted = llm_query(f"Extract all relevant facts: {doc[:5000]}")
-facts.add(extracted, source="12345")
-print(facts.summary())
+answer = llm_query(f"What person is described in this article? {doc[:5000]}")
+print(answer)
 ```
-Then:
 ```python
-# Step 3: Propose a candidate and search for confirmation
-facts.propose("Sister Mary Joseph", confidence=0.6, evidence="doc 12345 mentions her founding the convent")
-results = search("Sister Mary Joseph Michigan")
+# Search for discovered entity
+results = search("Jane Smith Michigan convent")
 for r in results:
-    doc = get_document(r['docid'])
-    extracted = llm_query(f"Does this confirm Sister Mary Joseph founded the convent? {doc[:5000]}")
-    facts.add(extracted, source=r['docid'])
-    if "confirm" in extracted.lower():
-        facts.reinforce("Sister Mary Joseph", evidence=f"confirmed in {r['docid']}")
-print(facts.candidates())
+    print(r['docid'], r['snippet'][:200])
 ```
-Then:
-```python
-# Step 4: Submit best candidate
-best = facts.best_candidate()
-print(f"Best: {best}")
-```
+
+RULES:
+- NEVER answer "Unable to determine". Always give your BEST GUESS from the documents.
+- NEVER repeat a similar search. Each search must use different keywords.
+- ALWAYS read at least 2 full documents before submitting.
+- A wrong answer is better than no answer. Submit EARLY.
 
 When you have enough evidence, provide your answer as:
 Exact Answer: <precise answer>"""
 
 QUERY_TEMPLATE = """Question: {question}
 
-Search the corpus step by step. Use short keyword queries. Read full documents. Use llm_query() to extract facts into `facts.add()`. Track candidates with `facts.propose()`.
+Search the corpus step by step. Use short keyword queries. Read full documents. Use llm_query() to analyze long text.
 When done: Exact Answer: <answer>"""
 
 # --------------------------------------------------------------------------- #
@@ -498,14 +472,21 @@ class OllamaAgent:
                 tool_counts["python"] = tool_counts.get("python", 0) + 1
                 all_outputs.append(output)
 
-            # Feed REPL output back as a user message
+            # Feed REPL output back as a user message with turn-aware nudging
             repl_output = "\n".join(f"[REPL output]\n{o}" for o in all_outputs)
-            # Truncate to prevent context explosion
             if len(repl_output) > 6000:
                 repl_output = repl_output[:6000] + "\n... (truncated)"
+
+            if turn >= self.max_turns - 2:
+                nudge = "\n\nLAST CHANCE — you MUST provide your answer NOW as: Exact Answer: <answer>"
+            elif turn >= self.max_turns // 2:
+                nudge = "\n\nYou should have a candidate by now. Provide your answer as: Exact Answer: <answer>"
+            else:
+                nudge = "\n\nContinue your analysis. Write more code or provide your answer as: Exact Answer: <answer>"
+
             messages.append({
                 "role": "user",
-                "content": repl_output + "\n\nContinue your analysis. Write more code or provide your answer as: Exact Answer: <answer>",
+                "content": repl_output + nudge,
             })
         else:
             status = "max_turns"
