@@ -478,6 +478,8 @@ impl CorpusSearcher {
 
         let mut stream = vq
             .column("vector")
+            .nprobes(1)         // Best recall AND fastest for our IVF index
+            .refine_factor(2)   // Post-refine against full-precision vectors
             .limit(k)
             .execute()
             .await?;
