@@ -79,3 +79,4 @@ hindsight-passages	0.3333	~12	109556	NEW-BEST	Passage index + native tantivy. 10
 hindsight-passages-rerank	0.2333	~12	105930	discard	Passage+ColBERT rerank. 7/30 exact, 8/30 fuzzy. Reranking hurts — regression from passage-only (12/30). Q747 new!
 passages-rerank-c1	0.4333	~12	98272	NEW-BEST	Passage+ColBERT rerank (8192 tokens). 13/30 exact, 16/30 fuzzy. MASSIVE NEW BEST!
 passages-rerank-c2	0.3667	~12	123128	discard	C2: top-50 rerank pool. 11/30 exact, 14/30 fuzzy. Worse than C1 top-200 (16/30 fuzzy). Q1034+Q1115 new but lost 5.
+passages-rerank-c3	0.4333	~12	110722	keep	C3: query condensation + 8192 tokens. 13/30 exact, 14/30 fuzzy. Q1029 FIRST EVER CORRECT!

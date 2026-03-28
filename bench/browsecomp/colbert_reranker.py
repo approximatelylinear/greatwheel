@@ -61,6 +61,51 @@ class ColBERTReranker:
             scores.append(max_sim)
         return scores
 
+    def _condense_query(self, query: str, max_tokens: int = 120) -> str:
+        """Condense long queries to fit ColBERT's 128-token limit.
+
+        Strategy: keep the last sentence (usually the actual question)
+        plus the most distinctive sentences from the rest. This preserves
+        the question intent while fitting within the token budget.
+        """
+        tokens = self.tokenizer.encode(query)
+        if len(tokens) <= max_tokens:
+            return query  # Already fits
+
+        # Split into sentences, keep the last one (the question)
+        import re
+        sentences = [s.strip() for s in re.split(r'[.!?]+', query) if s.strip()]
+        if not sentences:
+            return self.tokenizer.decode(tokens[:max_tokens], skip_special_tokens=True)
+
+        # Last sentence is usually the question — always keep it
+        question = sentences[-1]
+        rest = sentences[:-1]
+
+        # Score remaining sentences by distinctiveness (proportion of
+        # capitalized words, numbers, and rare terms)
+        def score_sentence(s: str) -> float:
+            words = s.split()
+            if not words:
+                return 0
+            caps = sum(1 for w in words if w[0].isupper() and len(w) > 1)
+            nums = sum(1 for w in words if any(c.isdigit() for c in w))
+            return (caps + nums * 2) / len(words)
+
+        scored = [(score_sentence(s), s) for s in rest]
+        scored.sort(key=lambda x: -x[0])
+
+        # Build condensed query: question + most distinctive sentences
+        result = question
+        for _, sent in scored:
+            candidate = sent + ". " + result
+            if len(self.tokenizer.encode(candidate)) <= max_tokens:
+                result = candidate
+            else:
+                break
+
+        return result
+
     def rerank(self, query: str, documents: list[dict[str, Any]], k: int = 10) -> list[dict[str, Any]]:
         """Rerank documents by ColBERT MaxSim score.
 
@@ -79,7 +124,9 @@ class ColBERTReranker:
         doc_texts = [d.get("text", "") for d in documents]
 
         t0 = time.monotonic()
-        query_emb = self._encode([query], is_query=True)
+        # Condense long queries to fit ColBERT's 128-token limit
+        condensed = self._condense_query(query)
+        query_emb = self._encode([condensed], is_query=True)
 
         # Encode documents in batches to manage memory
         batch_size = 8
