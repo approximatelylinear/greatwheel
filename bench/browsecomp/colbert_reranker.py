@@ -26,7 +26,7 @@ class ColBERTReranker:
         self.model_name = model_name
 
     @torch.no_grad()
-    def _encode(self, texts: list[str], is_query: bool, max_length: int = 512) -> torch.Tensor:
+    def _encode(self, texts: list[str], is_query: bool, max_length: int = 8192) -> torch.Tensor:
         """Encode texts into token-level embeddings (batch × tokens × dim)."""
         if is_query:
             max_length = 128  # ColBERT query limit
@@ -75,8 +75,8 @@ class ColBERTReranker:
         if not documents:
             return []
 
-        # Truncate docs for encoding (ColBERT typically uses 512 tokens for docs)
-        doc_texts = [d.get("text", "")[:2048] for d in documents]
+        # Use full doc text — truncation to 8192 tokens happens in _encode
+        doc_texts = [d.get("text", "") for d in documents]
 
         t0 = time.monotonic()
         query_emb = self._encode([query], is_query=True)
