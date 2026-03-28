@@ -518,11 +518,11 @@ impl CorpusSearcher {
         Ok(hits)
     }
 
-    /// Hybrid search: BM25-first with ColBERT augmentation.
+    /// Hybrid search: BM25 + ColBERT merged with Reciprocal Rank Fusion.
     ///
-    /// BM25 results maintain their order. ColBERT-unique documents (not in BM25
-    /// top-k) are appended at the end. This preserves BM25 precision while
-    /// adding retrieval diversity from ColBERT's reasoning-trained embeddings.
+    /// Both BM25 and ColBERT contribute equally via RRF. Documents found by
+    /// both systems get a rank boost. This ensures ColBERT's unique finds
+    /// are interleaved with BM25 results rather than hidden at the end.
     pub async fn search_hybrid_colbert(
         &self,
         query: &str,
@@ -532,21 +532,32 @@ impl CorpusSearcher {
         let bm25_hits = self.search_bm25_boosted(query, k)?;
         let colbert_hits = self.search_colbert(query_token_vecs, k).await?;
 
-        // BM25 results first, in original order
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut results: Vec<CorpusHit> = Vec::with_capacity(k * 2);
+        let bm25_keys: Vec<ScoredKey> = bm25_hits
+            .iter()
+            .map(|h| ScoredKey { key: h.docid.clone(), score: h.score })
+            .collect();
+        let colbert_keys: Vec<ScoredKey> = colbert_hits
+            .iter()
+            .map(|h| ScoredKey { key: h.docid.clone(), score: h.score })
+            .collect();
 
-        for h in &bm25_hits {
-            seen.insert(h.docid.clone());
-            results.push(h.clone());
+        let fused = reciprocal_rank_fusion(&[bm25_keys, colbert_keys], 60);
+
+        // Build text lookup from both result sets
+        let mut text_map = std::collections::HashMap::new();
+        for h in bm25_hits.iter().chain(colbert_hits.iter()) {
+            text_map.entry(h.docid.clone()).or_insert_with(|| h.text.clone());
         }
 
-        // Append ColBERT-unique docs (not already in BM25 results)
-        for h in &colbert_hits {
-            if seen.insert(h.docid.clone()) {
-                results.push(h.clone());
-            }
-        }
+        let results: Vec<CorpusHit> = fused
+            .into_iter()
+            .take(k * 2)  // return more results since both channels contribute
+            .map(|(docid, score)| CorpusHit {
+                text: text_map.remove(&docid).unwrap_or_default(),
+                docid,
+                score,
+            })
+            .collect();
 
         Ok(results)
     }
