@@ -80,3 +80,4 @@ hindsight-passages-rerank	0.2333	~12	105930	discard	Passage+ColBERT rerank. 7/30
 passages-rerank-c1	0.4333	~12	98272	NEW-BEST	Passage+ColBERT rerank (8192 tokens). 13/30 exact, 16/30 fuzzy. MASSIVE NEW BEST!
 passages-rerank-c2	0.3667	~12	123128	discard	C2: top-50 rerank pool. 11/30 exact, 14/30 fuzzy. Worse than C1 top-200 (16/30 fuzzy). Q1034+Q1115 new but lost 5.
 passages-rerank-c3	0.4333	~12	110722	keep	C3: query condensation + 8192 tokens. 13/30 exact, 14/30 fuzzy. Q1029 FIRST EVER CORRECT!
+c4-colbert-retriever	0.3000	~12	118247	discard	C4: ColBERT first-stage retriever + passage. 9/30 exact, 11/30 fuzzy. Below C1 reranker (16/30).
