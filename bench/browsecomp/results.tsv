@@ -83,3 +83,4 @@ passages-rerank-c3	0.4333	~12	110722	keep	C3: query condensation + 8192 tokens. 
 c4-colbert-retriever	0.3000	~12	118247	discard	C4: ColBERT first-stage retriever + passage. 9/30 exact, 11/30 fuzzy. Below C1 reranker (16/30).
 c4-rrf	0.3000	~12	119892	keep	C4 with RRF fusion (not augmentation). 9/30 exact, 12/30 fuzzy. +1 over augmentation but still below C1 reranker (16/30).
 c4-rrf-fast	0.2667	~12	107909	keep	C4 RRF with nprobes=1+refine=2. 8/30 exact, 10/30 fuzzy. Slight regression from slow C4 (12/30) but much faster.
+c7-passage-rerank	0.2333	~12	115809	discard	C7: passage-only → ColBERT rerank. 7/30 exact, 10/30 fuzzy. Worse than C1 (16/30). Passage-only has narrower coverage.
