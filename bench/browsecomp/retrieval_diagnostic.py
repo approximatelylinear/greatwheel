@@ -142,21 +142,55 @@ def _open_tantivy():
     print(f"Tantivy index opened: {_tantivy_searcher.num_docs} docs", file=sys.stderr)
 
 
+def _sanitize_query(query: str) -> str:
+    """Sanitize a query for tantivy's query parser.
+
+    Strips characters that tantivy treats as syntax:
+    - Colons (field:value syntax)
+    - Hyphens at start of terms (exclusion)
+    - Parentheses, brackets, braces (grouping)
+    - Quotes, tildes, carets, backslashes
+    - Asterisks, question marks (wildcards)
+
+    Also removes words that look like field names (word followed by colon).
+    """
+    # Remove field:value patterns (e.g., "name: Richard", "birth_date: 1943")
+    sanitized = re.sub(r'\b\w+:', ' ', query)
+    # Remove all syntax characters
+    sanitized = re.sub(r'["\'\(\)\[\]\{\}~\^\\*?!#@&|/<>]', ' ', sanitized)
+    # Remove leading hyphens on words (NOT operator)
+    sanitized = re.sub(r'(?:^|\s)-(\w)', r' \1', sanitized)
+    # Collapse whitespace
+    sanitized = re.sub(r'\s+', ' ', sanitized).strip()
+    return sanitized
+
+
 def _tantivy_py_search(query: str, k: int = 200) -> list[dict]:
-    """Search using tantivy-py."""
+    """Search using tantivy-py with boolean term queries (no parser)."""
     cache_key = (query, k)
     if cache_key in _searcher_cache:
         return _searcher_cache[cache_key]
 
     _open_tantivy()
 
-    sanitized = re.sub(r'["\'\(\)\[\]\{\}~\^\\]', ' ', query)
-    if not sanitized.strip():
+    import tantivy
+
+    # Tokenize: lowercase, split on non-alphanumeric, filter short
+    tokens = re.findall(r'[a-zA-Z0-9]+', query.lower())
+    tokens = [t for t in tokens if len(t) >= 2]
+    if not tokens:
         return []
 
     try:
-        parsed = _tantivy_index.parse_query(sanitized, ["text"])
-        results = _tantivy_searcher.search(parsed, k)
+        # Build boolean OR query — no parser, no syntax issues
+        schema = _tantivy_index.schema
+        clauses = [
+            (tantivy.Occur.Should, tantivy.Query.term_query(schema, "text", t))
+            for t in tokens
+        ]
+        query_obj = tantivy.Query.boolean_query(clauses)
+        results = _tantivy_searcher.search(query_obj, k)
+
         hits = []
         for score, doc_address in results.hits:
             doc = _tantivy_searcher.doc(doc_address)
@@ -166,7 +200,7 @@ def _tantivy_py_search(query: str, k: int = 200) -> list[dict]:
         _searcher_cache[cache_key] = hits
         return hits
     except Exception as e:
-        print(f"  Search error for '{query[:50]}': {e}", file=sys.stderr)
+        print(f"  Search error for '{query[:60]}': {e}", file=sys.stderr)
         return []
 
 
