@@ -88,3 +88,4 @@ colbert-primary-rerank	0.3000	~12	151489	keep	ColBERT primary retriever + ColBER
 colbert-passage-rerank	0.2333	~12	116178	keep	ColBERT retrieval + passage snippets + reranker. 7/30 exact, 8/30 fuzzy. Q706+Q893 FIRST EVER CORRECT!
 passages-4096-rerank	0.3667	~12	95499	keep	4096-byte passages + ColBERT rerank. 11/30 exact, 14/30 fuzzy. Close to C1 (16/30), more efficient (95K tokens).
 passages-4096-doc-rrf-rerank	0.3667	~12	108395	discard	4096 passages + doc RRF + ColBERT rerank. 11/30 exact, 12/30 fuzzy. Doc RRF hurts again.
+passages-4096-noRRF-rerank	0.2333	~12	118358	discard	4096 passage-only (no doc RRF) + rerank. 7/30 exact. Doc RRF actually helps for 4096 passages.
