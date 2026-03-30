@@ -436,6 +436,8 @@ impl BrowseCompBridge {
                         }
                         "colbert" => {
                             // ColBERT-only: encode query tokens, then LanceDB MaxSim search
+                            // Widen retrieval when reranking (reranker refines ANN approximation)
+                            let retrieve_k = if rerank_url.is_some() { std::cmp::max(k, 200) } else { k };
                             let colbert_url = self.colbert_encode_url.clone();
                             let token_vecs = encode_colbert_query(&colbert_url, &query_str).await
                                 .map_err(|e| AgentError::HostFunction {
@@ -443,7 +445,7 @@ impl BrowseCompBridge {
                                     message: format!("ColBERT encode error: {e}"),
                                 })?;
                             let t1 = std::time::Instant::now();
-                            let hits = searcher.search_colbert(&token_vecs, k).await
+                            let hits = searcher.search_colbert(&token_vecs, retrieve_k).await
                                 .map_err(|e| AgentError::HostFunction {
                                     function: "search".into(),
                                     message: format!("ColBERT search error: {e}"),
