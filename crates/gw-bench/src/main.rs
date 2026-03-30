@@ -475,14 +475,25 @@ impl BrowseCompBridge {
                             // Default to boosted BM25 — retrieve more if reranking
                             let retrieve_k = if rerank_url.is_some() { std::cmp::max(k, 200) } else { k };
                             let t0 = std::time::Instant::now();
-                            // Use passage-level RRF when passage index is available
+                            // Use passage search when available; skip doc RRF when reranking
                             let hits = if searcher.has_passage_index() {
-                                searcher.search_with_passages(&query_str, retrieve_k).map_err(|e| {
-                                    AgentError::HostFunction {
-                                        function: "search".into(),
-                                        message: format!("{e}"),
-                                    }
-                                })?
+                                if rerank_url.is_some() {
+                                    // Passage-only when reranking — ColBERT handles quality
+                                    searcher.search_passages(&query_str, retrieve_k).map_err(|e| {
+                                        AgentError::HostFunction {
+                                            function: "search".into(),
+                                            message: format!("{e}"),
+                                        }
+                                    })?
+                                } else {
+                                    // Doc+passage RRF when no reranker
+                                    searcher.search_with_passages(&query_str, retrieve_k).map_err(|e| {
+                                        AgentError::HostFunction {
+                                            function: "search".into(),
+                                            message: format!("{e}"),
+                                        }
+                                    })?
+                                }
                             } else {
                                 searcher.search_bm25_boosted(&query_str, retrieve_k).map_err(|e| {
                                     AgentError::HostFunction {
