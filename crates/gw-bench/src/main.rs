@@ -2041,6 +2041,14 @@ struct Cli {
     #[arg(long)]
     passage_index: Option<String>,
 
+    /// Passage chunk size in bytes (for --build-passage-index)
+    #[arg(long, default_value_t = 512)]
+    passage_chunk_bytes: usize,
+
+    /// Passage overlap in bytes (for --build-passage-index)
+    #[arg(long, default_value_t = 100)]
+    passage_overlap_bytes: usize,
+
     /// Path to corpus JSONL file (for --build-index / --build-passage-index)
     #[arg(long)]
     corpus_jsonl: Option<String>,
@@ -2455,8 +2463,8 @@ async fn main() {
         let count = CorpusSearcher::build_passage_index(
             Path::new(jsonl_path),
             Path::new(out_path),
-            512,  // chunk_bytes
-            100,  // overlap_bytes
+            cli.passage_chunk_bytes,
+            cli.passage_overlap_bytes,
         ).expect("Failed to build passage index");
         info!(count, "Passage index built successfully");
         return;
