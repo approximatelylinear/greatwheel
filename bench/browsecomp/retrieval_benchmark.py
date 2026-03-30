@@ -143,20 +143,73 @@ def gold_doc_rank(hits: list[dict], gold_docids: set[str]) -> int | None:
     return None
 
 
+class ColBERTSearcher:
+    """ColBERT multi-vector search via LanceDB."""
+
+    def __init__(self, lance_path: str, encode_url: str | None = None):
+        import lancedb
+        self.db = lancedb.connect(lance_path)
+        self.table = self.db.open_table("colbert_docs")
+        self.encode_url = encode_url
+
+        # Load encoder locally if no server URL
+        self._encoder = None
+        if not encode_url:
+            from colbert_encode import ColBERTEncoder
+            self._encoder = ColBERTEncoder("lightonai/Reason-ModernColBERT")
+
+        print(f"  colbert: {self.table.count_rows()} rows (LanceDB)", file=sys.stderr)
+
+    def _encode_query(self, query: str) -> list[list[float]]:
+        if self._encoder:
+            return self._encoder.encode_query(query)
+        else:
+            import requests
+            resp = requests.post(
+                f"{self.encode_url}/encode",
+                json={"text": query},
+                timeout=30,
+            )
+            return resp.json()["tokens"]
+
+    def search(self, query: str, k: int = 200, nprobes: int = 1, refine_factor: int = 2) -> list[dict]:
+        q_vecs = self._encode_query(query)
+        results = (
+            self.table.search(q_vecs)
+            .nprobes(nprobes)
+            .refine_factor(refine_factor)
+            .limit(k)
+            .to_pandas()
+        )
+        hits = []
+        for _, row in results.iterrows():
+            hits.append({"docid": str(row["docid"]), "score": float(-row["_distance"]), "rank": len(hits)})
+        return hits
+
+
 def run_benchmark(
     doc_index_path: str,
     passage_index_path: str | None,
-    queries: list[tuple[str, str]],
-    gt: dict[str, dict],
+    colbert_lance_path: str | None = None,
+    colbert_encode_url: str | None = None,
+    queries: list[tuple[str, str]] = [],
+    gt: dict[str, dict] = {},
     k_values: list[int] = [5, 10, 20, 50, 100, 200],
+    colbert_nprobes: list[int] = [1, 5, 20],
 ):
     print("Opening indexes...", file=sys.stderr)
     doc_searcher = TantivySearcher(doc_index_path, "doc")
     passage_searcher = TantivySearcher(passage_index_path, "passage") if passage_index_path else None
+    colbert_searcher = ColBERTSearcher(colbert_lance_path, colbert_encode_url) if colbert_lance_path else None
 
     strategies = ["doc_bm25"]
     if passage_searcher:
         strategies.extend(["passage_bm25", "doc_passage_rrf"])
+    if colbert_searcher:
+        for np in colbert_nprobes:
+            strategies.append(f"colbert_np{np}")
+        if passage_searcher:
+            strategies.append("all_3_rrf")
 
     # Results: {strategy: {k: count_recalled}}
     recall_counts = {s: {k: 0 for k in k_values} for s in strategies}
@@ -186,6 +239,7 @@ def run_benchmark(
                 recall_counts["doc_bm25"][k] += 1
 
         # Strategy 2: Passage BM25
+        passage_hits = []
         if passage_searcher:
             passage_hits = passage_searcher.search(query_text, max(k_values))
             passage_recall = measure_recall(passage_hits, gold, k_values)
@@ -205,6 +259,30 @@ def run_benchmark(
             for k in k_values:
                 if rrf_recall[k]:
                     recall_counts["doc_passage_rrf"][k] += 1
+
+        # ColBERT strategies
+        if colbert_searcher:
+            for np in colbert_nprobes:
+                colbert_hits = colbert_searcher.search(query_text, max(k_values), nprobes=np)
+                colbert_recall = measure_recall(colbert_hits, gold, k_values)
+                colbert_rank = gold_doc_rank(colbert_hits, gold)
+                query_result[f"colbert_np{np}_rank"] = colbert_rank
+
+                for k in k_values:
+                    if colbert_recall[k]:
+                        recall_counts[f"colbert_np{np}"][k] += 1
+
+            # 3-channel RRF: doc + passage + ColBERT(nprobes=1)
+            if passage_searcher:
+                colbert_hits_1 = colbert_searcher.search(query_text, max(k_values), nprobes=1)
+                all3_hits = rrf_fusion([doc_hits, passage_hits, colbert_hits_1])
+                all3_recall = measure_recall(all3_hits, gold, k_values)
+                all3_rank = gold_doc_rank(all3_hits, gold)
+                query_result["all_3_rrf_rank"] = all3_rank
+
+                for k in k_values:
+                    if all3_recall[k]:
+                        recall_counts["all_3_rrf"][k] += 1
 
         per_query.append(query_result)
 
@@ -270,6 +348,8 @@ def main():
     parser = argparse.ArgumentParser(description="Retrieval-only benchmark")
     parser.add_argument("--doc-index", default=str(REPO_ROOT / "vendor" / "BrowseComp-Plus" / "data" / "tantivy-corpus"))
     parser.add_argument("--passage-index", default=None)
+    parser.add_argument("--colbert-lance", default=None, help="Path to ColBERT LanceDB index")
+    parser.add_argument("--colbert-encode-url", default=None, help="ColBERT encode server URL")
     parser.add_argument("--query-file", default=None, help="TSV query file (default: sample30.tsv)")
     parser.add_argument("--json", action="store_true", help="Output JSON instead of table")
     args = parser.parse_args()
@@ -280,6 +360,8 @@ def main():
     results = run_benchmark(
         doc_index_path=args.doc_index,
         passage_index_path=args.passage_index,
+        colbert_lance_path=args.colbert_lance,
+        colbert_encode_url=args.colbert_encode_url,
         queries=queries,
         gt=gt,
     )
