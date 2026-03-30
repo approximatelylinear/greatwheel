@@ -450,6 +450,7 @@ impl CorpusSearcher {
         &self,
         query_token_vecs: &[Vec<f32>],
         k: usize,
+        query_text: &str,
     ) -> Result<Vec<CorpusHit>, MemoryError> {
         let table = match &self.colbert_table {
             Some(t) => t,
@@ -502,10 +503,16 @@ impl CorpusSearcher {
                         // MaxSim returns negative distance (higher = better)
                         let score = -distance;
 
-                        // Look up text from tantivy (ColBERT table may not store text)
-                        let text = self.get_document(&docid)?
-                            .map(|t| t.chars().take(3000).collect::<String>())
-                            .unwrap_or_default();
+                        // Look up best passage for this docid (focused snippet)
+                        // Falls back to first 3000 chars of doc if no passage index
+                        let text = self.best_passage_for_colbert(&docid, query_text)
+                            .unwrap_or_else(|| {
+                                self.get_document(&docid)
+                                    .ok()
+                                    .flatten()
+                                    .map(|t| t.chars().take(3000).collect::<String>())
+                                    .unwrap_or_default()
+                            });
 
                         hits.push(CorpusHit {
                             docid,
@@ -532,7 +539,7 @@ impl CorpusSearcher {
         k: usize,
     ) -> Result<Vec<CorpusHit>, MemoryError> {
         let bm25_hits = self.search_bm25_boosted(query, k)?;
-        let colbert_hits = self.search_colbert(query_token_vecs, k).await?;
+        let colbert_hits = self.search_colbert(query_token_vecs, k, query).await?;
 
         let bm25_keys: Vec<ScoredKey> = bm25_hits
             .iter()
@@ -562,6 +569,13 @@ impl CorpusSearcher {
             .collect();
 
         Ok(results)
+    }
+
+    /// Look up the best matching passage for a docid given a query.
+    /// Returns None if no passage index or no matching passage found.
+    fn best_passage_for_colbert(&self, docid: &str, query: &str) -> Option<String> {
+        self.passage_index.as_ref()
+            .and_then(|pi| pi.best_passage_for_docid(query, docid).ok().flatten())
     }
 
     /// Retrieve full document text by docid.
@@ -875,6 +889,48 @@ impl PassageIndex {
         }
 
         Ok(hits)
+    }
+
+    /// Find the best matching passage for a specific docid given a query.
+    /// Returns the passage text, or None if no passage found for that docid.
+    fn best_passage_for_docid(&self, query: &str, docid: &str) -> Result<Option<String>, MemoryError> {
+        let searcher = self.reader.searcher();
+
+        // Build a combined query: text matches query AND docid matches exactly
+        let sanitized = sanitize_query(query);
+        let query_parser = QueryParser::for_index(&self.index, vec![self.f_text]);
+        let text_query = match query_parser.parse_query(&sanitized) {
+            Ok(q) => q,
+            Err(_) => return Ok(None),
+        };
+
+        let docid_term = Term::from_field_text(self.f_docid, docid);
+        let docid_query = tantivy::query::TermQuery::new(
+            docid_term,
+            tantivy::schema::IndexRecordOption::Basic,
+        );
+
+        // Both must match: text relevance + correct docid
+        let combined = BooleanQuery::new(vec![
+            (Occur::Must, Box::new(docid_query) as Box<dyn tantivy::query::Query>),
+            (Occur::Must, text_query),
+        ]);
+
+        let top_docs = searcher
+            .search(&combined, &TopDocs::with_limit(1))
+            .map_err(|e| MemoryError::Tantivy(format!("passage lookup failed: {e}")))?;
+
+        if let Some((_score, doc_address)) = top_docs.first() {
+            let doc = searcher.doc::<tantivy::TantivyDocument>(*doc_address)
+                .map_err(|e| MemoryError::Tantivy(format!("doc retrieval failed: {e}")))?;
+            let text = doc.get_first(self.f_text)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Ok(Some(text))
+        } else {
+            Ok(None)
+        }
     }
 }
 

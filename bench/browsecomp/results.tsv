@@ -85,3 +85,4 @@ c4-rrf	0.3000	~12	119892	keep	C4 with RRF fusion (not augmentation). 9/30 exact,
 c4-rrf-fast	0.2667	~12	107909	keep	C4 RRF with nprobes=1+refine=2. 8/30 exact, 10/30 fuzzy. Slight regression from slow C4 (12/30) but much faster.
 c7-passage-rerank	0.2333	~12	115809	discard	C7: passage-only → ColBERT rerank. 7/30 exact, 10/30 fuzzy. Worse than C1 (16/30). Passage-only has narrower coverage.
 colbert-primary-rerank	0.3000	~12	151489	keep	ColBERT primary retriever + ColBERT reranker. 9/30 exact, 12/30 fuzzy. Q1029 correct! Below C1 (16/30) — extraction bottleneck.
+colbert-passage-rerank	0.2333	~12	116178	keep	ColBERT retrieval + passage snippets + reranker. 7/30 exact, 8/30 fuzzy. Q706+Q893 FIRST EVER CORRECT!

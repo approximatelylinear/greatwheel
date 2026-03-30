@@ -445,7 +445,7 @@ impl BrowseCompBridge {
                                     message: format!("ColBERT encode error: {e}"),
                                 })?;
                             let t1 = std::time::Instant::now();
-                            let hits = searcher.search_colbert(&token_vecs, retrieve_k).await
+                            let hits = searcher.search_colbert(&token_vecs, retrieve_k, &query_str).await
                                 .map_err(|e| AgentError::HostFunction {
                                     function: "search".into(),
                                     message: format!("ColBERT search error: {e}"),
