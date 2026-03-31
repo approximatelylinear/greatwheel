@@ -91,3 +91,4 @@ passages-4096-doc-rrf-rerank	0.3667	~12	108395	discard	4096 passages + doc RRF +
 passages-4096-noRRF-rerank	0.2333	~12	118358	discard	4096 passage-only (no doc RRF) + rerank. 7/30 exact. Doc RRF actually helps for 4096 passages.
 h2h-512-rerank	0.3667	~12	109818	keep	H2H: 512 passages + doc RRF + rerank. 11/30 exact, 14/30 fuzzy.
 h2h-4096-rerank	0.4333	~12	113430	NEW-BEST	H2H: 4096 passages + doc RRF + rerank. 13/30 exact, 15/30 fuzzy. Q706+Q747!
+hierarchical-rerank	0.3333	~12	93185	keep	Hierarchical passages (512-4096) + title metadata + doc RRF + rerank. 10/30 exact, 11/30 fuzzy. Q893 correct! Most efficient (93K tokens).
