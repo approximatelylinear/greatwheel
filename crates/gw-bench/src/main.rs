@@ -2041,9 +2041,9 @@ struct Cli {
     #[arg(long)]
     passage_index: Option<String>,
 
-    /// Passage chunk size in bytes (for --build-passage-index)
-    #[arg(long, default_value_t = 512)]
-    passage_chunk_bytes: usize,
+    /// Passage chunk sizes in bytes, comma-separated (for --build-passage-index)
+    #[arg(long, default_value = "512,1024,2048,4096")]
+    passage_chunk_bytes: String,
 
     /// Passage overlap in bytes (for --build-passage-index)
     #[arg(long, default_value_t = 100)]
@@ -2460,10 +2460,15 @@ async fn main() {
         );
         let out_path = cli.passage_index.as_deref().unwrap_or("data/tantivy-passages/");
         info!(jsonl = jsonl_path, out = out_path, "Building passage-level tantivy index");
+        let chunk_sizes: Vec<usize> = cli.passage_chunk_bytes
+            .split(',')
+            .map(|s| s.trim().parse::<usize>().expect("Invalid chunk size"))
+            .collect();
+        info!(chunk_sizes = ?chunk_sizes, overlap = cli.passage_overlap_bytes, "Building hierarchical passage index");
         let count = CorpusSearcher::build_passage_index(
             Path::new(jsonl_path),
             Path::new(out_path),
-            cli.passage_chunk_bytes,
+            &chunk_sizes,
             cli.passage_overlap_bytes,
         ).expect("Failed to build passage index");
         info!(count, "Passage index built successfully");

@@ -680,18 +680,24 @@ impl CorpusSearcher {
 
     /// Build a passage-level tantivy index from the same JSONL corpus.
     ///
-    /// Each document is split into ~`chunk_bytes`-byte passages with
-    /// `overlap_bytes` overlap. Passages inherit the parent's docid.
+    /// Each document is split into passages at multiple granularities.
+    /// `chunk_sizes` is a list of chunk sizes in bytes (e.g. [512, 1024, 2048, 4096]).
+    /// Each passage is prefixed with the document title for context.
+    /// A `granularity` fast field records which chunk size produced each passage.
     pub fn build_passage_index(
         jsonl_path: &Path,
         tantivy_out: &Path,
-        chunk_bytes: usize,
+        chunk_sizes: &[usize],
         overlap_bytes: usize,
     ) -> Result<usize, MemoryError> {
         let mut schema_builder = Schema::builder();
         let f_passage_id = schema_builder.add_text_field("passage_id", STRING | STORED);
         let f_docid = schema_builder.add_text_field("docid", STRING | STORED);
         let f_text = schema_builder.add_text_field("text", text_field_options());
+        let f_granularity = schema_builder.add_u64_field(
+            "granularity",
+            tantivy::schema::NumericOptions::default().set_fast().set_stored(),
+        );
         let schema = schema_builder.build();
 
         std::fs::create_dir_all(tantivy_out).map_err(|e| {
@@ -733,18 +739,30 @@ impl CorpusSearcher {
                 .as_str()
                 .ok_or_else(|| MemoryError::Tantivy(format!("missing 'text' at line {line_num}")))?;
 
-            // Split into passages
-            let passages = split_into_passages(text, chunk_bytes, overlap_bytes);
-            for (i, passage) in passages.iter().enumerate() {
-                let pid = format!("{docid}#p{i}");
-                writer
-                    .add_document(doc!(
-                        f_passage_id => pid.as_str(),
-                        f_docid => docid,
-                        f_text => passage.as_str(),
-                    ))
-                    .map_err(|e| MemoryError::Tantivy(format!("add_document failed: {e}")))?;
-                passage_count += 1;
+            // Extract title from YAML frontmatter (first "title: ..." line)
+            let title = extract_doc_title(text);
+            let title_prefix = if title.is_empty() {
+                String::new()
+            } else {
+                format!("[Title: {title}]\n")
+            };
+
+            // Index passages at each granularity
+            for &chunk_bytes in chunk_sizes {
+                let passages = split_into_passages(text, chunk_bytes, overlap_bytes);
+                for (i, passage) in passages.iter().enumerate() {
+                    let pid = format!("{docid}#g{chunk_bytes}p{i}");
+                    let passage_with_title = format!("{title_prefix}{passage}");
+                    writer
+                        .add_document(doc!(
+                            f_passage_id => pid.as_str(),
+                            f_docid => docid,
+                            f_text => passage_with_title.as_str(),
+                            f_granularity => chunk_bytes as u64,
+                        ))
+                        .map_err(|e| MemoryError::Tantivy(format!("add_document failed: {e}")))?;
+                    passage_count += 1;
+                }
             }
 
             doc_count += 1;
@@ -757,7 +775,12 @@ impl CorpusSearcher {
             MemoryError::Tantivy(format!("commit failed: {e}"))
         })?;
 
-        tracing::info!(doc_count, passage_count, "Passage tantivy index built");
+        tracing::info!(
+            doc_count,
+            passage_count,
+            chunk_sizes = ?chunk_sizes,
+            "Hierarchical passage index built"
+        );
         Ok(passage_count)
     }
 
@@ -932,6 +955,28 @@ impl PassageIndex {
             Ok(None)
         }
     }
+}
+
+/// Extract the document title from YAML frontmatter.
+/// Looks for "title: ..." between "---" delimiters.
+fn extract_doc_title(text: &str) -> String {
+    let mut in_frontmatter = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            if in_frontmatter {
+                break; // End of frontmatter
+            }
+            in_frontmatter = true;
+            continue;
+        }
+        if in_frontmatter {
+            if let Some(rest) = trimmed.strip_prefix("title:") {
+                return rest.trim().to_string();
+            }
+        }
+    }
+    String::new()
 }
 
 /// Split text into passages of approximately `chunk_bytes` bytes
