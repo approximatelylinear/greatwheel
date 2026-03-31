@@ -89,3 +89,5 @@ colbert-passage-rerank	0.2333	~12	116178	keep	ColBERT retrieval + passage snippe
 passages-4096-rerank	0.3667	~12	95499	keep	4096-byte passages + ColBERT rerank. 11/30 exact, 14/30 fuzzy. Close to C1 (16/30), more efficient (95K tokens).
 passages-4096-doc-rrf-rerank	0.3667	~12	108395	discard	4096 passages + doc RRF + ColBERT rerank. 11/30 exact, 12/30 fuzzy. Doc RRF hurts again.
 passages-4096-noRRF-rerank	0.2333	~12	118358	discard	4096 passage-only (no doc RRF) + rerank. 7/30 exact. Doc RRF actually helps for 4096 passages.
+h2h-512-rerank	0.3667	~12	109818	keep	H2H: 512 passages + doc RRF + rerank. 11/30 exact, 14/30 fuzzy.
+h2h-4096-rerank	0.4333	~12	113430	NEW-BEST	H2H: 4096 passages + doc RRF + rerank. 13/30 exact, 15/30 fuzzy. Q706+Q747!
