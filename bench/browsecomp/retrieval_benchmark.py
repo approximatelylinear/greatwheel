@@ -149,7 +149,11 @@ class ColBERTSearcher:
     def __init__(self, lance_path: str, encode_url: str | None = None):
         import lancedb
         self.db = lancedb.connect(lance_path)
-        self.table = self.db.open_table("colbert_docs")
+        # Try passage table first, fall back to doc table
+        try:
+            self.table = self.db.open_table("colbert_passages")
+        except ValueError:
+            self.table = self.db.open_table("colbert_docs")
         self.encode_url = encode_url
 
         # Load encoder locally if no server URL

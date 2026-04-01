@@ -504,15 +504,42 @@ impl BrowseCompBridge {
                         })
                         .collect();
 
-                    // If rerank URL is set, send BM25 candidates to ColBERT for reranking
+                    // If rerank URL is set, send candidates to ColBERT for reranking
                     if let Some(ref url) = rerank_url {
                         let rerank_endpoint = format!("{url}/rerank");
-                        let docs_json: Vec<serde_json::Value> = hits.iter().map(|h| {
-                            serde_json::json!({
-                                "docid": h.docid,
-                                "text": h.snippet.as_deref().unwrap_or(""),
-                            })
-                        }).collect();
+
+                        // For ColBERT retrieval mode with passage index:
+                        // expand each docid into ALL its passages so the reranker
+                        // can pick the most relevant passage (not just BM25's best)
+                        let docs_json: Vec<serde_json::Value> = if mode_str == "colbert" && searcher.has_passage_index() {
+                            let mut passage_docs = Vec::new();
+                            for h in hits.iter().take(20) { // top-20 docs, expand to passages
+                                let passages = searcher.all_passages_for_docid(&h.docid);
+                                if passages.is_empty() {
+                                    // Fallback: use the snippet
+                                    passage_docs.push(serde_json::json!({
+                                        "docid": h.docid,
+                                        "text": h.snippet.as_deref().unwrap_or(""),
+                                    }));
+                                } else {
+                                    for passage in passages {
+                                        passage_docs.push(serde_json::json!({
+                                            "docid": h.docid,
+                                            "text": passage,
+                                        }));
+                                    }
+                                }
+                            }
+                            tracing::info!(n_passages = passage_docs.len(), n_docs = 20, "Expanded docs to passages for reranking");
+                            passage_docs
+                        } else {
+                            hits.iter().map(|h| {
+                                serde_json::json!({
+                                    "docid": h.docid,
+                                    "text": h.snippet.as_deref().unwrap_or(""),
+                                })
+                            }).collect()
+                        };
                         let client = reqwest::Client::new();
                         match client.post(&rerank_endpoint)
                             .json(&serde_json::json!({

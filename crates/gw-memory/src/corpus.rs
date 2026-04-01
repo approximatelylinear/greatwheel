@@ -578,6 +578,13 @@ impl CorpusSearcher {
             .and_then(|pi| pi.best_passage_for_docid(query, docid).ok().flatten())
     }
 
+    /// Get ALL passages for a docid (for external reranking).
+    pub fn all_passages_for_docid(&self, docid: &str) -> Vec<String> {
+        self.passage_index.as_ref()
+            .and_then(|pi| pi.all_passages_for_docid(docid).ok())
+            .unwrap_or_default()
+    }
+
     /// Retrieve full document text by docid.
     pub fn get_document(&self, docid: &str) -> Result<Option<String>, MemoryError> {
         let searcher = self.reader.searcher();
@@ -954,6 +961,37 @@ impl PassageIndex {
         } else {
             Ok(None)
         }
+    }
+
+    /// Return ALL passages for a specific docid (no query filtering).
+    /// Used when we want to send all passages to an external reranker.
+    fn all_passages_for_docid(&self, docid: &str) -> Result<Vec<String>, MemoryError> {
+        let searcher = self.reader.searcher();
+
+        let docid_term = Term::from_field_text(self.f_docid, docid);
+        let docid_query = tantivy::query::TermQuery::new(
+            docid_term,
+            tantivy::schema::IndexRecordOption::Basic,
+        );
+
+        // Get up to 50 passages per doc (generous limit)
+        let top_docs = searcher
+            .search(&docid_query, &TopDocs::with_limit(50))
+            .map_err(|e| MemoryError::Tantivy(format!("all_passages lookup failed: {e}")))?;
+
+        let mut passages = Vec::new();
+        for (_score, doc_address) in top_docs {
+            let doc = searcher.doc::<tantivy::TantivyDocument>(doc_address)
+                .map_err(|e| MemoryError::Tantivy(format!("doc retrieval failed: {e}")))?;
+            let text = doc.get_first(self.f_text)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !text.is_empty() {
+                passages.push(text);
+            }
+        }
+        Ok(passages)
     }
 }
 
