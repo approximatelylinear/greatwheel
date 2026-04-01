@@ -69,32 +69,32 @@ class ColBERTEncoder:
         """Encode texts into L2-normalized 128-dim token embeddings.
 
         Returns a list of tensors, each (num_tokens, 128), one per input text.
-        Padding tokens are stripped.
+        Padding tokens are stripped. Encodes in sub-batches of 4 to avoid OOM.
         """
-        # Reserve 1 token for the [Q]/[D] prefix
-        encoded = self.tokenizer(
-            texts,
-            padding=True,
-            truncation=True,
-            max_length=max_length - 1,
-            return_tensors="pt",
-            return_attention_mask=True,
-        ).to(self.device)
-
-        # Insert [Q] or [D] prefix token after [CLS]
-        prefix_id = self.q_token_id if is_query else self.d_token_id
-        encoded = self._insert_prefix_token(encoded, prefix_id)
-
-        hidden = self.model(**encoded).last_hidden_state  # (batch, seq, 768)
-        projected = hidden @ self.projection.T  # (batch, seq, 128)
-        projected = torch.nn.functional.normalize(projected, dim=-1)
-
-        # Strip padding tokens using attention mask
-        mask = encoded["attention_mask"]  # (batch, seq)
         results = []
-        for i in range(projected.size(0)):
-            length = mask[i].sum().item()
-            results.append(projected[i, :length])  # (real_tokens, 128)
+        sub_batch = 4
+        for start in range(0, len(texts), sub_batch):
+            batch = texts[start:start + sub_batch]
+            encoded = self.tokenizer(
+                batch,
+                padding=True,
+                truncation=True,
+                max_length=max_length - 1,
+                return_tensors="pt",
+                return_attention_mask=True,
+            ).to(self.device)
+
+            prefix_id = self.q_token_id if is_query else self.d_token_id
+            encoded = self._insert_prefix_token(encoded, prefix_id)
+
+            hidden = self.model(**encoded).last_hidden_state
+            projected = hidden @ self.projection.T
+            projected = torch.nn.functional.normalize(projected, dim=-1)
+
+            mask = encoded["attention_mask"]
+            for i in range(projected.size(0)):
+                length = mask[i].sum().item()
+                results.append(projected[i, :length].cpu())
 
         return results
 
