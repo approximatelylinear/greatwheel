@@ -72,7 +72,7 @@ class ColBERTEncoder:
         Padding tokens are stripped. Encodes in sub-batches of 4 to avoid OOM.
         """
         results = []
-        sub_batch = 4
+        sub_batch = 16
         for start in range(0, len(texts), sub_batch):
             batch = texts[start:start + sub_batch]
             encoded = self.tokenizer(
