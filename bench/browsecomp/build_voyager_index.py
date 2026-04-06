@@ -3,12 +3,16 @@
 
 Flattens all token vectors into one Voyager index, maintains
 token→docid mapping. Uses our ColBERTEncoder (no PyLate needed).
+Checkpoints every 10K docs for resume support.
 
 Usage:
     uv run --project bench/browsecomp --extra colbert \
         python -u bench/browsecomp/build_voyager_index.py \
         vendor/BrowseComp-Plus/data/bm25s-index/corpus_meta.jsonl \
         data/voyager-passages
+
+    # Resume after interrupt:
+    python -u bench/browsecomp/build_voyager_index.py --resume
 
 Test first:
     python -u bench/browsecomp/build_voyager_index.py --test
@@ -23,6 +27,7 @@ from colbert_encode import ColBERTEncoder
 
 CHUNK = 4096
 OVERLAP = 800
+CHECKPOINT_EVERY = 10000  # docs
 
 
 def split(text):
@@ -50,28 +55,68 @@ def title(text):
     return ""
 
 
-def build(corpus_path, out_dir, batch_size=8, max_docs=None):
+def save_checkpoint(out_dir, idx, token_to_docid, doc_count, passage_count):
+    """Save index + mapping + progress."""
+    idx_path = os.path.join(out_dir, "index.voyager")
+    map_path = os.path.join(out_dir, "token_to_docid.pkl")
+    progress_path = os.path.join(out_dir, "progress.json")
+
+    idx.save(idx_path)
+    with open(map_path, "wb") as f:
+        pickle.dump(token_to_docid, f)
+    with open(progress_path, "w") as f:
+        json.dump({"doc_count": doc_count, "passage_count": passage_count,
+                    "token_count": len(token_to_docid)}, f)
+
+    size_gb = os.path.getsize(idx_path) / 1e9
+    print(f"  [checkpoint] {doc_count} docs, {len(token_to_docid)} tokens, {size_gb:.1f} GB", flush=True)
+
+
+def load_checkpoint(out_dir):
+    """Load existing checkpoint if available. Returns (idx, token_to_docid, doc_count, passage_count)."""
+    idx_path = os.path.join(out_dir, "index.voyager")
+    map_path = os.path.join(out_dir, "token_to_docid.pkl")
+    progress_path = os.path.join(out_dir, "progress.json")
+
+    if not all(os.path.exists(p) for p in [idx_path, map_path, progress_path]):
+        return None, None, 0, 0
+
+    idx = voyager.Index.load(idx_path)
+    with open(map_path, "rb") as f:
+        token_to_docid = pickle.load(f)
+    with open(progress_path) as f:
+        progress = json.load(f)
+
+    print(f"  [resume] Loaded checkpoint: {progress['doc_count']} docs, "
+          f"{progress['token_count']} tokens", flush=True)
+    return idx, token_to_docid, progress["doc_count"], progress["passage_count"]
+
+
+def build(corpus_path, out_dir, batch_size=32, max_docs=None, resume=False):
     os.makedirs(out_dir, exist_ok=True)
 
     enc = ColBERTEncoder("lightonai/Reason-ModernColBERT")
     print(f"Device: {enc.device}", flush=True)
 
-    # E4M3 quantization: ~5x smaller than Float32, preserves MaxSim rankings
-    # M=12, ef_construction=50 for fast inserts (2-4x faster than defaults)
-    idx = voyager.Index(voyager.Space.Cosine, num_dimensions=128,
-                        storage_data_type=voyager.StorageDataType.E4M3,
-                        M=12, ef_construction=50)
-    token_to_docid = {}  # token_vector_id → docid string
+    # Resume or fresh start
+    skip_docs = 0
+    if resume:
+        idx, token_to_docid, skip_docs, passage_count = load_checkpoint(out_dir)
+        if idx is None:
+            print("  No checkpoint found, starting fresh", flush=True)
+
+    if not resume or skip_docs == 0:
+        idx = voyager.Index(voyager.Space.Cosine, num_dimensions=128,
+                            storage_data_type=voyager.StorageDataType.E4M3,
+                            M=12, ef_construction=50)
+        token_to_docid = {}
+        passage_count = 0
 
     t0 = time.monotonic()
     doc_count = 0
-    passage_count = 0
-    token_count = 0
 
-    # Buffer for batch encoding
     buf_docids = []
     buf_texts = []
-    # Buffer for bulk Voyager insert
     vec_buffer = []
     docid_buffer = []
 
@@ -80,6 +125,13 @@ def build(corpus_path, out_dir, batch_size=8, max_docs=None):
             line = line.strip()
             if not line:
                 continue
+
+            doc_count += 1
+
+            # Skip already-processed docs on resume
+            if doc_count <= skip_docs:
+                continue
+
             obj = json.loads(line)
             docid = str(obj["docid"])
             text = obj["text"]
@@ -95,40 +147,34 @@ def build(corpus_path, out_dir, batch_size=8, max_docs=None):
                     passage_count += len(buf_texts)
                     buf_docids, buf_texts = [], []
 
-            doc_count += 1
             if doc_count % 2000 == 0:
                 elapsed = time.monotonic() - t0
-                rate = passage_count / elapsed if elapsed > 0 else 0
+                docs_done = doc_count - skip_docs
+                rate = (passage_count - (0 if not resume else 0)) / elapsed if elapsed > 0 else 0
                 print(f"  {doc_count} docs | {passage_count} passages | {len(token_to_docid)} tokens | {rate:.0f} p/s", flush=True)
+
+            if doc_count % CHECKPOINT_EVERY == 0:
+                # Flush vectors before checkpoint
+                _flush_buffer(idx, token_to_docid, vec_buffer, docid_buffer)
+                save_checkpoint(out_dir, idx, token_to_docid, doc_count, passage_count)
 
             if max_docs and doc_count >= max_docs:
                 break
 
-    # Flush remaining encode buffer
+    # Flush remaining
     if buf_texts:
         _encode_and_add(enc, idx, token_to_docid, buf_docids, buf_texts, vec_buffer, docid_buffer)
         passage_count += len(buf_texts)
-
-    # Flush remaining Voyager buffer
     _flush_buffer(idx, token_to_docid, vec_buffer, docid_buffer)
 
     elapsed = time.monotonic() - t0
     print(f"\nDone: {doc_count} docs, {passage_count} passages, {len(token_to_docid)} tokens, {elapsed:.0f}s", flush=True)
 
-    # Save
-    idx_path = os.path.join(out_dir, "index.voyager")
-    map_path = os.path.join(out_dir, "token_to_docid.pkl")
-
-    idx.save(idx_path)
-    with open(map_path, "wb") as f:
-        pickle.dump(token_to_docid, f)
-
-    print(f"Saved: {idx_path} ({os.path.getsize(idx_path) / 1e9:.1f} GB)", flush=True)
-    print(f"Saved: {map_path} ({os.path.getsize(map_path) / 1e6:.1f} MB)", flush=True)
+    # Final save
+    save_checkpoint(out_dir, idx, token_to_docid, doc_count, passage_count)
 
 
 def _encode_and_add(enc, idx, token_to_docid, docids, texts, vec_buffer, docid_buffer):
-    """Encode passages and buffer token vectors. Flush to Voyager when buffer is large."""
     tensors = enc._encode(texts, max_length=512, is_query=False)
     for docid, tensor in zip(docids, tensors):
         if tensor.numel() == 0:
@@ -137,7 +183,6 @@ def _encode_and_add(enc, idx, token_to_docid, docids, texts, vec_buffer, docid_b
         vec_buffer.append(arr)
         docid_buffer.extend([docid] * len(arr))
 
-    # Flush when buffer exceeds 50K vectors (large batch = fast HNSW insert)
     if sum(len(v) for v in vec_buffer) >= 50000:
         _flush_buffer(idx, token_to_docid, vec_buffer, docid_buffer)
 
@@ -159,6 +204,7 @@ def main():
     parser.add_argument("out_dir", nargs="?", default="data/voyager-passages")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--max-docs", type=int, default=None)
+    parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
     parser.add_argument("--test", action="store_true", help="Test on 100 docs")
     args = parser.parse_args()
 
@@ -166,7 +212,7 @@ def main():
         args.max_docs = 100
         args.out_dir = "/tmp/voyager-test"
 
-    build(args.corpus, args.out_dir, args.batch_size, args.max_docs)
+    build(args.corpus, args.out_dir, args.batch_size, args.max_docs, args.resume)
 
 
 if __name__ == "__main__":
