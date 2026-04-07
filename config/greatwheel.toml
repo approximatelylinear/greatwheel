@@ -6,8 +6,11 @@ port = 8090
 url = "postgres://gw:gw@localhost:5432/greatwheel"
 
 [llm]
-# Point at rl-play when running, fall back to Ollama direct for dev
+# LLM backend: "ollama" (native API) or "sglang" (OpenAI-compatible /v1/chat/completions)
+backend = "ollama"
+# Chat URL — routed based on backend. For sglang, use e.g. "http://localhost:30000"
 proxy_url = "http://localhost:11434"
+# Embeddings always go through Ollama (even when chat uses sglang)
 ollama_url = "http://localhost:11434"
 default_model = "qwen2.5:7b"
 embedding_model = "nomic-embed-text"
@@ -20,6 +23,18 @@ hot_reload = true
 lance_db_path = "data/lancedb"
 tantivy_index_path = "data/tantivy"
 embedding_dim = 768
+
+[kb]
+# Knowledge base plugin. Exposes kb.search / kb.explore / kb.topic /
+# kb.topics as host functions for agents. Set `enabled = true` only
+# when the KB data directories exist and have been populated via
+# `gw-kb ingest` / `organize` / etc.
+enabled = true
+lance_path = "data/kb-lancedb"
+tantivy_path = "data/kb-tantivy"
+embedding_model = "nomic-ai/nomic-embed-text-v1.5"
+embedding_dim = 768
+ollama_url = "http://localhost:11434"
 
 [tracing]
 exporter = "console"

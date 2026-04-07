@@ -34,11 +34,50 @@ struct Config {
     llm: LlmConfig,
     memory: MemoryConfig,
     #[serde(default)]
+    kb: KbConfig,
+    #[serde(default)]
     tracing: gw_trace::TracingConfig,
     /// Per-plugin config sections: [plugins.name] → value.
     #[serde(default)]
     plugins: HashMap<String, serde_json::Value>,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+struct KbConfig {
+    /// Gate the KB plugin entirely. Defaults to false so servers
+    /// without KB data directories still boot cleanly.
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_kb_lance_path")]
+    lance_path: String,
+    #[serde(default = "default_kb_tantivy_path")]
+    tantivy_path: String,
+    #[serde(default = "default_kb_embedding_model")]
+    embedding_model: String,
+    #[serde(default = "default_kb_embedding_dim")]
+    embedding_dim: i32,
+    #[serde(default = "default_kb_ollama_url")]
+    ollama_url: String,
+}
+
+impl Default for KbConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            lance_path: default_kb_lance_path(),
+            tantivy_path: default_kb_tantivy_path(),
+            embedding_model: default_kb_embedding_model(),
+            embedding_dim: default_kb_embedding_dim(),
+            ollama_url: default_kb_ollama_url(),
+        }
+    }
+}
+
+fn default_kb_lance_path() -> String { "data/kb-lancedb".into() }
+fn default_kb_tantivy_path() -> String { "data/kb-tantivy".into() }
+fn default_kb_embedding_model() -> String { "nomic-ai/nomic-embed-text-v1.5".into() }
+fn default_kb_embedding_dim() -> i32 { 768 }
+fn default_kb_ollama_url() -> String { "http://localhost:11434".into() }
 
 #[derive(Debug, Deserialize)]
 struct ServerConfig {
@@ -172,6 +211,54 @@ async fn chat(
     Ok(Sse::new(ReceiverStream::new(rx)))
 }
 
+/// Build a `KbPlugin` from config + the shared session pool.
+///
+/// Constructs `KbStores` with all four backends (Postgres, LanceDB,
+/// tantivy, sentence-transformers embedder) and a throwaway Ollama
+/// client for chat (unused by the read-only host functions we expose,
+/// but `KbStores` requires the field for organize/classify/etc.).
+async fn build_kb_plugin(
+    cfg: &KbConfig,
+    pool: Option<sqlx::PgPool>,
+) -> Result<gw_kb::plugin::KbPlugin, String> {
+    use std::sync::Arc;
+
+    let pool = pool.ok_or_else(|| {
+        "kb.enabled requires a Postgres pool (database.url must be set)".to_string()
+    })?;
+
+    let lance = Arc::new(
+        gw_kb::index::KbLanceStore::open(&cfg.lance_path, cfg.embedding_dim)
+            .await
+            .map_err(|e| format!("open kb lance store: {e}"))?,
+    );
+    let tantivy = Arc::new(
+        gw_kb::index::KbTantivyStore::open(std::path::Path::new(&cfg.tantivy_path))
+            .map_err(|e| format!("open kb tantivy store: {e}"))?,
+    );
+    let embedder = Arc::new(gw_kb::embed::Embedder::new(cfg.embedding_model.clone()));
+
+    // Throwaway chat client. Organize/classify/synthesize use it but
+    // the read-only host functions we expose do not. Construction is
+    // cheap (no network calls).
+    let llm = Arc::new(gw_llm::OllamaClient::new(
+        cfg.ollama_url.clone(),
+        cfg.ollama_url.clone(),
+        "qwen3.5:9b".into(),
+        "unused".into(),
+    ));
+
+    let stores = gw_kb::ingest::KbStores {
+        pg: pool,
+        lance,
+        tantivy,
+        embedder,
+        llm,
+    };
+
+    Ok(gw_kb::plugin::KbPlugin::new(stores))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -242,12 +329,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Optionally build the KB plugin. Requires a live Postgres pool
+    // (so we share the session pool) and the KB data directories
+    // declared in config. Gated by `kb.enabled` so servers without the
+    // KB stack can still boot.
+    let kb_plugin = if config.kb.enabled {
+        match build_kb_plugin(&config.kb, session_pool.clone()).await {
+            Ok(p) => {
+                tracing::info!("KB plugin enabled");
+                Some(p)
+            }
+            Err(e) => {
+                tracing::warn!(err = %e, "KB plugin disabled due to init failure");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Initialize plugin engine.
     // Provide PgPool to plugins via SharedState so they can access the database.
     let mut engine = GreatWheelEngine::new()
         .add_plugin(gw_engine::builtins::hindsight_retain::HindsightRetainPlugin)
         .add_plugin(gw_engine::builtins::hindsight_recall::HindsightRecallPlugin)
         .add_plugin(gw_engine::builtins::hindsight_opinions::HindsightOpinionsPlugin);
+    if let Some(kb) = kb_plugin {
+        engine = engine.add_plugin(kb);
+    }
     if let Some(ref pool) = session_pool {
         engine = engine.provide(pool.clone());
     }

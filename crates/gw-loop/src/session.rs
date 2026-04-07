@@ -207,13 +207,20 @@ impl SessionManager {
         );
 
         // Register external functions: FINAL for turn completion,
-        // ask_user and send_message for interactive I/O.
-        let external_functions = vec![
+        // ask_user and send_message for interactive I/O, plus every
+        // function registered with the plugin router so ouros knows
+        // to dispatch them out instead of resolving as local Python.
+        let mut external_functions: Vec<String> = vec![
             "FINAL".into(),
             "ask_user".into(),
             "send_message".into(),
             "compact_session".into(),
         ];
+        if let Some(router) = &self.plugin_router {
+            for name in router.function_names() {
+                external_functions.push(name.to_string());
+            }
+        }
 
         let repl = ReplAgent::new(external_functions, Box::new(conv_bridge));
         let llm = (self.llm_factory)();

@@ -15,6 +15,7 @@ pub mod ingest;
 pub mod linking;
 pub mod merge;
 pub mod organize;
+pub mod plugin;
 pub mod search;
 pub mod source;
 pub mod synthesize;

@@ -17,6 +17,7 @@ path = "src/bin/gw_kb.rs"
 gw-core = { workspace = true, features = ["sqlx"] }
 gw-memory = { workspace = true }
 gw-llm = { workspace = true }
+gw-engine = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 chrono = { workspace = true }
@@ -38,3 +39,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+gw-runtime = { workspace = true }
+ouros = { workspace = true }

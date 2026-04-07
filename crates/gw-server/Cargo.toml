@@ -13,6 +13,7 @@ gw-engine = { workspace = true }
 gw-runtime = { workspace = true }
 gw-llm = { workspace = true }
 gw-memory = { workspace = true }
+gw-kb = { workspace = true }
 gw-loop = { workspace = true }
 uuid = { workspace = true }
 gw-scheduler = { workspace = true }
