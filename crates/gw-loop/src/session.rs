@@ -92,6 +92,11 @@ pub struct SessionManager {
     idle_timeout: Duration,
     /// Optional Postgres pool for session persistence.
     pg_pool: Option<PgPool>,
+    /// Optional plugin host function router. When set, every
+    /// `ConversationBridge` spawned by this manager gets a clone of it
+    /// and will dispatch unknown host function calls through the
+    /// registered plugins (async-capable via block_in_place + block_on).
+    plugin_router: Option<Arc<gw_engine::HostFnRouter>>,
 }
 
 /// RAII guard that ensures the ConversationLoop is returned to the session
@@ -140,6 +145,7 @@ impl SessionManager {
             default_config: default_config.into(),
             idle_timeout,
             pg_pool: None,
+            plugin_router: None,
         }
     }
 
@@ -156,7 +162,22 @@ impl SessionManager {
             default_config: default_config.into(),
             idle_timeout,
             pg_pool: Some(pg_pool),
+            plugin_router: None,
         }
+    }
+
+    /// Attach a plugin host function router. Every `ConversationBridge`
+    /// created from this point on will dispatch through the router
+    /// before falling through to its legacy inner bridge.
+    ///
+    /// Builder-style so server startup can chain:
+    /// `SessionManager::with_pg(...).with_plugin_router(router)`.
+    pub fn with_plugin_router(
+        mut self,
+        router: Arc<gw_engine::HostFnRouter>,
+    ) -> Self {
+        self.plugin_router = Some(router);
+        self
     }
 
     /// Get a session reference, or return SessionEnded.
@@ -176,11 +197,13 @@ impl SessionManager {
 
         let ask_handle = bridge::new_ask_handle();
 
-        // Create a bridge that supports channel.ask() with blocking reply.
-        let conv_bridge = ConversationBridge::new(
+        // Create a bridge that supports channel.ask() with blocking reply
+        // and dispatches through the plugin router (if configured).
+        let conv_bridge = ConversationBridge::with_plugin_router(
             event_tx.clone(),
             ask_handle.clone(),
             None,
+            self.plugin_router.clone(),
         );
 
         // Register external functions: FINAL for turn completion,

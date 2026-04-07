@@ -1,4 +1,5 @@
-use gw_runtime::{AgentError, HostBridge};
+use gw_engine::HostFnRouter;
+use gw_runtime::{json_to_object, AgentError, HostBridge};
 use ouros::Object;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -28,10 +29,22 @@ pub fn new_ask_handle() -> AskHandle {
 
 /// HostBridge that supports conversation-aware functions including
 /// `channel.ask()` with blocking reply.
+///
+/// Dispatch order in [`HostBridge::call`]:
+///
+///   1. Hardcoded conversation primitives (`send_message`, `ask_user`,
+///      `compact_session`).
+///   2. Plugin host function router, if one was provided. Covers any
+///      function registered by a plugin via `ctx.register_host_fn*`.
+///      Async handlers are resolved via `block_in_place` +
+///      `Handle::current().block_on(...)` inside the router.
+///   3. Optional inner `HostBridge` fallback (e.g. legacy hand-wired
+///      dispatchers). Returns `UnknownFunction` if still no match.
 pub struct ConversationBridge {
     event_tx: mpsc::UnboundedSender<LoopEvent>,
     ask_handle: AskHandle,
     inner: Option<Box<dyn HostBridge>>,
+    plugin_router: Option<Arc<HostFnRouter>>,
 }
 
 impl ConversationBridge {
@@ -44,9 +57,26 @@ impl ConversationBridge {
             event_tx,
             ask_handle,
             inner,
+            plugin_router: None,
+        }
+    }
+
+    /// Construct a bridge with a plugin router in the dispatch chain.
+    pub fn with_plugin_router(
+        event_tx: mpsc::UnboundedSender<LoopEvent>,
+        ask_handle: AskHandle,
+        inner: Option<Box<dyn HostBridge>>,
+        plugin_router: Option<Arc<HostFnRouter>>,
+    ) -> Self {
+        Self {
+            event_tx,
+            ask_handle,
+            inner,
+            plugin_router,
         }
     }
 }
+
 
 impl HostBridge for ConversationBridge {
     fn call(
@@ -117,6 +147,24 @@ impl HostBridge for ConversationBridge {
             }
 
             _ => {
+                // 1. Try the plugin router. Sync handlers run inline;
+                //    async handlers are resolved via block_in_place +
+                //    Handle::current().block_on inside HostFnRouter::dispatch.
+                if let Some(router) = &self.plugin_router {
+                    if let Some(result) =
+                        router.dispatch(function, args.clone(), kwargs.clone())
+                    {
+                        return match result {
+                            Ok(value) => Ok(json_to_object(value)),
+                            Err(e) => Err(AgentError::HostFunction {
+                                function: function.to_string(),
+                                message: e.to_string(),
+                            }),
+                        };
+                    }
+                }
+                // 2. Fall through to an inner hand-wired bridge if one
+                //    was provided (legacy path).
                 if let Some(inner) = &mut self.inner {
                     inner.call(function, args, kwargs)
                 } else {

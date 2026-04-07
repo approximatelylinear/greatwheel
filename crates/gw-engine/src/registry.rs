@@ -1,7 +1,7 @@
 //! Plugin registry — collects registrations from all plugins.
 
 use gw_core::{
-    EventHandler, HostFnHandler, LifecycleEvent, Plugin, PluginContext, PluginError,
+    EventHandler, HostFnRegistration, LifecycleEvent, Plugin, PluginContext, PluginError,
     PluginRegistrations, SharedState,
 };
 use serde_json::Value;
@@ -16,8 +16,8 @@ pub struct PluginRegistry {
     /// Merged event handlers, keyed by event, ordered by plugin priority.
     event_handlers: HashMap<LifecycleEvent, Vec<EventHandler>>,
 
-    /// Merged host function handlers.
-    host_functions: HashMap<String, HostFnHandler>,
+    /// Merged host function registrations (handler + capability).
+    host_functions: HashMap<String, HostFnRegistration>,
 
     /// Shared state across plugins.
     shared: SharedState,
@@ -172,7 +172,7 @@ impl PluginRegistry {
     }
 
     /// Get all registered host functions.
-    pub fn host_functions(&self) -> &HashMap<String, HostFnHandler> {
+    pub fn host_functions(&self) -> &HashMap<String, HostFnRegistration> {
         &self.host_functions
     }
 

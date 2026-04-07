@@ -8,6 +8,7 @@ use gw_core::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::info;
 
 use crate::dispatcher::EventDispatcher;
@@ -78,7 +79,7 @@ impl GreatWheelEngine {
         }
         let dispatcher = EventDispatcher::new(handler_map);
 
-        let host_fn_router = HostFnRouter::new(registry.host_functions().clone());
+        let host_fn_router = Arc::new(HostFnRouter::new(registry.host_functions().clone()));
 
         info!(
             plugins = ?registry.plugin_names(),
@@ -105,7 +106,7 @@ impl Default for GreatWheelEngine {
 pub struct InitializedEngine {
     pub registry: PluginRegistry,
     pub dispatcher: EventDispatcher,
-    pub host_fn_router: HostFnRouter,
+    pub host_fn_router: Arc<HostFnRouter>,
 }
 
 impl InitializedEngine {
@@ -131,9 +132,15 @@ impl InitializedEngine {
         self.registry.shutdown()
     }
 
-    /// Get the host function router.
+    /// Get a reference to the host function router.
     pub fn host_fn_router(&self) -> &HostFnRouter {
         &self.host_fn_router
+    }
+
+    /// Clone the `Arc<HostFnRouter>` so callers (e.g. `SessionManager`)
+    /// can keep their own reference without borrowing the engine.
+    pub fn host_fn_router_arc(&self) -> Arc<HostFnRouter> {
+        Arc::clone(&self.host_fn_router)
     }
 
     /// Get the event dispatcher.

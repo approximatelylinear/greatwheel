@@ -256,7 +256,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     engine.before_startup();
 
-    // Create session manager with LLM factory.
+    // Extract the plugin host function router so SessionManager can
+    // thread it through every ConversationBridge it creates. Without
+    // this, plugin-registered host functions (e.g. memory.extract_entities,
+    // kb.search, ...) are dead code from an agent's perspective.
+    let plugin_router = engine.host_fn_router_arc();
+
+    // Create session manager with LLM factory and plugin router.
     let llm_for_factory = llm.clone();
     let llm_factory: Arc<dyn Fn() -> Box<dyn gw_loop::LlmClient> + Send + Sync> =
         Arc::new(move || {
@@ -269,12 +275,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             LoopConfig::default(),
             Duration::from_secs(30 * 60),
             pool,
-        ),
+        )
+        .with_plugin_router(plugin_router.clone()),
         None => SessionManager::new(
             llm_factory,
             LoopConfig::default(),
             Duration::from_secs(30 * 60),
-        ),
+        )
+        .with_plugin_router(plugin_router.clone()),
     });
 
     let state = AppState {

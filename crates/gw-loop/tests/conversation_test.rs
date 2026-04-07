@@ -548,3 +548,111 @@ async fn test_channel_ask_reply() {
     }
     assert!(found_input_request, "InputRequest event should be emitted");
 }
+
+// ─── Plugin host function router dispatch ─────────────────────────────────
+
+/// Exercises the plugin host function router wiring added in phase 1 of
+/// the KB agent integration work. Builds a router with both a sync and
+/// an async registered handler, wires it into a `ConversationBridge`,
+/// and asserts that `HostBridge::call` dispatches through the router
+/// before falling back to the inner bridge. This is the test that
+/// validates the whole sync↔async bridge (block_in_place + block_on).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_plugin_router_dispatch_sync_and_async() {
+    use gw_core::{HostFnHandler, HostFnRegistration, PluginError};
+    use gw_engine::HostFnRouter;
+    use std::sync::Arc;
+
+    // Build the router by hand. In production this happens inside
+    // GreatWheelEngine::init via plugin registrations, but a direct
+    // construction keeps the test hermetic.
+    let mut registrations = HashMap::new();
+
+    // Sync handler — returns a constant.
+    registrations.insert(
+        "test.sync_echo".to_string(),
+        HostFnRegistration {
+            handler: HostFnHandler::Sync(Arc::new(|args, _kwargs| {
+                let msg = args
+                    .first()
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("default")
+                    .to_string();
+                Ok(Value::String(format!("sync:{msg}")))
+            })),
+            capability: Some("test.read".into()),
+        },
+    );
+
+    // Async handler — simulates a real async workload by yielding.
+    registrations.insert(
+        "test.async_echo".to_string(),
+        HostFnRegistration {
+            handler: HostFnHandler::Async(Arc::new(|args, _kwargs| {
+                Box::pin(async move {
+                    tokio::task::yield_now().await;
+                    let msg = args
+                        .first()
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("default")
+                        .to_string();
+                    Ok::<_, PluginError>(Value::String(format!("async:{msg}")))
+                })
+            })),
+            capability: Some("test.read".into()),
+        },
+    );
+
+    let router = Arc::new(HostFnRouter::new(registrations));
+
+    // Build a ConversationBridge wired to the router. We pass a
+    // throwaway event channel and ask handle.
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let ask_handle = gw_loop::bridge::new_ask_handle();
+    let mut bridge = gw_loop::bridge::ConversationBridge::with_plugin_router(
+        event_tx,
+        ask_handle,
+        None,
+        Some(Arc::clone(&router)),
+    );
+
+    // Sync handler dispatches through the router and returns the right value.
+    let result = bridge
+        .call(
+            "test.sync_echo",
+            vec![Value::String("hello".into())],
+            HashMap::new(),
+        )
+        .expect("sync call should succeed");
+    match result {
+        Object::String(s) => assert_eq!(s, "sync:hello"),
+        other => panic!("expected Object::String, got {:?}", other),
+    }
+
+    // Async handler dispatches through the router via block_in_place.
+    // This is the real test of the phase 1 foundation — if it deadlocks
+    // or panics, we've got the runtime setup wrong.
+    let result = bridge
+        .call(
+            "test.async_echo",
+            vec![Value::String("world".into())],
+            HashMap::new(),
+        )
+        .expect("async call should succeed");
+    match result {
+        Object::String(s) => assert_eq!(s, "async:world"),
+        other => panic!("expected Object::String, got {:?}", other),
+    }
+
+    // A function that isn't in the router falls through to UnknownFunction
+    // because there's no inner bridge configured.
+    let result = bridge.call(
+        "test.missing",
+        vec![],
+        HashMap::new(),
+    );
+    match result {
+        Err(AgentError::UnknownFunction(name)) => assert_eq!(name, "test.missing"),
+        other => panic!("expected UnknownFunction error, got {:?}", other),
+    }
+}

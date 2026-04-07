@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 gw-core = { workspace = true }
+gw-engine = { workspace = true }
 gw-llm = { workspace = true }
 gw-runtime = { workspace = true }
 ouros = { workspace = true }

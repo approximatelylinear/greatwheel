@@ -3,10 +3,12 @@
 //! Plugins register capabilities during `init()` via the `PluginContext` API.
 //! The engine collects registrations and wires them into the runtime.
 
+use futures::future::BoxFuture;
 use serde_json::Value;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 
 use crate::SessionId;
@@ -278,10 +280,74 @@ impl<'a> PluginContext<'a> {
     }
 
     /// Register a host function callable from the Python REPL.
-    pub fn register_host_fn(&mut self, name: &str, handler: HostFnHandler) {
+    ///
+    /// Backward-compatible shim kept for plugins that registered a raw
+    /// `HostFnHandler` before the enum refactor. Equivalent to calling
+    /// [`register_host_fn_sync`] with `capability: None` and wrapping
+    /// the provided Arc'd closure as a Sync variant.
+    pub fn register_host_fn(&mut self, name: &str, handler: HostFnHandlerFn) {
+        let registration = HostFnRegistration {
+            handler: HostFnHandler::Sync(handler),
+            capability: None,
+        };
         self.registrations
             .host_functions
-            .insert(name.to_string(), handler);
+            .insert(name.to_string(), registration);
+    }
+
+    /// Register a synchronous host function. The closure runs on whatever
+    /// thread the router dispatches it from. Use this for CPU-bound work
+    /// (regex, simple transforms). For anything async — database, HTTP,
+    /// embedding — use [`register_host_fn_async`] instead.
+    pub fn register_host_fn_sync<F>(
+        &mut self,
+        name: &str,
+        capability: Option<&str>,
+        handler: F,
+    ) where
+        F: Fn(Vec<Value>, HashMap<String, Value>) -> Result<Value, PluginError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let registration = HostFnRegistration {
+            handler: HostFnHandler::Sync(Arc::new(handler)),
+            capability: capability.map(|s| s.to_string()),
+        };
+        self.registrations
+            .host_functions
+            .insert(name.to_string(), registration);
+    }
+
+    /// Register an async host function. The closure returns a future that
+    /// the router awaits via `tokio::task::block_in_place` +
+    /// `Handle::current().block_on(...)` at dispatch time. Must be called
+    /// from a multi-threaded tokio runtime; single-threaded runtimes will
+    /// panic on dispatch.
+    pub fn register_host_fn_async<F, Fut>(
+        &mut self,
+        name: &str,
+        capability: Option<&str>,
+        handler: F,
+    ) where
+        F: Fn(Vec<Value>, HashMap<String, Value>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Value, PluginError>> + Send + 'static,
+    {
+        let wrapped: Arc<
+            dyn Fn(
+                    Vec<Value>,
+                    HashMap<String, Value>,
+                ) -> BoxFuture<'static, Result<Value, PluginError>>
+                + Send
+                + Sync,
+        > = Arc::new(move |args, kwargs| Box::pin(handler(args, kwargs)));
+        let registration = HostFnRegistration {
+            handler: HostFnHandler::Async(wrapped),
+            capability: capability.map(|s| s.to_string()),
+        };
+        self.registrations
+            .host_functions
+            .insert(name.to_string(), registration);
     }
 
     /// Expose a typed value for downstream plugins to access.
@@ -294,17 +360,47 @@ impl<'a> PluginContext<'a> {
 #[derive(Default)]
 pub struct PluginRegistrations {
     pub event_handlers: HashMap<LifecycleEvent, Vec<EventHandler>>,
-    pub host_functions: HashMap<String, HostFnHandler>,
+    pub host_functions: HashMap<String, HostFnRegistration>,
 }
 
 // ─── Host function types ──────────────────────────────────────────────────────
 
-/// A registered host function handler.
-///
-/// Takes positional args, keyword args, and returns a JSON value or error.
-/// Sync for now — the handler runs on the REPL execution thread.
-pub type HostFnHandler = Arc<
+/// A registered host function, with its handler and an optional capability
+/// string that the agent must hold to invoke it. Capability enforcement is
+/// not wired in yet — the string is recorded so future work can gate calls
+/// uniformly across plugins.
+#[derive(Clone)]
+pub struct HostFnRegistration {
+    pub handler: HostFnHandler,
+    pub capability: Option<String>,
+}
+
+/// The two flavors of host function handler. Plugins authoring CPU-bound
+/// work use the `Sync` variant; anything that needs to `.await` on a
+/// database, HTTP client, or embedder uses the `Async` variant. The
+/// dispatch site bridges `Async` into sync-land via `block_in_place` +
+/// `Handle::current().block_on(...)`.
+#[derive(Clone)]
+pub enum HostFnHandler {
+    Sync(HostFnHandlerFn),
+    Async(HostFnHandlerAsync),
+}
+
+/// Arc'd sync closure for `HostFnHandler::Sync`.
+pub type HostFnHandlerFn = Arc<
     dyn Fn(Vec<Value>, HashMap<String, Value>) -> Result<Value, PluginError> + Send + Sync,
+>;
+
+/// Arc'd async closure for `HostFnHandler::Async`. The inner future is
+/// boxed and `'static` so the router can store and later invoke it
+/// without borrowing from the handler.
+pub type HostFnHandlerAsync = Arc<
+    dyn Fn(
+            Vec<Value>,
+            HashMap<String, Value>,
+        ) -> BoxFuture<'static, Result<Value, PluginError>>
+        + Send
+        + Sync,
 >;
 
 // ─── Errors ───────────────────────────────────────────────────────────────────

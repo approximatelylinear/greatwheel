@@ -13,9 +13,9 @@ pub use agent_bus::AgentBus;
 pub use channel::{ChannelAdapter, TaskChannelAdapter};
 pub use loop_event::LoopEvent;
 pub use plugin::{
-    EventData, EventHandler, EventPayload, EventResult, HostFnHandler, LifecycleEvent,
-    LlmMessageData, Plugin, PluginContext, PluginError, PluginManifest, PluginRegistrations,
-    SharedState,
+    EventData, EventHandler, EventPayload, EventResult, HostFnHandler, HostFnHandlerAsync,
+    HostFnHandlerFn, HostFnRegistration, LifecycleEvent, LlmMessageData, Plugin, PluginContext,
+    PluginError, PluginManifest, PluginRegistrations, SharedState,
 };
 pub use session_tree::{EntryId, EntryType, ReplSnapshotData, SessionEntry, SessionState};
 
