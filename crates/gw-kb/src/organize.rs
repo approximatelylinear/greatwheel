@@ -389,29 +389,46 @@ fn build_tagger_prompt(chunk: &PendingChunk, topics: &[TopicState]) -> String {
     let content_truncated: String = chunk.content.chars().take(PROMPT_CHUNK_CHARS).collect();
 
     format!(
-        "Tag the passage below with 1–3 topic labels and extract any named \
-entities separately.
+        "Tag the passage below with topic labels and extract any named \
+entities separately. Return 0 to 3 topic labels — it is OK to return an \
+empty topics list if the passage has no substantive topical content.
 
 GUIDELINES:
 - Each label is a 2–4 word noun phrase.
-- **STRONGLY PREFER reusing an existing label from the list below.** Scan \
-the list first. If any existing label reasonably covers the passage, use it \
-verbatim — do not invent a synonym or a slight rewording.
+- **The substance test.** A label applies to a passage only if the passage \
+is substantively ABOUT that topic, not just if it mentions a related word. \
+Before reusing an existing label, ask: \"is this passage actually about \
+this topic, or does it merely touch on a related concept?\" If it's the \
+latter, do not use that label.
+- **Prefer reusing an existing label from the list below when it genuinely \
+fits.** Scan the list first. If an existing label is substantively the \
+right fit, use it verbatim — do not invent a synonym.
 - Do NOT create hyper-specific one-off labels for concepts that are only \
-briefly mentioned or that appear as a minor example. A topic that will only \
-ever apply to this single chunk is a bad tag — use an existing broader label \
-instead. For example, if a chunk briefly mentions \"high throughput inference\" \
-as an aside in an IR paper, tag it with an existing label like \
-\"Information Retrieval\", not a new \"High Throughput Inference\" topic.
-- Only invent a new label when the passage introduces a concept that is \
-clearly distinct from every existing topic AND is substantive enough that \
-you expect it to recur in other documents.
-- Do not emit multiple labels that are paraphrases of each other. Pick one.
-- Named entities (people, places, organisations, models, datasets, events, \
-works) go in `entities`, NOT in `topics`. Topic labels are about what the \
-passage is ABOUT; entities are the specific things it mentions.
+briefly mentioned. Use an existing broader label instead, or no label.
+- Only invent a new label when the passage introduces a distinct concept \
+that every existing topic misses AND the concept is substantive enough \
+to plausibly recur in other documents.
+- **Citation / references sections produce no topics.** If the passage \
+is a list of citations, bibliographic entries, footnotes, or external \
+links with no substantive prose, return an empty topics list. The \
+topics are about the content of the work, not about the existence of \
+its bibliography.
+- Named entities (people, places, organisations, models, datasets, \
+events, works) go in `entities`, NOT in `topics`.
 
-EXISTING TOPICS (strongly prefer reusing these; sorted by popularity):
+EXAMPLES OF LABELS TO AVOID:
+- A census intro paragraph tagged \"Information Retrieval\" — it mentions \
+\"data collection\" but is not about IR as a technical field.
+- A cosmology paper's methodology section tagged \"Information Retrieval\" \
+or \"Econometrics\" — it uses statistical estimation but is not about \
+those fields.
+- A references / bibliography chunk tagged with anything — return an \
+empty topics list.
+- A minor aside tagged with a hyper-specific new label that will never \
+apply to another chunk.
+
+EXISTING TOPICS (sorted by popularity; prefer reusing when they \
+substantively fit):
 {existing_block}
 Source: {source_title}
 Section: {heading}
