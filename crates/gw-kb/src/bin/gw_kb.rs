@@ -12,6 +12,7 @@ use tracing_subscriber::EnvFilter;
 
 use gw_kb::classify::{classify_edges, ClassifyOpts};
 use gw_kb::clean::{clean_outliers, CleanOpts};
+use gw_kb::digest::build_digest;
 use gw_kb::embed::Embedder;
 use gw_kb::feeds::{add_feed, list_feeds, remove_feed, sync_all, sync_by_slug};
 use gw_kb::index::{KbLanceStore, KbTantivyStore};
@@ -137,6 +138,16 @@ enum Command {
         /// Max member chunks to show.
         #[arg(long, default_value_t = 20)]
         chunks: i64,
+    },
+
+    /// What's new in the KB since a given time. Shows newly ingested
+    /// sources, newly created topics, and existing topics that picked
+    /// up new chunks. `--since` accepts durations like `7d`, `24h`,
+    /// `30m`, or an ISO-8601 timestamp.
+    Digest {
+        /// Time window. Defaults to 7 days.
+        #[arg(long, default_value = "7d")]
+        since: String,
     },
 
     /// Remove outlier chunks from topics — chunks whose content vector
@@ -664,6 +675,66 @@ async fn main() -> Result<(), KbError> {
                 println!("note: topic graph is stale — run `gw-kb link` and `gw-kb classify` to rebuild edges");
             }
         }
+        Command::Digest { since } => {
+            let stores = stores.as_ref().expect("stores built above");
+            let cutoff = parse_since(&since)?;
+            let report = build_digest(&stores.pg, cutoff).await?;
+
+            println!("digest since {}", cutoff.format("%Y-%m-%d %H:%M:%S UTC"));
+            println!();
+
+            if !report.new_sources.is_empty() {
+                println!("NEW SOURCES ({}):", report.new_sources.len());
+                for s in &report.new_sources {
+                    let feed = s
+                        .feed_name
+                        .as_deref()
+                        .map(|f| format!(" [{}]", f))
+                        .unwrap_or_default();
+                    println!(
+                        "  {} {} ({}, {} chunks){}",
+                        s.ingested_at.format("%Y-%m-%d"),
+                        s.title,
+                        s.source_format,
+                        s.chunk_count,
+                        feed
+                    );
+                    if let Some(url) = &s.url {
+                        println!("    {}", url);
+                    }
+                }
+                println!();
+            }
+
+            if !report.new_topics.is_empty() {
+                println!("NEW TOPICS ({}):", report.new_topics.len());
+                for t in &report.new_topics {
+                    println!(
+                        "  {:>4} chunks / {} sources  {}  ({})",
+                        t.chunk_count, t.source_count, t.label, t.slug
+                    );
+                }
+                println!();
+            }
+
+            if !report.grown_topics.is_empty() {
+                println!("GROWN TOPICS ({}):", report.grown_topics.len());
+                for g in &report.grown_topics {
+                    println!(
+                        "  +{:>3} new / {:>4} total  {}  ({})",
+                        g.new_chunks_in_window, g.total_chunks, g.label, g.slug
+                    );
+                }
+                println!();
+            }
+
+            if report.new_sources.is_empty()
+                && report.new_topics.is_empty()
+                && report.grown_topics.is_empty()
+            {
+                println!("nothing new in the window");
+            }
+        }
         Command::Clean {
             min_chunks,
             threshold,
@@ -948,6 +1019,45 @@ fn print_neighbors_grouped(neigh: &[LinkedNeighbor]) {
             line(n);
         }
     }
+}
+
+/// Parse a `--since` argument. Accepts either:
+///   - A shorthand duration like `7d`, `24h`, `30m`, `90s`, or `2w`.
+///     The result is "now - duration".
+///   - An RFC3339 / ISO-8601 timestamp (used verbatim).
+fn parse_since(s: &str) -> Result<chrono::DateTime<chrono::Utc>, KbError> {
+    use chrono::{Duration, Utc};
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(KbError::Other("--since cannot be empty".into()));
+    }
+
+    // Shorthand duration: number + unit suffix
+    let last = s.chars().last().unwrap();
+    if last.is_ascii_alphabetic() {
+        let num_part = &s[..s.len() - last.len_utf8()];
+        let n: i64 = num_part.parse().map_err(|_| {
+            KbError::Other(format!("--since: could not parse number in {s:?}"))
+        })?;
+        let dur = match last.to_ascii_lowercase() {
+            's' => Duration::seconds(n),
+            'm' => Duration::minutes(n),
+            'h' => Duration::hours(n),
+            'd' => Duration::days(n),
+            'w' => Duration::weeks(n),
+            other => {
+                return Err(KbError::Other(format!(
+                    "--since: unknown unit {other:?} (expected s, m, h, d, w)"
+                )))
+            }
+        };
+        return Ok(Utc::now() - dur);
+    }
+
+    // Fall back to RFC3339
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .map_err(|e| KbError::Other(format!("--since: could not parse timestamp: {e}")))
 }
 
 async fn build_stores(cli: &Cli) -> Result<KbStores, KbError> {
