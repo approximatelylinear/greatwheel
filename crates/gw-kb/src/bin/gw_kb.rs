@@ -10,11 +10,13 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tracing_subscriber::EnvFilter;
 
+use gw_kb::classify::{classify_edges, ClassifyOpts};
 use gw_kb::embed::Embedder;
 use gw_kb::index::{KbLanceStore, KbTantivyStore};
 use gw_kb::ingest::{ingest_file, ingest_url, KbStores};
 use gw_kb::linking::{
-    link, nearest_topics_to_query, neighbors_of, spread_from_seeds, LinkOpts, SpreadOpts,
+    link, nearest_topics_to_query, neighbors_of, spread_from_seeds, EdgeDirection, LinkOpts,
+    LinkedNeighbor, SpreadOpts,
 };
 use gw_kb::organize::{organize, OrganizeOpts};
 use gw_kb::search::hybrid_search;
@@ -126,6 +128,18 @@ enum Command {
         /// Max member chunks to show.
         #[arg(long, default_value_t = 20)]
         chunks: i64,
+    },
+
+    /// Type the existing topic edges using the LLM (subtopic_of /
+    /// builds_on / contradicts / related). Idempotent by default —
+    /// only re-types edges currently marked `related`.
+    Classify {
+        /// Process at most N edges (highest-confidence first).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Re-classify edges that already have a non-`related` kind.
+        #[arg(long)]
+        reclassify: bool,
     },
 
     /// Build the topic link graph from co-occurrence + embedding similarity.
@@ -379,11 +393,11 @@ async fn main() -> Result<(), KbError> {
             println!("last_seen    = {}", topic.last_seen);
             println!();
 
-            let members = list_chunks_for_topic(&stores.pg, topic.topic_id, chunks).await?;
-            if members.is_empty() {
-                println!("no member chunks");
-                return Ok(());
-            }
+            let members = if chunks > 0 {
+                list_chunks_for_topic(&stores.pg, topic.topic_id, chunks).await?
+            } else {
+                Vec::new()
+            };
             for (i, c) in members.iter().enumerate() {
                 let path = if c.heading_path.is_empty() {
                     "(root)".to_string()
@@ -404,21 +418,30 @@ async fn main() -> Result<(), KbError> {
                 }
                 println!();
             }
-            if (members.len() as i64) == chunks {
+            if chunks > 0 && (members.len() as i64) == chunks {
                 println!("(showing first {chunks}, use --chunks to fetch more)");
             }
 
             // Linked topics (if the graph has been built)
-            let neigh = neighbors_of(&stores.pg, topic.topic_id, 10).await?;
+            let neigh = neighbors_of(&stores.pg, topic.topic_id, 25).await?;
             if !neigh.is_empty() {
                 println!();
-                println!("linked topics (top {}):", neigh.len());
-                for n in &neigh {
-                    println!(
-                        "  conf={:.3}  ({} chunks)  {}  ({})",
-                        n.score, n.chunk_count, n.label, n.slug
-                    );
-                }
+                print_neighbors_grouped(&neigh);
+            }
+        }
+        Command::Classify { limit, reclassify } => {
+            let stores = stores.as_ref().expect("stores built above");
+            let report = classify_edges(stores, ClassifyOpts { limit, reclassify }).await?;
+            println!("classify report:");
+            println!("  edges_seen        = {}", report.edges_seen);
+            println!("  edges_classified  = {}", report.edges_classified);
+            println!("  edges_skipped     = {}", report.edges_skipped);
+            println!("  llm_failures      = {}", report.llm_failures);
+            println!("  by kind:");
+            let mut kinds: Vec<(&String, &usize)> = report.by_kind.iter().collect();
+            kinds.sort_by(|a, b| b.1.cmp(a.1));
+            for (k, n) in kinds {
+                println!("    {:14} {}", k, n);
             }
         }
         Command::Link { min_shared, min_cosine, min_confidence } => {
@@ -511,6 +534,56 @@ async fn main() -> Result<(), KbError> {
     }
 
     Ok(())
+}
+
+/// Render a topic's neighbors grouped by edge kind. For directional kinds
+/// (`subtopic_of`, `builds_on`) the section heading reflects the direction
+/// from the query topic's perspective.
+fn print_neighbors_grouped(neigh: &[LinkedNeighbor]) {
+    fn line(n: &LinkedNeighbor) {
+        println!(
+            "  conf={:.3}  ({} chunks)  {}  ({})",
+            n.confidence, n.chunk_count, n.label, n.slug
+        );
+    }
+
+    // Bucket by (kind, direction-relative-to-query-topic)
+    let mut subtopics_of_query: Vec<&LinkedNeighbor> = vec![]; // query subtopic_of neighbor → neighbor is broader
+    let mut parents_of_query: Vec<&LinkedNeighbor> = vec![];   // neighbor subtopic_of query → neighbor is narrower
+    let mut query_builds_on: Vec<&LinkedNeighbor> = vec![];    // query builds_on neighbor → neighbor is prerequisite
+    let mut builds_on_query: Vec<&LinkedNeighbor> = vec![];    // neighbor builds_on query → neighbor is dependent
+    let mut contradicts: Vec<&LinkedNeighbor> = vec![];
+    let mut related: Vec<&LinkedNeighbor> = vec![];
+
+    for n in neigh {
+        match (n.kind.as_str(), n.direction) {
+            ("subtopic_of", EdgeDirection::OutgoingFrom) => subtopics_of_query.push(n),
+            ("subtopic_of", EdgeDirection::IncomingTo) => parents_of_query.push(n),
+            ("builds_on", EdgeDirection::OutgoingFrom) => query_builds_on.push(n),
+            ("builds_on", EdgeDirection::IncomingTo) => builds_on_query.push(n),
+            ("contradicts", _) => contradicts.push(n),
+            _ => related.push(n),
+        }
+    }
+
+    let sections: &[(&str, &[&LinkedNeighbor])] = &[
+        ("Broader topics (this is a subtopic of):", &subtopics_of_query),
+        ("Narrower topics (subtopics of this):", &parents_of_query),
+        ("Prerequisites (this builds on):", &query_builds_on),
+        ("Built on this:", &builds_on_query),
+        ("Contradicts:", &contradicts),
+        ("Related:", &related),
+    ];
+
+    for (title, items) in sections {
+        if items.is_empty() {
+            continue;
+        }
+        println!("{}", title);
+        for n in *items {
+            line(n);
+        }
+    }
 }
 
 async fn build_stores(cli: &Cli) -> Result<KbStores, KbError> {

@@ -3,6 +3,7 @@
 //! See `docs/design-kb.md` for the full design.
 
 pub mod chunk;
+pub mod classify;
 pub mod embed;
 pub mod error;
 pub mod extract;

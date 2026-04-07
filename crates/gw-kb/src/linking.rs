@@ -197,6 +197,34 @@ pub struct ActivatedTopic {
     pub score: f32,
 }
 
+/// A direct neighbor of a topic in the link graph, with the edge details
+/// needed for display. `direction` describes the relationship from the
+/// query topic's perspective for directional kinds:
+///
+/// - `OutgoingFrom` — the query topic is the `from_topic_id` of the edge.
+///   For `subtopic_of`/`builds_on`, this means the query topic is the
+///   more specific / dependent one.
+/// - `IncomingTo` — the query topic is the `to_topic_id` of the edge.
+///   The neighbor is the child / dependent.
+/// - `Symmetric` — for `related`/`contradicts`, direction is meaningless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeDirection {
+    OutgoingFrom,
+    IncomingTo,
+    Symmetric,
+}
+
+#[derive(Debug, Clone)]
+pub struct LinkedNeighbor {
+    pub topic_id: Uuid,
+    pub label: String,
+    pub slug: String,
+    pub chunk_count: i32,
+    pub confidence: f32,
+    pub kind: String,
+    pub direction: EdgeDirection,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SpreadOpts {
     pub max_hops: usize,
@@ -298,22 +326,36 @@ pub async fn spread_from_seeds(
         .collect())
 }
 
-/// Direct neighbors of one topic, ordered by edge confidence.
+/// Direct neighbors of one topic, ordered by edge confidence. Returns the
+/// edge `kind` and the direction (from the perspective of the query topic)
+/// so callers can group by relationship type.
 pub async fn neighbors_of(
     pool: &PgPool,
     topic_id: Uuid,
     limit: i64,
-) -> Result<Vec<ActivatedTopic>, KbError> {
-    let rows: Vec<(Uuid, String, String, i32, f32)> = sqlx::query_as(
+) -> Result<Vec<LinkedNeighbor>, KbError> {
+    // Two unions: rows where the query topic is the `from` side, and rows
+    // where it's the `to` side. We carry a `dir_outgoing` boolean to remember
+    // which side it was on (matters for directional kinds).
+    let rows: Vec<(Uuid, String, String, i32, f32, String, bool)> = sqlx::query_as(
         r#"
         WITH n AS (
-            SELECT to_topic_id AS topic_id, confidence
-            FROM kb_topic_links WHERE from_topic_id = $1
+            SELECT to_topic_id   AS topic_id,
+                   confidence,
+                   kind::text    AS kind,
+                   true          AS dir_outgoing
+            FROM kb_topic_links
+            WHERE from_topic_id = $1
             UNION ALL
-            SELECT from_topic_id, confidence
-            FROM kb_topic_links WHERE to_topic_id = $1
+            SELECT from_topic_id AS topic_id,
+                   confidence,
+                   kind::text    AS kind,
+                   false         AS dir_outgoing
+            FROM kb_topic_links
+            WHERE to_topic_id = $1
         )
-        SELECT t.topic_id, t.label, t.slug, t.chunk_count, n.confidence
+        SELECT t.topic_id, t.label, t.slug, t.chunk_count,
+               n.confidence, n.kind, n.dir_outgoing
         FROM n JOIN kb_topics t USING (topic_id)
         ORDER BY n.confidence DESC
         LIMIT $2
@@ -326,12 +368,26 @@ pub async fn neighbors_of(
 
     Ok(rows
         .into_iter()
-        .map(|(id, label, slug, cc, score)| ActivatedTopic {
-            topic_id: id,
-            label,
-            slug,
-            chunk_count: cc,
-            score,
+        .map(|(id, label, slug, cc, conf, kind, dir_outgoing)| {
+            let direction = match kind.as_str() {
+                "subtopic_of" | "builds_on" => {
+                    if dir_outgoing {
+                        EdgeDirection::OutgoingFrom
+                    } else {
+                        EdgeDirection::IncomingTo
+                    }
+                }
+                _ => EdgeDirection::Symmetric,
+            };
+            LinkedNeighbor {
+                topic_id: id,
+                label,
+                slug,
+                chunk_count: cc,
+                confidence: conf,
+                kind,
+                direction,
+            }
         })
         .collect())
 }
