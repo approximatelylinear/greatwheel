@@ -8,6 +8,7 @@ pub mod error;
 pub mod extract;
 pub mod index;
 pub mod ingest;
+pub mod linking;
 pub mod organize;
 pub mod search;
 pub mod source;

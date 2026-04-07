@@ -13,6 +13,9 @@ use tracing_subscriber::EnvFilter;
 use gw_kb::embed::Embedder;
 use gw_kb::index::{KbLanceStore, KbTantivyStore};
 use gw_kb::ingest::{ingest_file, ingest_url, KbStores};
+use gw_kb::linking::{
+    link, nearest_topics_to_query, neighbors_of, spread_from_seeds, LinkOpts, SpreadOpts,
+};
 use gw_kb::organize::{organize, OrganizeOpts};
 use gw_kb::search::hybrid_search;
 use gw_kb::source::{
@@ -123,6 +126,38 @@ enum Command {
         /// Max member chunks to show.
         #[arg(long, default_value_t = 20)]
         chunks: i64,
+    },
+
+    /// Build the topic link graph from co-occurrence + embedding similarity.
+    Link {
+        /// Co-occurrence: minimum shared chunks for a pair to link.
+        #[arg(long, default_value_t = 2)]
+        min_shared: i64,
+        /// Embedding: minimum content-vector cosine for a pair to link.
+        #[arg(long, default_value_t = 0.65)]
+        min_cosine: f32,
+        /// Drop edges with confidence below this floor.
+        #[arg(long, default_value_t = 0.20)]
+        min_confidence: f32,
+    },
+
+    /// Spreading-activation discovery from a free-text query.
+    /// Picks the nearest topics as seeds, then walks the link graph.
+    Explore {
+        /// Free-text query.
+        query: String,
+        /// Number of seed topics from the query embedding.
+        #[arg(long, default_value_t = 3)]
+        seeds: usize,
+        /// Max hops to walk from each seed.
+        #[arg(long, default_value_t = 3)]
+        hops: usize,
+        /// Per-hop activation decay.
+        #[arg(long, default_value_t = 0.5)]
+        decay: f32,
+        /// Number of activated topics to display.
+        #[arg(short = 'k', long, default_value_t = 15)]
+        limit: usize,
     },
 
     /// Smoke test the embedded Python interpreter.
@@ -371,6 +406,78 @@ async fn main() -> Result<(), KbError> {
             }
             if (members.len() as i64) == chunks {
                 println!("(showing first {chunks}, use --chunks to fetch more)");
+            }
+
+            // Linked topics (if the graph has been built)
+            let neigh = neighbors_of(&stores.pg, topic.topic_id, 10).await?;
+            if !neigh.is_empty() {
+                println!();
+                println!("linked topics (top {}):", neigh.len());
+                for n in &neigh {
+                    println!(
+                        "  conf={:.3}  ({} chunks)  {}  ({})",
+                        n.score, n.chunk_count, n.label, n.slug
+                    );
+                }
+            }
+        }
+        Command::Link { min_shared, min_cosine, min_confidence } => {
+            let stores = stores.as_ref().expect("stores built above");
+            let report = link(
+                &stores.pg,
+                LinkOpts { min_shared_chunks: min_shared, min_cosine, min_confidence },
+            )
+            .await?;
+            println!("link report:");
+            println!("  topics_seen        = {}", report.topics_seen);
+            println!("  cooccurrence_pairs = {}", report.cooccurrence_pairs);
+            println!("  embedding_pairs    = {}", report.embedding_pairs);
+            println!("  edges_written      = {}", report.edges_written);
+        }
+        Command::Explore { query, seeds, hops, decay, limit } => {
+            let stores = stores.as_ref().expect("stores built above");
+
+            // Embed the query and pick the nearest topics as seeds.
+            let qvec = stores.embedder.embed_one(&query)?;
+            let seed_pairs = nearest_topics_to_query(&stores.pg, &qvec, seeds).await?;
+            if seed_pairs.is_empty() {
+                println!("no topics in the knowledge base — run `gw-kb organize` first");
+                return Ok(());
+            }
+
+            println!("seeds (nearest topics to query):");
+            for (id, sim) in &seed_pairs {
+                let label: String = sqlx::query_scalar(
+                    "SELECT label FROM kb_topics WHERE topic_id = $1",
+                )
+                .bind(id)
+                .fetch_one(&stores.pg)
+                .await?;
+                println!("  {:.4}  {}", sim, label);
+            }
+            println!();
+
+            let activated = spread_from_seeds(
+                &stores.pg,
+                &seed_pairs,
+                SpreadOpts { max_hops: hops, decay, limit },
+            )
+            .await?;
+
+            if activated.is_empty() {
+                println!("no neighbors reached — try increasing --hops or lowering link thresholds");
+                return Ok(());
+            }
+            println!("activated topics (top {}):", activated.len());
+            for (i, t) in activated.iter().enumerate() {
+                println!(
+                    "  [{:>2}] score={:.4}  ({} chunks)  {}  ({})",
+                    i + 1,
+                    t.score,
+                    t.chunk_count,
+                    t.label,
+                    t.slug
+                );
             }
         }
         Command::Search { query, k } => {
