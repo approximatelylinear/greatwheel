@@ -389,21 +389,29 @@ fn build_tagger_prompt(chunk: &PendingChunk, topics: &[TopicState]) -> String {
     let content_truncated: String = chunk.content.chars().take(PROMPT_CHUNK_CHARS).collect();
 
     format!(
-        "Tag the passage below with 1–3 specific topic labels and extract \
-any named entities (people, places, organisations, models, datasets, events, works).
+        "Tag the passage below with 1–3 topic labels and extract any named \
+entities separately.
 
-GUIDELINES FOR TOPIC LABELS:
-- Each label is a 2–4 word noun phrase
-- Prefer SPECIFIC over GENERIC. Good: \"Coronation of Charlemagne\", \
-\"Carolingian Octagon\", \"Centroid Pruning\". Bad: \"Medieval History\", \
-\"Catholic Church\", \"Information Retrieval\" — these are too broad.
-- Pick the topics that are *distinctive* to this passage. If the passage \
-discusses a particular event, technique, or named concept, use that as a label.
-- Avoid emitting multiple labels that are paraphrases of each other (e.g. \
-\"Medieval Popes\" + \"Papal History\" — pick one, or pick a more specific aspect).
-- Reuse an existing label below if it fits exactly. Don't invent a synonym.
+GUIDELINES:
+- Each label is a 2–4 word noun phrase.
+- **STRONGLY PREFER reusing an existing label from the list below.** Scan \
+the list first. If any existing label reasonably covers the passage, use it \
+verbatim — do not invent a synonym or a slight rewording.
+- Do NOT create hyper-specific one-off labels for concepts that are only \
+briefly mentioned or that appear as a minor example. A topic that will only \
+ever apply to this single chunk is a bad tag — use an existing broader label \
+instead. For example, if a chunk briefly mentions \"high throughput inference\" \
+as an aside in an IR paper, tag it with an existing label like \
+\"Information Retrieval\", not a new \"High Throughput Inference\" topic.
+- Only invent a new label when the passage introduces a concept that is \
+clearly distinct from every existing topic AND is substantive enough that \
+you expect it to recur in other documents.
+- Do not emit multiple labels that are paraphrases of each other. Pick one.
+- Named entities (people, places, organisations, models, datasets, events, \
+works) go in `entities`, NOT in `topics`. Topic labels are about what the \
+passage is ABOUT; entities are the specific things it mentions.
 
-EXISTING TOPICS (reuse when applicable):
+EXISTING TOPICS (strongly prefer reusing these; sorted by popularity):
 {existing_block}
 Source: {source_title}
 Section: {heading}
