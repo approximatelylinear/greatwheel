@@ -14,6 +14,7 @@ pub mod merge;
 pub mod organize;
 pub mod search;
 pub mod source;
+pub mod synthesize;
 pub mod topics;
 
 pub use error::KbError;

@@ -20,6 +20,7 @@ use gw_kb::linking::{
 };
 use gw_kb::merge::{merge_topics, MergeOpts};
 use gw_kb::organize::{organize, OrganizeOpts};
+use gw_kb::synthesize::{fetch_summary, synthesize_topics, SynthesizeOpts};
 use gw_kb::search::hybrid_search;
 use gw_kb::source::{
     fetch_source, list_chunks_for_source, list_sources, resolve_source_id,
@@ -129,6 +130,25 @@ enum Command {
         /// Max member chunks to show.
         #[arg(long, default_value_t = 20)]
         chunks: i64,
+    },
+
+    /// Generate 2-4 paragraph LLM summaries for rich topics (Phase 3).
+    Synthesize {
+        /// Process at most N topics.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Only topics with chunk_count >= N are summarized.
+        #[arg(long, default_value_t = 5)]
+        min_chunks: i32,
+        /// Regenerate existing summaries instead of skipping them.
+        #[arg(long)]
+        regenerate: bool,
+        /// Regenerate only summaries whose summary_at < topic updated_at.
+        #[arg(long)]
+        stale_only: bool,
+        /// Synthesize only one specific topic by slug.
+        #[arg(long)]
+        topic: Option<String>,
     },
 
     /// Find and collapse duplicate topics. Detects candidates by
@@ -410,6 +430,15 @@ async fn main() -> Result<(), KbError> {
             println!("chunk_count  = {}", topic.chunk_count);
             println!("first_seen   = {}", topic.first_seen);
             println!("last_seen    = {}", topic.last_seen);
+
+            // Summary (Phase 3) — prominent placement right after metadata.
+            if let Some((summary, summary_at)) =
+                fetch_summary(&stores.pg, topic.topic_id).await?
+            {
+                println!("summary_at   = {}", summary_at);
+                println!();
+                println!("{}", summary);
+            }
             println!();
 
             let members = if chunks > 0 {
@@ -446,6 +475,53 @@ async fn main() -> Result<(), KbError> {
             if !neigh.is_empty() {
                 println!();
                 print_neighbors_grouped(&neigh);
+            }
+        }
+        Command::Synthesize {
+            limit,
+            min_chunks,
+            regenerate,
+            stale_only,
+            topic,
+        } => {
+            let stores = stores.as_ref().expect("stores built above");
+
+            let only_topic_id = if let Some(slug) = topic.as_ref() {
+                let row = gw_kb::topics::fetch_topic_by_slug(&stores.pg, slug).await?;
+                Some(row.topic_id)
+            } else {
+                None
+            };
+
+            let report = synthesize_topics(
+                stores,
+                SynthesizeOpts {
+                    limit,
+                    min_chunks,
+                    regenerate: regenerate || only_topic_id.is_some(),
+                    stale_only,
+                    only_topic: only_topic_id,
+                },
+            )
+            .await?;
+
+            println!("synthesize report:");
+            println!("  topics_considered = {}", report.topics_considered);
+            println!("  summaries_written = {}", report.summaries_written);
+            println!("  topics_skipped    = {}", report.topics_skipped);
+            println!("  llm_failures      = {}", report.llm_failures);
+
+            // In single-topic mode, also print the generated summary.
+            if let Some(id) = only_topic_id {
+                if let Some((summary, _)) = fetch_summary(&stores.pg, id).await? {
+                    let row = sqlx::query_scalar::<_, String>(
+                        "SELECT label FROM kb_topics WHERE topic_id = $1",
+                    )
+                    .bind(id)
+                    .fetch_one(&stores.pg)
+                    .await?;
+                    println!("\n--- {} ---\n{}", row, summary);
+                }
             }
         }
         Command::Merge { auto_threshold, ask_threshold, limit, dry_run } => {
