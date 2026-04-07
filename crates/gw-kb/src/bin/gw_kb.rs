@@ -11,6 +11,7 @@ use sqlx::PgPool;
 use tracing_subscriber::EnvFilter;
 
 use gw_kb::classify::{classify_edges, ClassifyOpts};
+use gw_kb::clean::{clean_outliers, CleanOpts};
 use gw_kb::embed::Embedder;
 use gw_kb::feeds::{add_feed, list_feeds, remove_feed, sync_all, sync_by_slug};
 use gw_kb::index::{KbLanceStore, KbTantivyStore};
@@ -67,12 +68,17 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Ingest a document from a URL or local file.
+    /// Ingest a document from a URL or local file, or a batch from a
+    /// URL list file (one URL per line; blank lines and `#` comments
+    /// are ignored).
     Ingest {
-        #[arg(long, conflicts_with = "file")]
+        #[arg(long, conflicts_with_all = ["file", "url_list"])]
         url: Option<String>,
-        #[arg(long, conflicts_with = "url")]
+        #[arg(long, conflicts_with_all = ["url", "url_list"])]
         file: Option<PathBuf>,
+        /// Path to a text file containing URLs, one per line.
+        #[arg(long, conflicts_with_all = ["url", "file"])]
+        url_list: Option<PathBuf>,
     },
 
     /// Hybrid search (BM25 + vector) over the knowledge base.
@@ -131,6 +137,24 @@ enum Command {
         /// Max member chunks to show.
         #[arg(long, default_value_t = 20)]
         chunks: i64,
+    },
+
+    /// Remove outlier chunks from topics — chunks whose content vector
+    /// is below a cosine threshold against their topic's vector. Use
+    /// after `organize` to clean up false-positive tags.
+    Clean {
+        /// Only clean topics with chunk_count ≥ this.
+        #[arg(long, default_value_t = 5)]
+        min_chunks: i32,
+        /// Membership cosine threshold. Chunks below this are outliers.
+        #[arg(long, default_value_t = 0.55)]
+        threshold: f32,
+        /// Don't persist changes; just print what would be removed.
+        #[arg(long)]
+        dry_run: bool,
+        /// If set, only clean this one topic (by slug).
+        #[arg(long)]
+        topic: Option<String>,
     },
 
     /// Manage RSS/Atom feed subscriptions.
@@ -277,14 +301,63 @@ async fn main() -> Result<(), KbError> {
                 Ok(())
             })?;
         }
-        Command::Ingest { url, file } => {
+        Command::Ingest { url, file, url_list } => {
             let stores = stores.as_ref().expect("stores built above");
+
+            if let Some(list_path) = url_list {
+                let text = std::fs::read_to_string(&list_path)
+                    .map_err(|e| KbError::Other(format!("read url list: {e}")))?;
+                let urls: Vec<String> = text
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                    .collect();
+                println!("ingesting {} URLs from {}", urls.len(), list_path.display());
+                let mut n_ok = 0usize;
+                let mut n_fail = 0usize;
+                let mut n_unchanged = 0usize;
+                for (i, u) in urls.iter().enumerate() {
+                    print!("[{}/{}] {} ... ", i + 1, urls.len(), u);
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
+                    match ingest_url(stores, u).await {
+                        Ok(r) => {
+                            match r.outcome {
+                                gw_kb::source::UpsertOutcome::Unchanged => {
+                                    n_unchanged += 1;
+                                    println!("unchanged");
+                                }
+                                gw_kb::source::UpsertOutcome::Updated => {
+                                    n_ok += 1;
+                                    println!("updated ({} chunks)", r.chunks_written);
+                                }
+                                gw_kb::source::UpsertOutcome::Inserted => {
+                                    n_ok += 1;
+                                    println!("inserted ({} chunks)", r.chunks_written);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            n_fail += 1;
+                            println!("FAILED: {}", e);
+                        }
+                    }
+                }
+                println!(
+                    "\ntotal: {} ingested, {} unchanged, {} failed",
+                    n_ok, n_unchanged, n_fail
+                );
+                return Ok(());
+            }
+
             let report = if let Some(u) = url {
                 ingest_url(stores, &u).await?
             } else if let Some(f) = file {
                 ingest_file(stores, &f).await?
             } else {
-                return Err(KbError::Other("must provide --url or --file".into()));
+                return Err(KbError::Other(
+                    "must provide --url, --file, or --url-list".into(),
+                ));
             };
             println!(
                 "ingest: {} (outcome: {:?}, chunks: {})",
@@ -589,6 +662,50 @@ async fn main() -> Result<(), KbError> {
             if report.merges_executed > 0 && !dry_run {
                 println!();
                 println!("note: topic graph is stale — run `gw-kb link` and `gw-kb classify` to rebuild edges");
+            }
+        }
+        Command::Clean {
+            min_chunks,
+            threshold,
+            dry_run,
+            topic,
+        } => {
+            let stores = stores.as_ref().expect("stores built above");
+            let only_topic = if let Some(slug) = topic.as_ref() {
+                Some(gw_kb::topics::fetch_topic_by_slug(&stores.pg, slug).await?.topic_id)
+            } else {
+                None
+            };
+            let report = clean_outliers(
+                stores,
+                CleanOpts {
+                    min_chunks,
+                    threshold,
+                    dry_run,
+                    only_topic,
+                },
+            )
+            .await?;
+            println!("clean report:");
+            println!("  topics_considered = {}", report.topics_considered);
+            println!("  chunks_scored     = {}", report.chunks_scored);
+            println!("  outliers_found    = {}", report.outliers_found);
+            println!("  outliers_removed  = {}", report.outliers_removed);
+            if !report.examples.is_empty() {
+                println!("\nexamples (up to 3 per topic):");
+                for ex in &report.examples {
+                    println!(
+                        "  [{}] cos={:.3}  in {:?} ({})",
+                        ex.topic_label, ex.cosine, ex.source_title, ex.heading
+                    );
+                    println!("     {}", ex.content_preview);
+                }
+            }
+            if report.outliers_removed > 0 && !dry_run {
+                println!();
+                println!(
+                    "note: topic vectors updated. Run `gw-kb link` + `gw-kb classify --reclassify` + `gw-kb synthesize --stale-only` to refresh the graph."
+                );
             }
         }
         Command::Feed { action } => {

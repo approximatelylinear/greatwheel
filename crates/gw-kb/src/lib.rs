@@ -4,6 +4,7 @@
 
 pub mod chunk;
 pub mod classify;
+pub mod clean;
 pub mod embed;
 pub mod error;
 pub mod extract;
