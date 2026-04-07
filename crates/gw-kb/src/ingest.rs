@@ -172,6 +172,89 @@ pub async fn ingest_file(stores: &KbStores, path: &Path) -> Result<IngestReport,
     finish_ingest(stores, None, Some(path_str), extracted).await
 }
 
+/// Ingest a document whose text is already in hand — no extraction.
+///
+/// Used for corpora like BrowseComp-Plus where sources come pre-parsed
+/// as `(docid, text, url)` tuples. Constructs an `Extracted` inline
+/// and runs it through the same chunk → embed → persist path as
+/// `ingest_url` and `ingest_file`.
+///
+/// `metadata` is persisted to `kb_sources.metadata` (jsonb). For
+/// BrowseComp this is where we stash the `docid` so we can match
+/// retrieved chunks against qrels at eval time without re-parsing
+/// the original jsonl.
+pub async fn ingest_inline(
+    stores: &KbStores,
+    url: &str,
+    text: &str,
+    metadata: Option<serde_json::Value>,
+) -> Result<IngestReport, KbError> {
+    let (title, published_at, body) = parse_frontmatter(text);
+    let extracted = Extracted {
+        markdown: body,
+        title,
+        author: None,
+        published_at,
+        source_format: "inline".into(),
+        extractor: "inline".into(),
+    };
+
+    let report = finish_ingest(stores, Some(url), None, extracted).await?;
+
+    // Stash metadata on the source row. We do this in a follow-up
+    // UPDATE rather than threading metadata through upsert_source so
+    // the source layer stays decoupled from ingest-specific concerns.
+    if let Some(meta) = metadata {
+        sqlx::query("UPDATE kb_sources SET metadata = $1 WHERE source_id = $2")
+            .bind(meta)
+            .bind(report.source.source_id)
+            .execute(&stores.pg)
+            .await?;
+    }
+
+    Ok(report)
+}
+
+/// Parse a YAML-ish frontmatter block from the top of a markdown
+/// document. Returns `(title, published_at, body_without_frontmatter)`.
+/// Handles the simple `---\ntitle: ...\ndate: ...\n---\n<body>` shape
+/// that BrowseComp-Plus and most static-site generators produce. Any
+/// fields beyond title and date are ignored; if the frontmatter is
+/// missing or malformed, returns the text unchanged.
+fn parse_frontmatter(text: &str) -> (Option<String>, Option<chrono::DateTime<chrono::Utc>>, String) {
+    let trimmed = text.trim_start_matches('\u{feff}'); // strip BOM if present
+    if !trimmed.starts_with("---\n") && !trimmed.starts_with("---\r\n") {
+        return (None, None, text.to_string());
+    }
+    let rest = &trimmed[4..];
+    // Find the closing `---` on its own line.
+    let Some(end_idx) = rest.find("\n---\n").or_else(|| rest.find("\n---\r\n")) else {
+        return (None, None, text.to_string());
+    };
+    let frontmatter = &rest[..end_idx];
+    let body_start = end_idx + 5; // skip "\n---\n"
+    let body = rest[body_start.min(rest.len())..].trim_start_matches('\n').to_string();
+
+    let mut title: Option<String> = None;
+    let mut date: Option<chrono::DateTime<chrono::Utc>> = None;
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("title:") {
+            title = Some(rest.trim().trim_matches(|c| c == '"' || c == '\'').to_string());
+        } else if let Some(rest) = line.strip_prefix("date:") {
+            let raw = rest.trim().trim_matches(|c| c == '"' || c == '\'');
+            // Try ISO date (YYYY-MM-DD) first, then full RFC3339
+            if let Ok(d) = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
+                date = d.and_hms_opt(0, 0, 0).map(|dt| dt.and_utc());
+            } else if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+                date = Some(dt.with_timezone(&chrono::Utc));
+            }
+        }
+    }
+
+    (title, date, body)
+}
+
 fn extract_file(path: &Path) -> Result<Extracted, KbError> {
     let ext = path
         .extension()
@@ -258,6 +341,54 @@ async fn write_chunks(
 
     info!(source_id = %source.source_id, chunks = count, "chunks indexed");
     Ok(count)
+}
+
+#[cfg(test)]
+mod frontmatter_tests {
+    use super::parse_frontmatter;
+
+    #[test]
+    fn parses_title_and_date() {
+        let text = "---\ntitle: Hello World\ndate: 2002-05-13\n---\nBody text here.";
+        let (title, date, body) = parse_frontmatter(text);
+        assert_eq!(title.as_deref(), Some("Hello World"));
+        assert!(date.is_some());
+        assert_eq!(body, "Body text here.");
+    }
+
+    #[test]
+    fn missing_frontmatter_passes_through() {
+        let text = "just some body\nwith multiple lines";
+        let (title, date, body) = parse_frontmatter(text);
+        assert!(title.is_none());
+        assert!(date.is_none());
+        assert_eq!(body, text);
+    }
+
+    #[test]
+    fn malformed_frontmatter_passes_through() {
+        // Opens with ---\n but never closes
+        let text = "---\ntitle: Bad\nstill no closer";
+        let (title, _, body) = parse_frontmatter(text);
+        assert!(title.is_none());
+        assert_eq!(body, text);
+    }
+
+    #[test]
+    fn strips_quoted_title() {
+        let text = "---\ntitle: \"Quoted Title\"\n---\nbody";
+        let (title, _, _) = parse_frontmatter(text);
+        assert_eq!(title.as_deref(), Some("Quoted Title"));
+    }
+
+    #[test]
+    fn handles_browsecomp_sample() {
+        let text = "---\ntitle: Arwa University holds annual cultural activities [Archives:2002/20/Local News]\ndate: 2002-05-13\n---\nArwa University holds annual cultural activities [Archives:2002/20/Local News]\n\nBY ABDUH AL-SABRI";
+        let (title, date, body) = parse_frontmatter(text);
+        assert!(title.as_deref().unwrap().contains("Arwa University"));
+        assert!(date.is_some());
+        assert!(body.starts_with("Arwa University"));
+    }
 }
 
 /// Verify that every chunk's `(char_offset, char_length)` recovers its

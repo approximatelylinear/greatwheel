@@ -69,17 +69,26 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Ingest a document from a URL or local file, or a batch from a
-    /// URL list file (one URL per line; blank lines and `#` comments
-    /// are ignored).
+    /// Ingest a document from a URL, a local file, a URL list, or a
+    /// BrowseComp-Plus-style jsonl file with pre-extracted documents.
     Ingest {
-        #[arg(long, conflicts_with_all = ["file", "url_list"])]
+        #[arg(long, conflicts_with_all = ["file", "url_list", "jsonl"])]
         url: Option<String>,
-        #[arg(long, conflicts_with_all = ["url", "url_list"])]
+        #[arg(long, conflicts_with_all = ["url", "url_list", "jsonl"])]
         file: Option<PathBuf>,
         /// Path to a text file containing URLs, one per line.
-        #[arg(long, conflicts_with_all = ["url", "file"])]
+        #[arg(long, conflicts_with_all = ["url", "file", "jsonl"])]
         url_list: Option<PathBuf>,
+        /// Path to a BrowseComp-Plus-style jsonl file containing
+        /// one query per line with gold/negative/evidence docs inline.
+        /// Docs are deduped by `docid` and ingested via `ingest_inline`.
+        #[arg(long, conflicts_with_all = ["url", "file", "url_list"])]
+        jsonl: Option<PathBuf>,
+        /// Restrict jsonl ingest to specific query ids (comma-separated).
+        /// Only docs referenced by these queries get ingested. Useful
+        /// for tiered validation runs (start with a handful of queries).
+        #[arg(long, requires = "jsonl")]
+        query_ids: Option<String>,
     },
 
     /// Hybrid search (BM25 + vector) over the knowledge base.
@@ -312,7 +321,7 @@ async fn main() -> Result<(), KbError> {
                 Ok(())
             })?;
         }
-        Command::Ingest { url, file, url_list } => {
+        Command::Ingest { url, file, url_list, jsonl, query_ids } => {
             let stores = stores.as_ref().expect("stores built above");
 
             if let Some(list_path) = url_list {
@@ -361,13 +370,18 @@ async fn main() -> Result<(), KbError> {
                 return Ok(());
             }
 
+            if let Some(jsonl_path) = jsonl {
+                run_jsonl_ingest(stores, &jsonl_path, query_ids.as_deref()).await?;
+                return Ok(());
+            }
+
             let report = if let Some(u) = url {
                 ingest_url(stores, &u).await?
             } else if let Some(f) = file {
                 ingest_file(stores, &f).await?
             } else {
                 return Err(KbError::Other(
-                    "must provide --url, --file, or --url-list".into(),
+                    "must provide --url, --file, --url-list, or --jsonl".into(),
                 ));
             };
             println!(
@@ -1058,6 +1072,154 @@ fn parse_since(s: &str) -> Result<chrono::DateTime<chrono::Utc>, KbError> {
     chrono::DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&chrono::Utc))
         .map_err(|e| KbError::Other(format!("--since: could not parse timestamp: {e}")))
+}
+
+/// Read a BrowseComp-Plus jsonl corpus and ingest each unique document.
+///
+/// The file format is one query per line:
+/// ```json
+/// {
+///   "query_id": "...",
+///   "query": "...",
+///   "answer": "...",
+///   "gold_docs":     [{"docid": "...", "url": "...", "text": "..."}, ...],
+///   "negative_docs": [...],
+///   "evidence_docs": [...]
+/// }
+/// ```
+///
+/// Docs across all three lists are deduped by `docid` so we only
+/// ingest each unique document once, even if it appears as a gold
+/// doc for one query and a negative for another. Each ingested
+/// source gets its `docid` stashed in `kb_sources.metadata` as
+/// `{"docid": "..."}` so the eval harness can match retrieved
+/// chunks back to the BrowseComp qrels.
+///
+/// If `query_ids_filter` is `Some("1,2,3")`, only documents referenced
+/// by those queries are ingested. Used for tiered ingest runs (start
+/// small, confirm the pipeline, then scale up).
+async fn run_jsonl_ingest(
+    stores: &KbStores,
+    path: &PathBuf,
+    query_ids_filter: Option<&str>,
+) -> Result<(), KbError> {
+    use std::collections::HashSet;
+    use std::io::{BufRead, BufReader};
+
+    let filter: Option<HashSet<String>> = query_ids_filter.map(|s| {
+        s.split(',')
+            .map(|q| q.trim().to_string())
+            .filter(|q| !q.is_empty())
+            .collect()
+    });
+
+    let file = std::fs::File::open(path)
+        .map_err(|e| KbError::Other(format!("open jsonl: {e}")))?;
+    let reader = BufReader::new(file);
+
+    // First pass: collect unique (docid, url, text) tuples.
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut docs: Vec<(String, String, String)> = Vec::new();
+    let mut queries_seen = 0usize;
+    let mut queries_used = 0usize;
+
+    for line in reader.lines() {
+        let line = line.map_err(|e| KbError::Other(format!("read line: {e}")))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let row: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|e| KbError::Other(format!("parse jsonl: {e}")))?;
+        queries_seen += 1;
+
+        if let Some(filter) = &filter {
+            let qid = row
+                .get("query_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !filter.contains(qid) {
+                continue;
+            }
+        }
+        queries_used += 1;
+
+        for key in ["gold_docs", "negative_docs", "evidence_docs"] {
+            let Some(arr) = row.get(key).and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for doc in arr {
+                let docid = doc.get("docid").and_then(|v| v.as_str()).unwrap_or("");
+                let url = doc.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                let text = doc.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                if docid.is_empty() || url.is_empty() || text.is_empty() {
+                    continue;
+                }
+                if seen.insert(docid.to_string()) {
+                    docs.push((docid.to_string(), url.to_string(), text.to_string()));
+                }
+            }
+        }
+    }
+
+    println!(
+        "jsonl: {} queries total, {} matched filter, {} unique docs to ingest",
+        queries_seen,
+        queries_used,
+        docs.len()
+    );
+
+    // Second pass: ingest each unique doc, stashing docid in metadata.
+    let mut n_inserted = 0usize;
+    let mut n_updated = 0usize;
+    let mut n_unchanged = 0usize;
+    let mut n_failed = 0usize;
+    let started = std::time::Instant::now();
+    let total = docs.len();
+
+    for (i, (docid, url, text)) in docs.into_iter().enumerate() {
+        let meta = serde_json::json!({
+            "docid": docid,
+            "source": "browsecomp-plus",
+        });
+        match gw_kb::ingest::ingest_inline(stores, &url, &text, Some(meta)).await {
+            Ok(report) => {
+                match report.outcome {
+                    gw_kb::source::UpsertOutcome::Inserted => n_inserted += 1,
+                    gw_kb::source::UpsertOutcome::Updated => n_updated += 1,
+                    gw_kb::source::UpsertOutcome::Unchanged => n_unchanged += 1,
+                }
+            }
+            Err(e) => {
+                n_failed += 1;
+                eprintln!("[{}/{}] {} FAILED: {}", i + 1, total, docid, e);
+            }
+        }
+
+        // Progress every 100 docs or at the end.
+        if (i + 1) % 100 == 0 || i + 1 == total {
+            let elapsed = started.elapsed().as_secs_f32();
+            let rate = (i + 1) as f32 / elapsed.max(0.001);
+            let eta = (total - i - 1) as f32 / rate.max(0.001);
+            println!(
+                "[{}/{}] {:.1} docs/s, elapsed {:.0}s, eta {:.0}s",
+                i + 1,
+                total,
+                rate,
+                elapsed,
+                eta
+            );
+        }
+    }
+
+    println!(
+        "\ndone: {} inserted, {} updated, {} unchanged, {} failed in {:.1}s",
+        n_inserted,
+        n_updated,
+        n_unchanged,
+        n_failed,
+        started.elapsed().as_secs_f32()
+    );
+    Ok(())
 }
 
 async fn build_stores(cli: &Cli) -> Result<KbStores, KbError> {
