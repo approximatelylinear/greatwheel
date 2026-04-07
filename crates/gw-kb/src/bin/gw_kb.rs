@@ -12,6 +12,7 @@ use tracing_subscriber::EnvFilter;
 
 use gw_kb::classify::{classify_edges, ClassifyOpts};
 use gw_kb::embed::Embedder;
+use gw_kb::feeds::{add_feed, list_feeds, remove_feed, sync_all, sync_by_slug};
 use gw_kb::index::{KbLanceStore, KbTantivyStore};
 use gw_kb::ingest::{ingest_file, ingest_url, KbStores};
 use gw_kb::linking::{
@@ -132,6 +133,12 @@ enum Command {
         chunks: i64,
     },
 
+    /// Manage RSS/Atom feed subscriptions.
+    Feed {
+        #[command(subcommand)]
+        action: FeedAction,
+    },
+
     /// Generate 2-4 paragraph LLM summaries for rich topics (Phase 3).
     Synthesize {
         /// Process at most N topics.
@@ -215,6 +222,35 @@ enum Command {
 
     /// Smoke test the embedded Python interpreter.
     PyPing,
+}
+
+#[derive(Subcommand, Debug)]
+enum FeedAction {
+    /// Register a new feed.
+    Add {
+        /// Feed URL.
+        #[arg(long)]
+        url: String,
+        /// Display name (defaults to URL host).
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List registered feeds.
+    List,
+    /// Remove a feed by slug.
+    Remove {
+        /// Feed slug.
+        slug: String,
+    },
+    /// Fetch feeds and ingest new entries.
+    Sync {
+        /// Sync only the feed with this slug. Default: all feeds.
+        #[arg(long)]
+        feed: Option<String>,
+        /// Limit entries ingested per feed.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
 }
 
 #[tokio::main]
@@ -553,6 +589,91 @@ async fn main() -> Result<(), KbError> {
             if report.merges_executed > 0 && !dry_run {
                 println!();
                 println!("note: topic graph is stale — run `gw-kb link` and `gw-kb classify` to rebuild edges");
+            }
+        }
+        Command::Feed { action } => {
+            let stores = stores.as_ref().expect("stores built above");
+            match action {
+                FeedAction::Add { url, name } => {
+                    let feed = add_feed(&stores.pg, &url, name.as_deref()).await?;
+                    println!("added feed:");
+                    println!("  slug = {}", feed.slug);
+                    println!("  name = {}", feed.name);
+                    println!("  url  = {}", feed.url);
+                }
+                FeedAction::List => {
+                    let feeds = list_feeds(&stores.pg).await?;
+                    if feeds.is_empty() {
+                        println!("no feeds registered");
+                        return Ok(());
+                    }
+                    println!(
+                        "{:<24} {:<20}  {:<19}  URL",
+                        "SLUG", "NAME", "LAST SYNCED"
+                    );
+                    for f in &feeds {
+                        let slug_short = if f.slug.chars().count() > 24 {
+                            let s: String = f.slug.chars().take(22).collect();
+                            format!("{}…", s)
+                        } else {
+                            f.slug.clone()
+                        };
+                        let name_short = if f.name.chars().count() > 20 {
+                            let s: String = f.name.chars().take(18).collect();
+                            format!("{}…", s)
+                        } else {
+                            f.name.clone()
+                        };
+                        let when = f
+                            .last_synced_at
+                            .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                            .unwrap_or_else(|| "(never)".to_string());
+                        println!("{:<24} {:<20}  {:<19}  {}", slug_short, name_short, when, f.url);
+                    }
+                    println!("\n{} feed(s)", feeds.len());
+                }
+                FeedAction::Remove { slug } => {
+                    let removed = remove_feed(&stores.pg, &slug).await?;
+                    if removed {
+                        println!("removed feed '{}'", slug);
+                    } else {
+                        println!("no feed with slug '{}'", slug);
+                    }
+                }
+                FeedAction::Sync { feed, limit } => {
+                    let reports = if let Some(slug) = feed {
+                        vec![sync_by_slug(stores, &slug, limit).await?]
+                    } else {
+                        sync_all(stores, limit).await?
+                    };
+                    if reports.is_empty() {
+                        println!("no feeds to sync");
+                        return Ok(());
+                    }
+                    let mut total_ingested = 0usize;
+                    let mut total_skipped = 0usize;
+                    let mut total_failed = 0usize;
+                    for r in &reports {
+                        println!(
+                            "[{:<24}] seen={:3}  ingested={:3}  skipped={:3}  failed={:3}",
+                            r.feed_name,
+                            r.entries_seen,
+                            r.entries_ingested,
+                            r.entries_skipped_existing,
+                            r.entries_failed
+                        );
+                        total_ingested += r.entries_ingested;
+                        total_skipped += r.entries_skipped_existing;
+                        total_failed += r.entries_failed;
+                    }
+                    println!(
+                        "\ntotal: {} ingested, {} skipped, {} failed across {} feed(s)",
+                        total_ingested,
+                        total_skipped,
+                        total_failed,
+                        reports.len()
+                    );
+                }
             }
         }
         Command::Classify { limit, reclassify } => {

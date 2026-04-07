@@ -21,6 +21,7 @@ arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
+feed-rs = { workspace = true }
 futures = { workspace = true }
 lancedb = { workspace = true }
 pulldown-cmark = { workspace = true }

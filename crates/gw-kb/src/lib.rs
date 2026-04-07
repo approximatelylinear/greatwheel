@@ -7,6 +7,7 @@ pub mod classify;
 pub mod embed;
 pub mod error;
 pub mod extract;
+pub mod feeds;
 pub mod index;
 pub mod ingest;
 pub mod linking;

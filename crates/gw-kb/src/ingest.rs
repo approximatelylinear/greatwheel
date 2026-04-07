@@ -45,7 +45,13 @@ pub struct IngestReport {
 ///
 /// - `application/pdf` → save bytes to a temp file, run pymupdf4llm
 /// - anything else      → assume HTML, hand the body to trafilatura
+///
+/// ### URL rewrites
+/// arxiv `/abs/` URLs are rewritten to `/pdf/` so we ingest the full
+/// paper, not just the abstract page. Any other host is used as-is.
 pub async fn ingest_url(stores: &KbStores, url: &str) -> Result<IngestReport, KbError> {
+    let url = rewrite_url_for_ingest(url);
+    let url = url.as_str();
     info!(url, "ingesting url");
     let resp = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
@@ -86,6 +92,56 @@ pub async fn ingest_url(stores: &KbStores, url: &str) -> Result<IngestReport, Kb
     };
 
     finish_ingest(stores, Some(url), None, extracted).await
+}
+
+/// Public wrapper around `rewrite_url_for_ingest` for callers outside
+/// this module (e.g. feed sync wants to pre-check the normalised URL
+/// against kb_sources before paying for a full fetch).
+pub fn rewrite_url_for_ingest_public(url: &str) -> String {
+    rewrite_url_for_ingest(url)
+}
+
+/// Normalize a URL before ingest. Currently:
+///   - arxiv.org/abs/ID → arxiv.org/pdf/ID (so we ingest the full paper,
+///     not just the abstract page)
+fn rewrite_url_for_ingest(url: &str) -> String {
+    // Match both http and https variants of arxiv.org
+    if let Some(rest) = url.strip_prefix("https://arxiv.org/abs/") {
+        return format!("https://arxiv.org/pdf/{}", rest);
+    }
+    if let Some(rest) = url.strip_prefix("http://arxiv.org/abs/") {
+        return format!("https://arxiv.org/pdf/{}", rest);
+    }
+    url.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arxiv_abs_gets_rewritten_to_pdf() {
+        assert_eq!(
+            rewrite_url_for_ingest("https://arxiv.org/abs/2205.09707"),
+            "https://arxiv.org/pdf/2205.09707"
+        );
+        assert_eq!(
+            rewrite_url_for_ingest("http://arxiv.org/abs/2205.09707"),
+            "https://arxiv.org/pdf/2205.09707"
+        );
+    }
+
+    #[test]
+    fn other_urls_are_passthrough() {
+        assert_eq!(
+            rewrite_url_for_ingest("https://en.wikipedia.org/wiki/Foo"),
+            "https://en.wikipedia.org/wiki/Foo"
+        );
+        assert_eq!(
+            rewrite_url_for_ingest("https://arxiv.org/pdf/2205.09707"),
+            "https://arxiv.org/pdf/2205.09707"
+        );
+    }
 }
 
 /// Write PDF bytes to a temp file and run the file-based extractor.

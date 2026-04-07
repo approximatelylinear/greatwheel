@@ -115,7 +115,7 @@ pub async fn organize(stores: &KbStores, opts: OrganizeOpts) -> Result<OrganizeR
         };
 
         // 3b. Tag with LLM
-        let tags = match tag_chunk(&stores.llm, chunk, &topic_state).await {
+        let tags = match tag_chunk(&stores.llm, chunk, &chunk_vec, &topic_state).await {
             Ok(t) => t,
             Err(e) => {
                 warn!(err = %e, "tagger failed, skipping chunk");
@@ -329,9 +329,10 @@ struct TaggerOutput {
 async fn tag_chunk(
     llm: &OllamaClient,
     chunk: &PendingChunk,
+    chunk_vec: &[f32],
     topics: &[TopicState],
 ) -> Result<TaggerOutput, KbError> {
-    let prompt = build_tagger_prompt(chunk, topics);
+    let prompt = build_tagger_prompt(chunk, chunk_vec, topics);
     let messages = vec![
         Message {
             role: "system".into(),
@@ -358,14 +359,26 @@ const SYSTEM_PROMPT: &str = "You are a topic tagger for a knowledge base of \
 research and reference documents. Output JSON only — no prose, no markdown \
 fences, no commentary.";
 
-fn build_tagger_prompt(chunk: &PendingChunk, topics: &[TopicState]) -> String {
-    // Pick the most-used topics first to bias toward established labels.
-    let mut sorted: Vec<&TopicState> = topics.iter().collect();
-    sorted.sort_by(|a, b| b.chunk_count.cmp(&a.chunk_count));
-    let sample: Vec<&str> = sorted
+fn build_tagger_prompt(
+    chunk: &PendingChunk,
+    chunk_vec: &[f32],
+    topics: &[TopicState],
+) -> String {
+    // Rank existing topics by RELEVANCE to the current chunk, not by
+    // popularity. Without this, a minority cluster (say, 5 medieval-history
+    // sources in a 50-source corpus) gets drowned out of the prompt by
+    // the popular-but-irrelevant ML/cosmology topics, and the tagger
+    // collapses its chunks into generic labels like "History" or "Politics"
+    // instead of reusing the domain-specific labels that actually fit.
+    let mut scored: Vec<(&TopicState, f32)> = topics
+        .iter()
+        .map(|t| (t, cosine(chunk_vec, &t.label_vector)))
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let sample: Vec<&str> = scored
         .iter()
         .take(PROMPT_TOPIC_BUDGET)
-        .map(|t| t.label.as_str())
+        .map(|(t, _)| t.label.as_str())
         .collect();
 
     let existing_block = if sample.is_empty() {
