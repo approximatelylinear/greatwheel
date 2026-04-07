@@ -10,6 +10,7 @@ pub mod extract;
 pub mod index;
 pub mod ingest;
 pub mod linking;
+pub mod merge;
 pub mod organize;
 pub mod search;
 pub mod source;

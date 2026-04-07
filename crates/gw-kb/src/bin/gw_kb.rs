@@ -18,6 +18,7 @@ use gw_kb::linking::{
     link, nearest_topics_to_query, neighbors_of, spread_from_seeds, EdgeDirection, LinkOpts,
     LinkedNeighbor, SpreadOpts,
 };
+use gw_kb::merge::{merge_topics, MergeOpts};
 use gw_kb::organize::{organize, OrganizeOpts};
 use gw_kb::search::hybrid_search;
 use gw_kb::source::{
@@ -128,6 +129,24 @@ enum Command {
         /// Max member chunks to show.
         #[arg(long, default_value_t = 20)]
         chunks: i64,
+    },
+
+    /// Find and collapse duplicate topics. Detects candidates by
+    /// label-vector cosine, then auto-merges high-confidence pairs and
+    /// asks the LLM to confirm medium-confidence pairs.
+    Merge {
+        /// Pairs at or above this label-cosine merge without LLM confirmation.
+        #[arg(long, default_value_t = 0.92)]
+        auto_threshold: f32,
+        /// Pairs in [ask_threshold, auto_threshold) get an LLM yes/no.
+        #[arg(long, default_value_t = 0.85)]
+        ask_threshold: f32,
+        /// Process at most N candidate pairs (highest cosine first).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Print what would happen but don't persist anything.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Type the existing topic edges using the LLM (subtopic_of /
@@ -427,6 +446,37 @@ async fn main() -> Result<(), KbError> {
             if !neigh.is_empty() {
                 println!();
                 print_neighbors_grouped(&neigh);
+            }
+        }
+        Command::Merge { auto_threshold, ask_threshold, limit, dry_run } => {
+            let stores = stores.as_ref().expect("stores built above");
+            let report = merge_topics(
+                stores,
+                MergeOpts { auto_threshold, ask_threshold, limit, dry_run },
+            )
+            .await?;
+            println!("merge report:");
+            println!("  topics_seen           = {}", report.topics_seen);
+            println!("  candidates_considered = {}", report.candidates_considered);
+            println!("  auto_merges           = {}", report.auto_merges);
+            println!("  llm_confirmed         = {}", report.llm_confirmed);
+            println!("  llm_rejected          = {}", report.llm_rejected);
+            println!("  llm_failures          = {}", report.llm_failures);
+            println!("  merges_executed       = {}", report.merges_executed);
+            if !report.examples.is_empty() {
+                println!();
+                println!("merges:");
+                for ex in &report.examples {
+                    let tag = if ex.auto { "auto" } else { "llm " };
+                    println!(
+                        "  [{}] cos={:.3}  {}  ←  {}",
+                        tag, ex.cosine, ex.winner, ex.loser
+                    );
+                }
+            }
+            if report.merges_executed > 0 && !dry_run {
+                println!();
+                println!("note: topic graph is stale — run `gw-kb link` and `gw-kb classify` to rebuild edges");
             }
         }
         Command::Classify { limit, reclassify } => {
