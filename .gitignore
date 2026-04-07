@@ -17,6 +17,11 @@ Thumbs.db
 .env
 .env.*
 
+# Python venvs and caches
+**/.venv/
+**/__pycache__/
+*.pyc
+
 # Data volumes (Docker)
 data/
 

@@ -1,0 +1,39 @@
+[package]
+name = "gw-kb"
+version = "0.1.0"
+edition = "2021"
+
+build = "build.rs"
+
+[lib]
+name = "gw_kb"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gw-kb"
+path = "src/bin/gw_kb.rs"
+
+[dependencies]
+gw-core = { workspace = true, features = ["sqlx"] }
+gw-memory = { workspace = true }
+gw-llm = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+futures = { workspace = true }
+lancedb = { workspace = true }
+pulldown-cmark = { workspace = true }
+pyo3 = { workspace = true }
+reqwest = { workspace = true }
+tantivy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }

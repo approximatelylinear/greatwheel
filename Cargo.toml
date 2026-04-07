@@ -11,6 +11,7 @@ members = [
     "crates/gw-server",
     "crates/gw-bench",
     "crates/gw-loop",
+    "crates/gw-kb",
     "bench/conv-loop",
 ]
 
@@ -25,6 +26,7 @@ gw-scheduler = { path = "crates/gw-scheduler" }
 gw-trace = { path = "crates/gw-trace" }
 gw-server = { path = "crates/gw-server" }
 gw-loop = { path = "crates/gw-loop" }
+gw-kb = { path = "crates/gw-kb" }
 
 # External dependencies
 arrow-array = "57"
@@ -32,12 +34,16 @@ arrow-schema = "57"
 axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 lancedb = "0.26"
 notify = "6"
 opentelemetry = "0.27"
 opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic"] }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+pyo3 = { version = "0.22", features = ["auto-initialize", "chrono"] }
+pulldown-cmark = "0.12"
+sha2 = "0.10"
+url = "2"
 ouros = { git = "https://github.com/parcadei/ouros", version = "0.0.4" }
 regex = "1"
 reqwest = { version = "0.12", features = ["json", "stream"] }

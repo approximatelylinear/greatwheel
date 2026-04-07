@@ -1,0 +1,11 @@
+[project]
+name = "gw-kb-extract"
+version = "0.1.0"
+description = "Document extraction helpers for gw-kb (called from Rust via PyO3)"
+requires-python = ">=3.10"
+dependencies = [
+    "trafilatura>=1.12",
+    "pymupdf4llm>=0.0.17",
+    "sentence-transformers>=5.3.0",
+    "einops>=0.8.2",
+]
