@@ -27,7 +27,7 @@ from colbert_encode import ColBERTEncoder
 
 CHUNK = 4096
 OVERLAP = 800
-CHECKPOINT_EVERY = 10000  # docs
+CHECKPOINT_EVERY = 5000  # docs
 
 
 def split(text):
@@ -56,17 +56,35 @@ def title(text):
 
 
 def save_checkpoint(out_dir, idx, token_to_docid, doc_count, passage_count):
-    """Save index + mapping + progress."""
+    """Save index + mapping + progress atomically.
+
+    Writes to .tmp files first, then renames. This prevents partial
+    writes from corrupting an existing checkpoint if interrupted.
+    """
     idx_path = os.path.join(out_dir, "index.voyager")
     map_path = os.path.join(out_dir, "token_to_docid.pkl")
     progress_path = os.path.join(out_dir, "progress.json")
 
-    idx.save(idx_path)
-    with open(map_path, "wb") as f:
-        pickle.dump(token_to_docid, f)
-    with open(progress_path, "w") as f:
+    # Write to temp files
+    idx_tmp = idx_path + ".tmp"
+    map_tmp = map_path + ".tmp"
+    progress_tmp = progress_path + ".tmp"
+
+    idx.save(idx_tmp)
+    with open(map_tmp, "wb") as f:
+        pickle.dump(token_to_docid, f, protocol=pickle.HIGHEST_PROTOCOL)
+        f.flush()
+        os.fsync(f.fileno())
+    with open(progress_tmp, "w") as f:
         json.dump({"doc_count": doc_count, "passage_count": passage_count,
                     "token_count": len(token_to_docid)}, f)
+        f.flush()
+        os.fsync(f.fileno())
+
+    # Atomic renames (last)
+    os.replace(idx_tmp, idx_path)
+    os.replace(map_tmp, map_path)
+    os.replace(progress_tmp, progress_path)
 
     size_gb = os.path.getsize(idx_path) / 1e9
     print(f"  [checkpoint] {doc_count} docs, {len(token_to_docid)} tokens, {size_gb:.1f} GB", flush=True)
@@ -170,8 +188,9 @@ def build(corpus_path, out_dir, batch_size=32, max_docs=None, resume=False):
     elapsed = time.monotonic() - t0
     print(f"\nDone: {doc_count} docs, {passage_count} passages, {len(token_to_docid)} tokens, {elapsed:.0f}s", flush=True)
 
-    # Final save
-    save_checkpoint(out_dir, idx, token_to_docid, doc_count, passage_count)
+    # Final save (skip if loop already checkpointed at this doc_count)
+    if doc_count % CHECKPOINT_EVERY != 0:
+        save_checkpoint(out_dir, idx, token_to_docid, doc_count, passage_count)
 
 
 def _encode_and_add(enc, idx, token_to_docid, docids, texts, vec_buffer, docid_buffer):

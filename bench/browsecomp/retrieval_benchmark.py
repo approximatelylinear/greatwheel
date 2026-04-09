@@ -196,6 +196,10 @@ def run_benchmark(
     passage_index_path: str | None,
     colbert_lance_path: str | None = None,
     colbert_encode_url: str | None = None,
+    voyager_index_dir: str | None = None,
+    voyager_tokens_per_query: int = 2000,
+    blob_store_dir: str | None = None,
+    skip_gpu_rerank: bool = False,
     queries: list[tuple[str, str]] = [],
     gt: dict[str, dict] = {},
     k_values: list[int] = [5, 10, 20, 50, 100, 200],
@@ -205,6 +209,25 @@ def run_benchmark(
     doc_searcher = TantivySearcher(doc_index_path, "doc")
     passage_searcher = TantivySearcher(passage_index_path, "passage") if passage_index_path else None
     colbert_searcher = ColBERTSearcher(colbert_lance_path, colbert_encode_url) if colbert_lance_path else None
+    # Standalone blob reranker (no Voyager). If --blob-store is given without
+    # --voyager-index, we still want to use it for the BM25→rerank strategies.
+    standalone_blob = None
+    if blob_store_dir and not voyager_index_dir:
+        from blob_reranker import BlobReranker
+        standalone_blob = BlobReranker(blob_store_dir)
+
+    voyager_searcher = None
+    if voyager_index_dir:
+        from voyager_searcher import VoyagerSearcher
+        # Load corpus text so we can re-encode candidates for the rerank strategy
+        corpus_for_voyager = str(REPO_ROOT / "vendor" / "BrowseComp-Plus" / "data" / "bm25s-index" / "corpus_meta.jsonl")
+        voyager_searcher = VoyagerSearcher(
+            voyager_index_dir,
+            corpus_path=corpus_for_voyager,
+            blob_store_dir=blob_store_dir,
+        )
+        print(f"  voyager: {voyager_searcher.progress['doc_count']} docs / "
+              f"{voyager_searcher.progress['passage_count']} passages", file=sys.stderr)
 
     strategies = ["doc_bm25"]
     if passage_searcher:
@@ -214,6 +237,31 @@ def run_benchmark(
             strategies.append(f"colbert_np{np}")
         if passage_searcher:
             strategies.append("all_3_rrf")
+    if voyager_searcher:
+        strategies.append("voyager")
+        if not skip_gpu_rerank:
+            strategies.append("voyager_rerank")
+        if voyager_searcher.blob_table is not None:
+            strategies.append("voyager_rerank_blobs")
+        if passage_searcher:
+            strategies.append("voyager_passage_rrf")
+
+    # BM25 → blob rerank strategies (work whether or not Voyager is loaded)
+    blob_reranker = None
+    if voyager_searcher and voyager_searcher.blob_table is not None:
+        # Reuse the encoder that's already loaded
+        from blob_reranker import BlobReranker
+        blob_reranker = BlobReranker.__new__(BlobReranker)
+        blob_reranker.table = voyager_searcher.blob_table
+        blob_reranker.encoder = voyager_searcher.encoder
+    elif standalone_blob is not None:
+        blob_reranker = standalone_blob
+
+    if blob_reranker is not None:
+        strategies.append("doc_bm25_rerank_blobs")
+        if passage_searcher:
+            strategies.append("passage_bm25_rerank_blobs")
+            strategies.append("doc_passage_rrf_rerank_blobs")
 
     # Results: {strategy: {k: count_recalled}}
     recall_counts = {s: {k: 0 for k in k_values} for s in strategies}
@@ -288,6 +336,80 @@ def run_benchmark(
                     if all3_recall[k]:
                         recall_counts["all_3_rrf"][k] += 1
 
+        # Voyager (Option A: ColBERT-as-retriever)
+        if voyager_searcher:
+            voy_hits = voyager_searcher.search(
+                query_text,
+                k=max(k_values),
+                tokens_per_query=voyager_tokens_per_query,
+            )
+            voy_recall = measure_recall(voy_hits, gold, k_values)
+            voy_rank = gold_doc_rank(voy_hits, gold)
+            query_result["voyager_rank"] = voy_rank
+            for k in k_values:
+                if voy_recall[k]:
+                    recall_counts["voyager"][k] += 1
+
+            # voyager_rerank: take top-200, run real MaxSim by re-encoding on GPU
+            if not skip_gpu_rerank:
+                rerank_hits = voyager_searcher.rerank(
+                    query_text,
+                    voy_hits[:200],
+                    voyager_searcher.texts,
+                )
+                rerank_recall = measure_recall(rerank_hits, gold, k_values)
+                rerank_rank = gold_doc_rank(rerank_hits, gold)
+                query_result["voyager_rerank_rank"] = rerank_rank
+                for k in k_values:
+                    if rerank_recall[k]:
+                        recall_counts["voyager_rerank"][k] += 1
+
+            # voyager_rerank_blobs: same MaxSim but with precomputed blobs
+            if voyager_searcher.blob_table is not None:
+                t0 = time.monotonic()
+                blob_hits = voyager_searcher.rerank_from_blobs(query_text, voy_hits[:200])
+                blob_dt = time.monotonic() - t0
+                blob_recall = measure_recall(blob_hits, gold, k_values)
+                blob_rank = gold_doc_rank(blob_hits, gold)
+                query_result["voyager_rerank_blobs_rank"] = blob_rank
+                query_result["voyager_rerank_blobs_ms"] = int(blob_dt * 1000)
+                for k in k_values:
+                    if blob_recall[k]:
+                        recall_counts["voyager_rerank_blobs"][k] += 1
+
+            if passage_searcher:
+                vp_hits = rrf_fusion([voy_hits, passage_hits])
+                vp_recall = measure_recall(vp_hits, gold, k_values)
+                vp_rank = gold_doc_rank(vp_hits, gold)
+                query_result["voyager_passage_rrf_rank"] = vp_rank
+                for k in k_values:
+                    if vp_recall[k]:
+                        recall_counts["voyager_passage_rrf"][k] += 1
+
+        # BM25 → blob rerank strategies
+        if blob_reranker is not None:
+            d_rerank = blob_reranker.rerank(query_text, doc_hits[:200])
+            d_recall = measure_recall(d_rerank, gold, k_values)
+            query_result["doc_bm25_rerank_blobs_rank"] = gold_doc_rank(d_rerank, gold)
+            for k in k_values:
+                if d_recall[k]:
+                    recall_counts["doc_bm25_rerank_blobs"][k] += 1
+
+            if passage_searcher:
+                p_rerank = blob_reranker.rerank(query_text, passage_hits[:200])
+                p_recall = measure_recall(p_rerank, gold, k_values)
+                query_result["passage_bm25_rerank_blobs_rank"] = gold_doc_rank(p_rerank, gold)
+                for k in k_values:
+                    if p_recall[k]:
+                        recall_counts["passage_bm25_rerank_blobs"][k] += 1
+
+                rrf_rerank = blob_reranker.rerank(query_text, rrf_hits[:200])
+                rrf_recall_b = measure_recall(rrf_rerank, gold, k_values)
+                query_result["doc_passage_rrf_rerank_blobs_rank"] = gold_doc_rank(rrf_rerank, gold)
+                for k in k_values:
+                    if rrf_recall_b[k]:
+                        recall_counts["doc_passage_rrf_rerank_blobs"][k] += 1
+
         per_query.append(query_result)
 
     return {
@@ -354,6 +476,10 @@ def main():
     parser.add_argument("--passage-index", default=None)
     parser.add_argument("--colbert-lance", default=None, help="Path to ColBERT LanceDB index")
     parser.add_argument("--colbert-encode-url", default=None, help="ColBERT encode server URL")
+    parser.add_argument("--voyager-index", default=None, help="Path to Voyager passage index dir")
+    parser.add_argument("--voyager-tokens-per-query", type=int, default=2000)
+    parser.add_argument("--blob-store", default=None, help="Path to passage blob store (Lance dir)")
+    parser.add_argument("--skip-gpu-rerank", action="store_true", help="Skip the slow GPU re-encoding rerank strategy")
     parser.add_argument("--query-file", default=None, help="TSV query file (default: sample30.tsv)")
     parser.add_argument("--json", action="store_true", help="Output JSON instead of table")
     args = parser.parse_args()
@@ -366,6 +492,10 @@ def main():
         passage_index_path=args.passage_index,
         colbert_lance_path=args.colbert_lance,
         colbert_encode_url=args.colbert_encode_url,
+        voyager_index_dir=args.voyager_index,
+        voyager_tokens_per_query=args.voyager_tokens_per_query,
+        blob_store_dir=args.blob_store,
+        skip_gpu_rerank=args.skip_gpu_rerank,
         queries=queries,
         gt=gt,
     )

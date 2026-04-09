@@ -8,7 +8,16 @@ gw-core = { workspace = true, features = ["sqlx"] }
 gw-llm = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
+async-trait = { workspace = true }
 futures = { workspace = true }
+half = { workspace = true }
+ndarray = { workspace = true }
+candle-core = { workspace = true }
+candle-nn = { workspace = true }
+candle-transformers = { workspace = true }
+tokenizers = { workspace = true }
+hf-hub = { workspace = true }
+usearch = { workspace = true }
 chrono = { workspace = true }
 lancedb = { workspace = true }
 serde = { workspace = true }
@@ -19,3 +28,18 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+
+[[example]]
+name = "blob_rerank"
+path = "examples/blob_rerank.rs"
+
+[[example]]
+name = "encode_query"
+path = "examples/encode_query.rs"
+
+[[example]]
+name = "colbert_search"
+path = "examples/colbert_search.rs"
+
+[dev-dependencies]
+clap = { workspace = true }

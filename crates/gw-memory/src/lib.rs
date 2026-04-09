@@ -1,3 +1,5 @@
+pub mod colbert;
+pub mod colbert_blobs;
 pub mod corpus;
 pub mod error;
 pub mod fusion;

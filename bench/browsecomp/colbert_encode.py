@@ -65,14 +65,14 @@ class ColBERTEncoder:
         return result
 
     @torch.no_grad()
-    def _encode(self, texts: list[str], max_length: int = 512, is_query: bool = False) -> list[torch.Tensor]:
+    def _encode(self, texts: list[str], max_length: int = 512, is_query: bool = False, sub_batch: int = 64) -> list[torch.Tensor]:
         """Encode texts into L2-normalized 128-dim token embeddings.
 
         Returns a list of tensors, each (num_tokens, 128), one per input text.
-        Padding tokens are stripped. Encodes in sub-batches of 4 to avoid OOM.
+        Padding tokens are stripped. Sub-batches to bound peak GPU memory.
+        Default sub_batch=64 fits comfortably on a 24GB GPU at max_length=512.
         """
         results = []
-        sub_batch = 16
         for start in range(0, len(texts), sub_batch):
             batch = texts[start:start + sub_batch]
             encoded = self.tokenizer(

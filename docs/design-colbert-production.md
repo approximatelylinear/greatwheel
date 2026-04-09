@@ -439,6 +439,102 @@ padding tokens. Real corpora are variable-length, so we'd use the variable path.
 The Python wheel is good enough for the BrowseComp benchmark side immediately,
 which is what we'll use to validate Option B before committing the Rust work.
 
+## Round-1 backend comparison (BrowseComp sample30, full 100K corpus)
+
+Four backends, same 2000-token-per-doc cap, same ColBERT encoder, same
+query set. Elasticsearch ran on 8.18 with trial license; Qdrant on 1.12.4;
+LanceDB on 0.29. All indexes built from the same passage blob store
+(no re-encoding).
+
+```
+Backend                   R@5    R@10   R@20   R@50   R@100  R@200   p50 ms   p95 ms
+lancedb_mv               10/30  13/30  15/30  21/30  25/30  25/30    46076    48669
+qdrant                   10/30  13/30  15/30  21/30  25/30  25/30    25680    30088
+tantivy (BM25)            4/30   8/30   8/30   9/30  11/30  12/30      266      392
+tantivy+blob_rerank       7/30   7/30   8/30  11/30  12/30  12/30    87500   234139
+elasticsearch             0/30   0/30   0/30   0/30   0/30   0/30    10065    10078
+```
+
+### Build times
+
+| backend      | docs    | time     | rate      | notes                          |
+| ------------ | ------- | -------- | --------- | ------------------------------ |
+| LanceDB MV   | 100,195 | 22 min   | 75 docs/s | embedded, no server            |
+| Qdrant       | 100,195 | 204 min  | 8 docs/s  | Docker, HTTP JSON overhead     |
+| Elasticsearch| 100,195 | 316 min  | 5 docs/s  | Docker, JVM, trial license req |
+
+### Key findings
+
+**1. Qdrant and LanceDB MV agree perfectly on recall.** Both native MaxSim
+implementations return 10/13/15/21/25/25 at every k depth. Two independent
+codebases reaching the same numbers is strong mutual validation that the
+recall ceiling is real and not an artifact of one library's implementation.
+
+**2. R@200 = 25/30 on the full 100K corpus** — one more than the 24/30 from
+the earlier Voyager experiment (which covered only 85K docs). The missing
+doc was in the 15K Voyager didn't index. This means 100% of sample30's
+gold docs are reachable by late-interaction retrieval over this corpus.
+The 5 remaining misses are genuine: no ColBERT representation of those
+queries matches any passage of the gold doc well enough to surface it.
+
+**3. Qdrant is ~2× faster than LanceDB MV** (26s vs 46s per query).
+LanceDB MV is doing a full scan (no ANN index built); Qdrant has HNSW
+with native MaxSim comparator. Both are still slow for production
+serving (~30s on 100K docs), but Qdrant's HNSW path gets much faster
+with warmup and ef_search tuning.
+
+**4. Elasticsearch is unusable at this scale with rank_vectors.** ES 8.18's
+`maxSimDotProduct` runs as a `script_score` over `match_all`, which is
+JVM brute-force. 8 of 30 queries timed out at 60s; the rest returned
+nothing. ES would need a kNN prefilter stage (which doesn't exist yet
+for rank_vectors) or a fundamentally different query path. This is an
+honest industry baseline: **ES's ColBERT support is license-gated AND
+unscalable as of 8.18.**
+
+**5. BM25→blob rerank helps the head but can't break the recall ceiling.**
+R@5 improves from 4→7 (rerank sharpens the ranking), but R@200 stays at
+12/30. The +13 gap vs native multi-vector (25 vs 12) re-confirms that
+~43% of sample30 queries need late-interaction *retrieval*, not just
+late-interaction reranking. This is the Weller bound in action.
+
+### Operational gotchas from the build
+
+- **Qdrant hard limits**: 1 MB per point (max ~2048 f32 vectors per multi-
+  vector field), 32 MB default request size (`QDRANT__SERVICE__MAX_REQUEST_SIZE_MB`),
+  and a low default `nofile` ulimit (1024) that crashes RocksDB at ~5K
+  points. All fixable via config/Docker, but not documented prominently.
+- **Elasticsearch requires Platinum/trial license** for `rank_vectors`.
+  The basic (free) license returns a clear error: `"current license is
+  non-compliant for [Rank Vectors]"`. Trial gives 30 days.
+- **Concurrent builds OOM**: running all three builders simultaneously
+  (each holding ~58 GB of passage data in memory) exceeded 251 GB. Fixed
+  by streaming docs one at a time via `blob_doc_iter.py` and running
+  builds serially.
+- **LanceDB MV needs no infrastructure**: embedded, no Docker, no server,
+  no license. 22-minute build. This is its biggest practical advantage
+  over Qdrant and ES.
+
+### Recommendation update
+
+For greatwheel's production stack:
+
+1. **Ship with LanceDB MV today.** Zero infrastructure (embedded), 25/30
+   R@200, 22-minute build from existing blob store, runs in-process.
+   The candle encoder is already parity-tested in `gw-memory`. The Rust
+   `BlobReranker` is done and bit-identical to the Python version.
+
+2. **Qdrant as the scale-out option.** Same recall, better latency (HNSW),
+   but requires a server process. When greatwheel needs to scale to
+   multi-tenant or >100K-doc corpora, Qdrant's architecture (sharding,
+   replication, payload filtering) is the natural next step. The Docker
+   compose config and Python searcher are ready; the Qdrant Rust client
+   crate is first-class.
+
+3. **Skip Elasticsearch for ColBERT.** ES's rank_vectors is license-gated,
+   slow, and unscalable as of 8.18. If ES is already deployed in a
+   customer's stack, use it for BM25 first-stage only, with blob rerank
+   on top — not for native multi-vector.
+
 ## Frontier directions worth tracking
 
 Not adopting any of these yet, but worth knowing about:

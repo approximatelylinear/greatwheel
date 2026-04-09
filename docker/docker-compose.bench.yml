@@ -1,0 +1,74 @@
+# Search backends for the BrowseComp benchmark comparison.
+#
+# Spin up only the backends you need:
+#   docker compose -f docker/docker-compose.bench.yml up -d elasticsearch
+#   docker compose -f docker/docker-compose.bench.yml up -d qdrant
+#
+# Tear down with:
+#   docker compose -f docker/docker-compose.bench.yml down
+#
+# Volumes are persistent so you can stop/start containers between runs
+# without re-ingesting the corpus.
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.18.0
+    container_name: gw-bench-es
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - "ES_JAVA_OPTS=-Xms4g -Xmx4g"
+      - bootstrap.memory_lock=true
+      - cluster.routing.allocation.disk.threshold_enabled=false
+      # ColBERT-style rank_vectors docs can be huge (one doc ≈ N passages
+      # × ~500 tokens × 128 dims as JSON ≈ tens of MB; the largest BrowseComp
+      # docs spike to ~500 MB JSON). Lift the bulk-request ceiling well above
+      # the default 100 MB.
+      - http.max_content_length=1500mb
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200 >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: gw-bench-qdrant
+    environment:
+      # Multi-vector batches with 2000 tokens × 128 dims × 4 bytes JSON-encode
+      # to ~4 MB per point, so 8 points = ~32 MB which exceeds the default
+      # max_request_size_mb. Bump it well above what we'll send.
+      - QDRANT__SERVICE__MAX_REQUEST_SIZE_MB=256
+    ulimits:
+      # Qdrant's RocksDB opens many segment files; the default 1024
+      # nofile limit causes upsert failures at ~5K multi-vector points.
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "6333:6333"  # HTTP
+      - "6334:6334"  # gRPC
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      # Qdrant 1.12 has /readyz; older versions have /; both return 200 when up.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/readyz || wget -qO- http://localhost:6333/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  es-data:
+  qdrant-data:
