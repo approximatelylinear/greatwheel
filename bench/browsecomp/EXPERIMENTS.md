@@ -123,6 +123,54 @@ Passage-level BM25 is the biggest single retrieval improvement in the project.
 
 **Conclusion:** For BrowseComp's entity-heavy queries, BM25 keyword matching (doc + passage) is the right strategy. Semantic reranking consistently hurts by diluting keyword precision. ColBERT reranking should not be used with passage-level retrieval.
 
+### ColBERT First-Stage Retrieval + Multi-Backend Comparison (apr7-apr10)
+
+We built the full ColBERT first-stage retrieval pipeline (not just reranking) and
+compared four search backends head-to-head. Full details in `docs/design-colbert-production.md`.
+
+**Infrastructure built:**
+- Passage blob store (Lance, 122 GB, 1M passages × float16 token tensors)
+- Candle-based Rust encoder (parity-tested: cos sim 1.000000 vs Python HF encoder)
+- Searcher protocol + 4 backends: brute-force, LanceDB MV, Qdrant, Elasticsearch
+- Docker compose for ES 8.18 + Qdrant 1.12
+- Shared HTTP ColBERT encoder service
+
+**Retrieval recall comparison** (100K docs, 2000 tokens/doc cap, sample30):
+
+| Backend          | R@5   | R@10  | R@20  | R@50  | R@100 | R@200 | p50 ms |
+|------------------|-------|-------|-------|-------|-------|-------|--------|
+| Qdrant ColBERT   | 10/30 | 13/30 | 15/30 | 21/30 | 25/30 | 25/30 | 25,680 |
+| LanceDB MV       | 10/30 | 13/30 | 15/30 | 21/30 | 25/30 | 25/30 | 46,076 |
+| Tantivy BM25     | 4/30  | 8/30  | 8/30  | 9/30  | 11/30 | 12/30 | 266    |
+| Tantivy+rerank   | 7/30  | 7/30  | 8/30  | 11/30 | 12/30 | 12/30 | 87,500 |
+| ES rank_vectors  | 0/30  | 0/30  | 0/30  | 0/30  | 0/30  | 0/30  | 10,065 |
+
+ColBERT retrieval reaches **25/30 R@200** vs BM25's 12/30. Qdrant and LanceDB MV agree
+perfectly (both native MaxSim). ES 8.18 `rank_vectors` is unusable at scale (script_score
+brute-force, timed out on 8/30 queries).
+
+**End-to-end agent evaluation** (qwen3.5:9b, Qdrant ColBERT backend):
+
+| Backend          | Retrieval R@200 | Agent accuracy | Delta vs BM25 |
+|------------------|-----------------|----------------|---------------|
+| BM25 (baseline)  | 12/30           | 9/30 (30%)     | —             |
+| Qdrant ColBERT   | 25/30           | 7/30 (23%)     | **-2**        |
+
+**Better retrieval did NOT translate to better agent accuracy.** The Qdrant-backed
+agent scored worse despite retrieving 13 more relevant docs. Root causes:
+
+1. **Query latency (26s/search × 12 calls > 180s timeout)** — the biggest factor.
+   The agent ran out of time before completing its reasoning chain on most queries.
+2. **Agent prompt was optimized for BM25** — pre-search decomposition and PRF
+   heuristics aren't adapted to ColBERT's semantic result orderings.
+3. **2000-token per-doc cap** (Qdrant hard limit) — truncates long docs, losing
+   answers in later passages.
+4. **3000-char snippet truncation** — same as BM25 path but prompts aren't tuned
+   to work around it with ColBERT results.
+
+**Conclusion:** Retrieval recall is necessary but not sufficient. The agent pipeline
+needs co-adaptation: faster serving → co-tuned prompt → measure → iterate.
+
 ### Key insight
 86% of failures are **retrieval** (right documents never found), not extraction. The 9B model reasons well once it has the right documents. Dense vector search doesn't help — but ColBERT reranking of a wider BM25 pool does, because the right documents are often in BM25's top-200 but ranked too low for the agent to see.
 
@@ -159,6 +207,21 @@ Passage-level BM25 is the biggest single retrieval improvement in the project.
 - [x] **ColBERT rerank server** — `bench/browsecomp/rerank_server.py` + `colbert_reranker.py`. Python sidecar, Rust calls via HTTP.
 - [x] **FINAL() extraction fix** — skip code blocks, require quoted strings (prevents variable names as answers)
 - [x] **Passage index CLI** — `--build-passage-index` and `--passage-index` flags on gw-bench
+
+### ColBERT Production Pipeline (apr7-apr10)
+- [x] **Passage blob store** — Lance table, 122 GB, 1M passages × float16 token tensors. `build_passage_blob_store.py`, 96 min build.
+- [x] **Blob reranker (Python)** — `blob_reranker.py`, fetches precomputed tokens from blob store, MaxSim via torch. 200ms/query.
+- [x] **Blob reranker (Rust)** — `gw-memory/src/colbert_blobs.rs`, parity-tested (max diff 2.12e-06 vs Python).
+- [x] **Candle ColBERT encoder (Rust)** — `gw-memory/src/colbert/candle_encoder.rs`, loads Reason-ModernColBERT via candle-transformers. Parity-tested: cos sim 1.000000 vs Python HF encoder.
+- [x] **ColbertStore (Rust)** — `gw-memory/src/colbert/mod.rs`, composes encoder + first-stage retriever + blob reranker.
+- [x] **Searcher protocol** — `searchers/base.py`, `EncoderClient`, uniform `search(query, k)` interface.
+- [x] **4 search backends** — brute_force, lancedb_mv, elasticsearch, qdrant. All smoke-tested + full-build completed.
+- [x] **BlobRerankWrapper** — decorator that adds blob-store MaxSim rerank on top of any Searcher.
+- [x] **Shared encoder service** — `colbert_server.py`, HTTP API (encode_query, encode_doc_batch).
+- [x] **retrieval_benchmark_v2.py** — unified multi-backend harness with `--searchers` flag.
+- [x] **Docker compose for benchmarks** — `docker/docker-compose.bench.yml` (ES 8.18 + Qdrant 1.12).
+- [x] **Qdrant search server** — `search_server_qdrant.py`, drop-in replacement for search_server.py.
+- [x] **End-to-end agent eval** — 30 queries with Qdrant ColBERT backend. Result: 7/30 (regression from BM25 9/30).
 
 ---
 
@@ -225,17 +288,43 @@ Passage-level BM25 is the biggest single retrieval improvement in the project.
 - **Key finding:** Sweet spot is top-200. Top-50 too narrow (7/30), top-500 too noisy (9/30).
 - **See:** ColBERT Reranking Findings section above for full details.
 
-#### R2b. Reason-ModernColBERT as first-stage retriever
-- **What:** Build a multi-vector ColBERT index over 100K docs. Use ColBERT as the primary retriever (not just reranker), potentially finding documents BM25 misses entirely.
-- **Effort:** Large — requires multi-vector index build (hours), RAGatouille/NextPlaid integration
-- **Expected impact:** High — addresses the fundamental retrieval gap (docs not in BM25 top-200 at all)
-- **Status:** Design doc at `DESIGN-reason-colbert.md`. R2 (reranker) results suggest ColBERT quality is good — the question is whether first-stage retrieval finds different docs than BM25.
+#### R2b. Reason-ModernColBERT as first-stage retriever — DONE
+- **Result:** ColBERT first-stage retrieval reaches 25/30 R@200 (vs BM25 12/30). But end-to-end agent accuracy regressed to 7/30 (vs BM25 9/30). See "ColBERT First-Stage Retrieval" findings above.
+- **Status:** Infrastructure is complete (4 backends, blob store, Rust encoder, benchmark harness). The bottleneck has shifted from retrieval recall to agent co-adaptation. See R4-R7 below.
 
 #### R3. Learned sparse retrieval (SPLADE-style)
 - **What:** Use a learned sparse model that outputs weighted term expansions. Combines BM25-style matching with learned term importance.
 - **Effort:** Large — needs model + index infrastructure
 - **Expected impact:** Medium-high — addresses vocabulary mismatch without the noise of dense vectors
 - **Status:** Research needed
+
+#### R4. BM25 + blob rerank (fast ColBERT rerank, no server)
+- **What:** BM25 first stage (fast, <1s) → blob store MaxSim rerank (200ms) → top-K. Uses the existing passage blob store — no Qdrant, no ES, no HNSW. This is the "Option 1" from `design-colbert-production.md`.
+- **Where:** `search_server.py` — add a `--blob-store` flag, wrap BM25 candidates with `BlobRerankWrapper`
+- **Effort:** Small — the wrapper and blob store already exist
+- **Expected impact:** High — fixes the latency problem (200ms vs 26s), stays within the agent's 180s timeout. R@200 is capped at BM25's 12/30 but head precision improves (R@5: 4→7 measured). The key test: does faster rerank give the agent enough time to reason, recovering the 9/30 baseline while adding rerank quality?
+- **Status:** Ready to run. This is the highest-priority experiment.
+
+#### R5. LanceDB MV as agent backend (no token cap, no server)
+- **What:** LanceDB MV native MaxSim — same 25/30 R@200 as Qdrant, but embedded (no server latency), no per-doc token cap (Qdrant's 2000-token limit doesn't apply). p50 was 46s on the retrieval benchmark, but that's without any ANN index — building an IVF index on the lance table may bring it under 5s.
+- **Where:** New `search_server_lancedb_mv.py` wrapping `LanceDbMvSearcher`
+- **Effort:** Small — searcher already exists, just needs the HTTP wrapper
+- **Expected impact:** Medium — isolates whether the 2000-token cap was causing the Qdrant regression. If LanceDB MV + full tokens gets >9/30, the cap was the bottleneck.
+- **Status:** Needs lance IVF index build first, otherwise 46s/query will timeout the agent.
+
+#### R6. ColBERT-tuned agent prompt (GEPA co-optimization)
+- **What:** Run GEPA prompt optimization with the ColBERT backend (R4 or R5) instead of BM25. The current prompt was tuned for BM25 keyword results — GEPA will adapt the pre-search decomposition, PRF, and verify strategy to ColBERT's semantic result characteristics.
+- **Where:** `run_gepa.py` — configure with ColBERT search server instead of BM25
+- **Effort:** Medium — GEPA runs take ~4-8 hours per optimization cycle
+- **Expected impact:** High — the prompt-retriever coupling is the most likely cause of the 7/30 regression. Co-optimization is the principled fix.
+- **Status:** Blocked on R4 or R5 (need a fast ColBERT backend first, otherwise GEPA iterations will be prohibitively slow at 26s/search).
+
+#### R7. Brute-force MaxSim recall ceiling
+- **What:** Run the brute-force searcher (exact MaxSim, no approximation, no token cap) on sample30. Establishes the true recall ceiling — the number every HNSW or ANN backend is trying to approximate.
+- **Where:** `retrieval_benchmark_v2.py --searchers brute_force`
+- **Effort:** Small — searcher exists, ~5 min/query × 30 = ~2.5 hours
+- **Expected impact:** Low directly, high indirectly — tells us whether the 25/30 from Qdrant/LanceDB MV is at the ceiling or leaving recall on the table (e.g. due to the 2000-token cap or HNSW approximation error).
+- **Status:** Ready to run.
 
 ### Passage Index Extensions (mar27 — builds on new best)
 
@@ -279,19 +368,26 @@ Current best: **passage + doc BM25 via RRF (12/30 fuzzy)**. These experiments bu
 
 ---
 
-## Priority Ranking (updated mar21)
+## Priority Ranking (updated apr10)
+
+The bottleneck has shifted from **retrieval recall** (solved: 25/30 R@200)
+to **agent co-adaptation** (end-to-end accuracy regressed with ColBERT).
+Priorities are reordered accordingly.
 
 | Priority | Experiment | Expected Impact | Effort | Rationale |
 |----------|-----------|----------------|--------|-----------|
-| **1** | R2b. ColBERT first-stage retriever | High | Large | Only way to find docs BM25 misses entirely; reranker validated ColBERT quality |
-| **2** | A5. Harness reliability fixes | Low | Small | Quick wins — may recover 1-2 answers from edge cases |
-| **3** | A4. Ensemble | High | Medium | Guaranteed from known correct set diversity |
-| **4** | B3. Query expansion + reranking | Medium | Medium | LLM query expansion widens BM25 recall, ColBERT reranking cleans it up |
-| **5** | A1. Search budget | Low-Medium | Medium | Addresses under-searching |
-| **6** | R3. SPLADE | Medium-High | Large | Best-of-both-worlds retrieval |
-| ~~done~~ | ~~R2. ColBERT reranker~~ | ~~Medium-High~~ | ~~Medium~~ | **Done — 12/30 (40%), new best** |
-| ~~done~~ | ~~B1. Fuzzy matching~~ | ~~Low~~ | ~~Small~~ | **Done — regression, noise hurts** |
-| ~~done~~ | ~~A2. Answer type~~ | ~~Low-Medium~~ | ~~Low~~ | **Done — no benefit** |
-| ~~skip~~ | ~~A3. Larger model~~ | ~~High~~ | ~~Small~~ | Deprioritized per user preference |
-| ~~skip~~ | ~~R1. Different embeddings~~ | ~~Unknown~~ | ~~Medium~~ | Dense vector search doesn't help |
-| ~~skip~~ | ~~B2. Field boosting~~ | ~~Medium~~ | ~~Large~~ | ColBERT reranking addresses ranking more directly |
+| **1** | R4. BM25 + blob rerank | High | Small | Fastest path to ColBERT rerank under the agent's timeout budget (200ms vs 26s). All infrastructure exists. |
+| **2** | R7. Brute-force recall ceiling | Low→High | Small | 2.5-hour one-time run. Tells us if 25/30 is the ceiling or if the 2000-token cap is costing us. |
+| **3** | R6. GEPA co-optimization | High | Medium | The prompt-retriever coupling is the most likely cause of the 7/30 regression. Needs R4 first. |
+| **4** | R5. LanceDB MV agent eval | Medium | Small | Isolates the Qdrant token-cap effect. No server, no token cap. Needs lance IVF index. |
+| **5** | A5. Harness reliability fixes | Low | Small | Quick wins — may recover 1-2 answers from edge cases |
+| **6** | A4. Ensemble | High | Medium | Guaranteed from known correct set diversity |
+| **7** | B3. Query expansion + reranking | Medium | Medium | LLM query expansion widens BM25 recall, ColBERT reranking cleans it up |
+| **8** | R3. SPLADE | Medium-High | Large | Best-of-both-worlds retrieval — may be redundant now that ColBERT retrieval works |
+| ~~done~~ | ~~R2b. ColBERT first-stage~~ | | | **Done — 25/30 R@200, but 7/30 agent accuracy (regression)** |
+| ~~done~~ | ~~R2. ColBERT reranker~~ | | | **Done — 12/30 (40%), previous best** |
+| ~~done~~ | ~~B1. Fuzzy matching~~ | | | **Done — regression, noise hurts** |
+| ~~done~~ | ~~A2. Answer type~~ | | | **Done — no benefit** |
+| ~~skip~~ | ~~A3. Larger model~~ | | | Deprioritized per user preference |
+| ~~skip~~ | ~~R1. Different embeddings~~ | | | Dense vector search doesn't help |
+| ~~skip~~ | ~~B2. Field boosting~~ | | | ColBERT reranking addresses ranking more directly |
