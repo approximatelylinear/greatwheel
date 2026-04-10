@@ -535,6 +535,106 @@ For greatwheel's production stack:
    customer's stack, use it for BM25 first-stage only, with blob rerank
    on top — not for native multi-vector.
 
+## End-to-end agent evaluation: better retrieval ≠ better answers
+
+After validating that Qdrant ColBERT retrieval reaches 25/30 R@200
+(vs BM25's 12/30), we ran the full BrowseComp agent loop (qwen3.5:9b,
+12-turn REPL, 180s timeout, baseline config) with Qdrant as the search
+backend. The question: does the +13 recall lift translate to more
+correct answers?
+
+```
+Backend          Retrieval R@200    Agent accuracy    Delta vs BM25
+BM25 (baseline)       12/30             9/30 (30%)        —
+Qdrant ColBERT        25/30             7/30 (23%)       -2
+```
+
+**Better retrieval recall did NOT translate to better agent accuracy.**
+The Qdrant-backed agent scored *worse* than the BM25 baseline despite
+retrieving 13 more relevant docs. This is the most important finding
+in the entire ColBERT investigation: **retrieval recall is necessary but
+not sufficient.** The agent pipeline needs co-adaptation.
+
+### Why the regression happened
+
+Four contributing factors, roughly ordered by impact:
+
+**1. Query latency ate the timeout budget.** Qdrant multi-vector search
+takes ~26s per query vs BM25's <1s. The agent makes ~12 search calls
+per question × 26s = ~312s, well over the 180s timeout. Many queries
+timed out before the agent could complete its reasoning chain.
+
+**2. The agent prompt was optimized for BM25 result characteristics.**
+The pre-search decomposition, PRF term extraction, and verify-then-submit
+strategy were all tuned against BM25-style keyword-ranked results. Qdrant
+returns semantically-different orderings and score distributions that the
+agent's fixed heuristics aren't adapted to. This is a classic case of
+co-optimization: the retriever and the prompt are a coupled system, and
+improving one without adapting the other can regress the ensemble.
+
+**3. Per-doc token cap (2000) truncated relevant content.** Qdrant's
+per-point 1 MB vector data limit forced us to cap at 2000 tokens per doc.
+Long docs with the answer in passage #5+ lose that content from the
+ColBERT search entirely. BM25 has no such truncation — `get_document`
+returns the full text regardless of BM25's internal representation.
+
+**4. Snippet truncation (3000 chars) compounded the problem.** The search
+server returns 3000-char snippets. For docs where the answer is deep in
+the text, the agent never sees it unless it follows up with
+`get_document`. The BM25 baseline has the same limitation but its prompts
+are tuned to work around it; the Qdrant path wasn't.
+
+### Near-miss: scoring artifacts
+
+Query 763: agent answered "Gingras Trading Post" vs gold "The Gingras
+Trading Post State Historic Site". Arguably correct — the agent found
+the right entity but gave an abbreviated name that fails substring match.
+With fuzzy scoring the result would be 8/30 vs 9/30 (still a regression,
+but smaller).
+
+### What this means for the architecture
+
+The round-1 retrieval comparison showed ColBERT MaxSim has a genuine
+recall advantage over BM25 on reasoning-heavy queries (+13 docs at R@200).
+The agent evaluation shows that **harvesting that advantage requires more
+than plugging in a better retriever.** Specifically:
+
+1. **Fix the latency.** The blob store rerank path (200 ms/query) or a
+   warmed-up HNSW would bring query latency back under 1 second, restoring
+   the agent's timeout budget. This is the single highest-impact fix.
+
+2. **Re-tune the agent prompt for ColBERT.** The pre-search decomposition
+   and PRF heuristics need to account for semantic (not just keyword)
+   retrieval. The GEPA optimization loop should run with the ColBERT
+   backend to co-adapt the prompt.
+
+3. **Remove the per-doc token cap.** Switch from Qdrant (2000-token hard
+   limit) to LanceDB MV (no limit) for the native multi-vector path.
+   This preserves the full document content for MaxSim scoring.
+
+4. **Use full doc text, not snippets, for agent reasoning.** The agent
+   should call `get_document` for promising candidates rather than relying
+   on 3000-char snippets from search results. This is already in the
+   agent's toolkit but the current prompt doesn't emphasize it enough.
+
+5. **Ablate components.** Run evaluations with:
+   - BM25 first stage + blob rerank (fast, no token cap) → isolates
+     whether the rerank helps end-to-end
+   - LanceDB MV (no token cap, no server) → isolates whether the cap
+     was the problem
+   - ColBERT-backed agent with a ColBERT-tuned prompt → isolates whether
+     the prompt was the bottleneck
+
+### The honest takeaway
+
+ColBERT-style retrieval is a provably more powerful recall engine than
+BM25 on reasoning-heavy queries. But power without integration is wasted.
+The path forward is not "better retriever → ship," it's "better retriever
+→ faster serving → co-tuned prompt → measure → iterate." We have all the
+infrastructure pieces (blob store for speed, GEPA for prompt optimization,
+the Searcher abstraction for backend swapping). The work remaining is the
+integration loop, not more retrieval engineering.
+
 ## Frontier directions worth tracking
 
 Not adopting any of these yet, but worth knowing about:
