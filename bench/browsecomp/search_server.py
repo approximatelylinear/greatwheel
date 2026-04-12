@@ -58,6 +58,7 @@ class SearchHandler(BaseHTTPRequestHandler):
     bm25_searcher: BM25sSearcher = None
     lance_searcher = None  # Optional LanceDBSearcher
     colbert_reranker = None  # Optional ColBERTReranker
+    blob_reranker = None  # Optional BlobReranker (precomputed ColBERT rerank)
 
     def log_message(self, format, *args):
         pass  # silence request logs
@@ -71,7 +72,18 @@ class SearchHandler(BaseHTTPRequestHandler):
             k = body.get("k", 5)
             mode = body.get("mode", "hybrid")  # "bm25", "vector", or "hybrid"
 
-            if mode == "rerank" and self.colbert_reranker is not None:
+            if mode == "blob_rerank" and self.blob_reranker is not None:
+                # BM25 top-200 → blob store MaxSim rerank → top-k
+                bm25_candidates = self.bm25_searcher.search(query, k=200)
+                # Build a text lookup from BM25 results so reranked results
+                # have snippets for the agent
+                text_by_docid = {c["docid"]: c.get("text", "") for c in bm25_candidates}
+                candidate_dicts = [{"docid": c["docid"]} for c in bm25_candidates]
+                reranked = self.blob_reranker.rerank(query, candidate_dicts)
+                for r in reranked:
+                    r["text"] = text_by_docid.get(r["docid"], "")
+                results = reranked[:k]
+            elif mode == "rerank" and self.colbert_reranker is not None:
                 # BM25 top-50 → ColBERT rerank → top-k
                 bm25_candidates = self.bm25_searcher.search(query, k=50)
                 results = self.colbert_reranker.rerank(query, bm25_candidates, k=k)
@@ -161,13 +173,26 @@ def main():
         default=None,
         help="ColBERT model for reranking (e.g. lightonai/Reason-ModernColBERT-v1)",
     )
+    parser.add_argument(
+        "--blob-store",
+        default=None,
+        help="Path to passage blob store (Lance dir). Enables 'blob_rerank' mode: "
+             "BM25 top-200 → precomputed ColBERT MaxSim rerank → top-k. "
+             "Much faster than --colbert-model (200ms vs 90s) because token "
+             "tensors are precomputed.",
+    )
     args = parser.parse_args()
 
     print(f"Loading BM25s index from {args.index_path} ...", flush=True)
     searcher = BM25sSearcher(args)
     SearchHandler.bm25_searcher = searcher
 
-    if args.colbert_model:
+    if args.blob_store:
+        from blob_reranker import BlobReranker
+        print(f"Loading blob reranker from {args.blob_store} ...", flush=True)
+        SearchHandler.blob_reranker = BlobReranker(args.blob_store)
+        mode = "BM25 + blob rerank (precomputed ColBERT MaxSim)"
+    elif args.colbert_model:
         from colbert_reranker import ColBERTReranker
         print(f"Loading ColBERT reranker: {args.colbert_model} ...", flush=True)
         SearchHandler.colbert_reranker = ColBERTReranker(args.colbert_model)

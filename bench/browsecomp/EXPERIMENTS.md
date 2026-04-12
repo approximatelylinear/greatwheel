@@ -171,6 +171,53 @@ agent scored worse despite retrieving 13 more relevant docs. Root causes:
 **Conclusion:** Retrieval recall is necessary but not sufficient. The agent pipeline
 needs co-adaptation: faster serving → co-tuned prompt → measure → iterate.
 
+### End-to-End Agent Evaluations with ColBERT Backends (apr10-apr12)
+
+Four agent runs on sample30, all using qwen3.5:9b with baseline config:
+
+| Backend                         | Accuracy | Correct queries                              |
+|---------------------------------|----------|----------------------------------------------|
+| Tantivy BM25 (no rerank)        | 5/30     | 175, 191, 572, 643, 885                      |
+| **Tantivy BM25 + blob rerank**  | **7/30** | 191, 469, 572, 797, 853, 894, 1144           |
+| **Qdrant ColBERT native MV**    | **7/30** | 159, 464, 572, 643, 830, 885, 1030           |
+| BM25s + blob rerank (no boosts) | 4/30     | 464, 469, 572, 797                           |
+
+**Note:** The tantivy baseline reproduced at 5/30, not the historical 9/30.
+LLM non-determinism and possible model updates contribute to run-to-run
+variance. All runs in this comparison were done in the same session with
+the same Ollama model to control for this.
+
+**Key findings:**
+
+**1. Blob rerank helps: +2 over baseline (5→7).** The rerank surfaces
+docs buried at BM25 ranks 50-200 that the agent would otherwise never
+see. Gains: q469, q797, q853, q894, q1144. Losses: q175, q643, q885
+(ColBERT semantic similarity preferred wrong docs over BM25's keyword
+matches for these entity-heavy queries).
+
+**2. Qdrant ties at 7/30 but with a different correct set.** Only q572
+is correct across all three approaches. Qdrant finds q159, q830, q1030
+that no BM25-based approach finds (Weller-bound queries). BM25+rerank
+finds q469, q797, q853, q894, q1144 that Qdrant misses.
+
+**3. Union across approaches: 14/30 (47%).** If we could pick the right
+backend per query, we'd solve 14 of 30. This is strong evidence for
+ensemble/routing: different retrieval strategies have complementary
+strengths on different query types.
+
+**4. BM25 boosts matter.** BM25s (Python, no boosts) scored 4/30 vs
+tantivy (Rust, phrase+slop+AND boosts) at 5/30. The correct sets barely
+overlap. The boosted BM25 implementation isn't just cosmetically better
+— it finds genuinely different documents. All future experiments should
+use the Rust native backend to ensure boosted BM25.
+
+**5. Latency was NOT the bottleneck this time.** The blob rerank runs
+at ~200ms/query (vs Qdrant's ~26s). Both the tantivy+rerank and native
+baseline runs completed all 30 queries well within timeout. The Qdrant
+run also completed (26s/search × ~12 calls ≈ 312s > 180s timeout, but
+the agent adapted by making fewer calls). The 7/30 results are genuine
+accuracy, not timeout artifacts.
+
 ### Key insight
 86% of failures are **retrieval** (right documents never found), not extraction. The 9B model reasons well once it has the right documents. Dense vector search doesn't help — but ColBERT reranking of a wider BM25 pool does, because the right documents are often in BM25's top-200 but ranked too low for the agent to see.
 
@@ -298,12 +345,10 @@ needs co-adaptation: faster serving → co-tuned prompt → measure → iterate.
 - **Expected impact:** Medium-high — addresses vocabulary mismatch without the noise of dense vectors
 - **Status:** Research needed
 
-#### R4. BM25 + blob rerank (fast ColBERT rerank, no server)
-- **What:** BM25 first stage (fast, <1s) → blob store MaxSim rerank (200ms) → top-K. Uses the existing passage blob store — no Qdrant, no ES, no HNSW. This is the "Option 1" from `design-colbert-production.md`.
-- **Where:** `search_server.py` — add a `--blob-store` flag, wrap BM25 candidates with `BlobRerankWrapper`
-- **Effort:** Small — the wrapper and blob store already exist
-- **Expected impact:** High — fixes the latency problem (200ms vs 26s), stays within the agent's 180s timeout. R@200 is capped at BM25's 12/30 but head precision improves (R@5: 4→7 measured). The key test: does faster rerank give the agent enough time to reason, recovering the 9/30 baseline while adding rerank quality?
-- **Status:** Ready to run. This is the highest-priority experiment.
+#### R4. BM25 + blob rerank (fast ColBERT rerank, no server) — DONE
+- **Result:** 7/30 (+2 over tantivy baseline of 5/30). Gains q469, q797, q853, q894, q1144. Losses q175, q643, q885 (ColBERT's semantic similarity preferred wrong docs on entity-heavy queries). Same accuracy as Qdrant native MV (7/30) but with a **different correct set** — only q572 overlaps. Union of all approaches reaches 14/30.
+- **Implementation:** `rerank_server_blobs.py` on port 8001 + `gw-bench --search-backend native --rerank-url http://localhost:8001`. Native tantivy with boosts provides top-200 candidates, blob reranker does MaxSim in ~200ms.
+- **Key finding:** Blob rerank is a net positive and latency is NOT the bottleneck (200ms/query, well within 180s timeout). The correct set is complementary to Qdrant's — an ensemble/routing approach would reach 14/30 (47%).
 
 #### R5. LanceDB MV as agent backend (no token cap, no server)
 - **What:** LanceDB MV native MaxSim — same 25/30 R@200 as Qdrant, but embedded (no server latency), no per-doc token cap (Qdrant's 2000-token limit doesn't apply). p50 was 46s on the retrieval benchmark, but that's without any ANN index — building an IVF index on the lance table may bring it under 5s.
@@ -368,26 +413,129 @@ Current best: **passage + doc BM25 via RRF (12/30 fuzzy)**. These experiments bu
 
 ---
 
-## Priority Ranking (updated apr10)
+### gw-kb Topic Graph Eval (apr8-apr10)
 
-The bottleneck has shifted from **retrieval recall** (solved: 25/30 R@200)
-to **agent co-adaptation** (end-to-end accuracy regressed with ColBERT).
-Priorities are reordered accordingly.
+We built a full gw-kb eval harness (HTTP serve → GwKbSearcher → ollama_client → quick_eval)
+and ran three ablation variants against sample30 with qwen3.5:9b.
+
+**Infrastructure built:**
+- `gw-kb serve` axum subcommand (search/topic/topics/explore/healthz endpoints)
+- `gw_kb_searcher.py` with ablation-gated `repl_extras()` (kb_topic, kb_topics, kb_explore)
+- `--system-prompt-file` flag on ollama_client.py + three system prompt variants
+- `run_gw_kb.sh` + `run_gw_kb_full_pipeline.sh` (sidecar orchestration)
+- `--max-per-topic` fan-out cap on `gw-kb link` (bounds dense-corpus edge explosion)
+- Lenient tantivy query parsing (apostrophes in queries caused 500 errors)
+
+**KB state for eval:** 2374 sources, 42755 chunks, 40553 tagged, 4075 topics, 83694 edges (top-25/topic), 2687 synthesized summaries.
+
+**Results:**
+
+| Variant | Exact | Fuzzy | LLM Judge | Gold doc recall |
+|---------|-------|-------|-----------|-----------------|
+| search-only | 6/30 (20%) | 6/30 (20%) | 7/30 (23%) | 21/30 (70%) |
+| +topic | 4/30 (13%) | 4/30 (13%) | 5/30 (17%) | 16/30 (53%) |
+| full | 2/30 (7%) | 2/30 (7%) | 3/30 (10%) | 12/30 (40%) |
+| *BM25s baseline* | *—* | *12/30 (40%)* | *—* | *—* |
+
+**Topic tools hurt accuracy.** Each additional tool layer reduced both retrieval recall and answer rate. The agent entered explore/topic browsing loops instead of reading documents.
+
+**Key diagnostic data (search-only variant):**
+
+| Metric | Count |
+|--------|-------|
+| Gold doc found in search results | 21/30 |
+| Gold doc found AND read via get_document | 4/30 |
+| Gold doc found but NOT read | 17/30 |
+| Correct answers | 6/30 |
+
+**The conversion funnel is: find → read → extract → answer.** The biggest drop is find → read: the agent sees the gold doc in snippets but doesn't call `get_document()` on it in 17/30 cases. This is a prompt problem, not a retrieval problem.
+
+**Root causes identified:**
+1. **Apostrophe crash** — tantivy's strict query parser crashed on `'` (People's, President's). Fixed with `parse_query_lenient`. Affected 3 queries per variant.
+2. **Topic tools are a turn sink** — in `full`, q853 spent 36 kb_topic + 17 kb_explore calls but only 4 searches. search-only solved q853 with 11 searches.
+3. **Agent doesn't read documents** — 14/30 queries used get_document at all; only 4/30 read a gold doc. The snippet-only workflow loses information.
+4. **Topic summaries contain answers but agent doesn't extract them** — q853's management-science summary mentioned "Richard Larson" explicitly, but the agent kept exploring instead of submitting.
+5. **gw-kb hybrid search underperforms BM25s baseline** — topic-membership RRF signal may add noise at this corpus scale (4075 topics, many weakly clustered).
+
+---
+
+## gw-kb Experiments (apr10)
+
+### KB1. Re-run search-only with lenient parse fix
+- **What:** The apostrophe fix (`parse_query_lenient`) was applied after the eval runs. Re-run search-only to measure the isolated impact.
+- **Where:** `bench/browsecomp/run_gw_kb.sh search-only`
+- **Effort:** Tiny — just re-run
+- **Expected impact:** +1-3 queries — 3 queries per variant had 500 errors from apostrophes (q237, q853, q893). q853 was answered correctly in search-only despite the errors; the other two may flip.
+
+### KB2. Document-reading prompt
+- **What:** The #1 conversion bottleneck is find → read (17/30 gold docs found but not read). Redesign the search-only prompt to mandate `get_document()` on the top hit of every search, with explicit `llm_query()` extraction. Model the prompt on the existing doc-grounded prompt from the Rust path (see "Things that help" above).
+- **Where:** New `bench/browsecomp/prompts/gw_kb_doc_grounded.txt`
+- **Effort:** Small — prompt change only
+- **Expected impact:** High — if even half of the 17 "found but not read" queries convert, that's +4-8 correct answers, potentially beating the 12/30 baseline. The Rust path already proved doc-grounded prompts help.
+
+### KB3. BM25-only search (disable vector + topic-membership signals)
+- **What:** gw-kb hybrid search fuses BM25 + vector + topic-membership via RRF. The BM25s baseline uses pure BM25 and gets 12/30. Test whether the vector and topic-membership signals are adding noise. Modify `hybrid_search` to expose a `bm25_only` flag, or have the server endpoint accept a `signals` parameter.
+- **Where:** `crates/gw-kb/src/search.rs` — add flag to skip vector/topic passes
+- **Effort:** Small — conditional skip in hybrid_search
+- **Expected impact:** Medium-high — if BM25-only gw-kb matches the BM25s baseline (12/30), the hybrid signals are the problem. If it's still lower, the tantivy index configuration differs (field boosts, tokenizer).
+
+### KB4. Topic as late-stage verifier (not explorer)
+- **What:** Restructure the prompt so topic tools are used ONLY after the agent has a candidate answer (turns 8+), to verify or disambiguate — not for initial exploration. Hard-cap: max 3 kb_topic + 1 kb_explore per query. Implement via a wrapper that raises after the budget is exhausted.
+- **Where:** New prompt `bench/browsecomp/prompts/gw_kb_verify.txt` + budget enforcement in `gw_kb_searcher.py`
+- **Effort:** Small-medium — prompt + ~15 LOC wrapper
+- **Expected impact:** Medium — prevents the topic-browsing death spiral while preserving the case where summaries genuinely help (like q853's management-science summary mentioning Richard Larson). Addresses the core finding that topic summaries contain answers but the agent treats them as exploration rather than evidence.
+
+### KB5. Topic-seeded query expansion
+- **What:** Instead of exposing topic tools to the agent, use them server-side: before returning search results, run the query through `kb_explore`, read the top-3 topic summaries, extract named entities, and inject them as additional BM25 search terms. The agent never sees the topic tools — it just gets better search results.
+- **Where:** New endpoint `POST /search_expanded` in `crates/gw-kb/src/server.rs`, or a pre-processing step in `gw_kb_searcher.py`
+- **Effort:** Medium — ~50 LOC server-side, or ~30 LOC Python wrapper
+- **Expected impact:** Medium — leverages the topic graph's unique contribution (cross-source synthesis) without the turn-sink problem. If management-science's summary mentions "Richard Larson", that name becomes a search term automatically.
+
+### KB6. Increase turn budget for topic variants
+- **What:** The current 12-turn budget was tuned for search-only. Topic variants need more turns to accommodate exploration + reading. Test 16 and 20 turns for the +topic and full variants.
+- **Where:** `bench/browsecomp/run_gw_kb.sh` — `--max-turns` per variant
+- **Effort:** Tiny — parameter change
+- **Expected impact:** Low-medium — EXPERIMENTS.md notes that 16 turns hurt on the BM25 baseline ("model second-guesses itself"), but the topic variants are turn-starved (20-27 avg turns used vs 12-turn cap with sub-iterations). Worth testing whether the more-turns penalty is offset by more time to converge after exploration.
+
+### KB7. Pre-inject topic summaries into system prompt
+- **What:** Eliminate runtime topic browsing entirely. At query time, run `kb_explore(query, k=5)` server-side, fetch the top-5 topic summaries, and prepend them to the system prompt as "Background context." The agent gets topic knowledge for free (no turn cost) and focuses entirely on search + document reading.
+- **Where:** Pre-processing in `gw_kb_searcher.py` or a new `--pre-inject-topics` flag
+- **Effort:** Small-medium — ~30 LOC in searcher
+- **Expected impact:** Medium-high — removes the turn-sink problem entirely while still surfacing topic knowledge. If topics help, they help as context; if they don't, the agent ignores them (like existing system prompt instructions). The risk is prompt length — 5 summaries × 300 words = ~1500 tokens of preamble, which may hurt the 9B model's attention.
+
+### KB8. Tantivy index parity check
+- **What:** Verify that gw-kb's tantivy index produces the same BM25 results as the BM25s baseline index for identical queries. The baseline uses bm25s (Python) with its own tokenizer and scoring. If the indexes differ substantially, that explains the 12/30 → 6/30 regression before any hybrid signal is involved.
+- **Where:** Run 10 sample queries through both indexes, compare top-10 docid overlap
+- **Effort:** Small — scripted comparison
+- **Expected impact:** Diagnostic — if overlap is low, the fix is index configuration (tokenizer, stopwords, field boosts). If overlap is high, the hybrid signals are the confirmed culprit.
+
+---
+
+## Priority Ranking (updated apr12)
+
+Three independent threads:
+1. **Ensemble/routing** — three retrieval approaches (BM25, BM25+rerank, Qdrant) have complementary strengths. Union = 14/30 (47%). The biggest unlock is combining them.
+2. **Agent co-adaptation** — prompt-retriever coupling must be fixed for reranked/ColBERT results.
+3. **gw-kb conversion funnel** — 70% gold-doc recall but 20% accuracy. The agent finds docs but doesn't read them.
 
 | Priority | Experiment | Expected Impact | Effort | Rationale |
 |----------|-----------|----------------|--------|-----------|
-| **1** | R4. BM25 + blob rerank | High | Small | Fastest path to ColBERT rerank under the agent's timeout budget (200ms vs 26s). All infrastructure exists. |
-| **2** | R7. Brute-force recall ceiling | Low→High | Small | 2.5-hour one-time run. Tells us if 25/30 is the ceiling or if the 2000-token cap is costing us. |
-| **3** | R6. GEPA co-optimization | High | Medium | The prompt-retriever coupling is the most likely cause of the 7/30 regression. Needs R4 first. |
-| **4** | R5. LanceDB MV agent eval | Medium | Small | Isolates the Qdrant token-cap effect. No server, no token cap. Needs lance IVF index. |
-| **5** | A5. Harness reliability fixes | Low | Small | Quick wins — may recover 1-2 answers from edge cases |
-| **6** | A4. Ensemble | High | Medium | Guaranteed from known correct set diversity |
-| **7** | B3. Query expansion + reranking | Medium | Medium | LLM query expansion widens BM25 recall, ColBERT reranking cleans it up |
-| **8** | R3. SPLADE | Medium-High | Large | Best-of-both-worlds retrieval — may be redundant now that ColBERT retrieval works |
-| ~~done~~ | ~~R2b. ColBERT first-stage~~ | | | **Done — 25/30 R@200, but 7/30 agent accuracy (regression)** |
-| ~~done~~ | ~~R2. ColBERT reranker~~ | | | **Done — 12/30 (40%), previous best** |
-| ~~done~~ | ~~B1. Fuzzy matching~~ | | | **Done — regression, noise hurts** |
+| **1** | A4. Ensemble / routing | High | Medium | Union of 3 approaches = 14/30. Even naive "run all, pick majority" helps. Query-type routing could be smarter. |
+| **2** | R6. GEPA co-optimization | High | Medium | Prompt was never tuned for reranked results. GEPA with blob rerank backend may recover lost queries (175, 643, 885). R4 unblocks this. |
+| **3** | KB2. Doc-reading prompt | High | Small | The #1 bottleneck: 17/30 gold docs found but never read. Doc-grounded prompts already proven on Rust path. |
+| **4** | KB8. Tantivy index parity check | Diagnostic | Small | Must know if gw-kb's tantivy produces same results as BM25s before diagnosing further. |
+| **5** | KB3. BM25-only search | Medium-High | Small | Isolates whether hybrid signals (vector + topic-membership) hurt. |
+| **6** | R7. Brute-force recall ceiling | Low→High | Small | 2.5-hour one-time run. Tells us if 25/30 is the ceiling or if the 2000-token cap is costing us. |
+| **7** | R5. LanceDB MV agent eval | Medium | Small | Isolates Qdrant token-cap effect. No server, no token cap. |
+| **8** | KB7. Pre-inject topic summaries | Medium-High | Small | Removes turn-sink, surfaces topic knowledge for free. |
+| **9** | KB5. Topic-seeded query expansion | Medium | Medium | Server-side topic leverage. |
+| **10** | B3. Query expansion + reranking | Medium | Medium | LLM query expansion widens BM25 recall for reranking. |
+| **11** | R3. SPLADE | Medium-High | Large | May be redundant now that ColBERT works |
+| ~~done~~ | ~~R4. BM25 + blob rerank~~ | | | **Done — 7/30 (+2 over 5/30 baseline). Complementary to Qdrant. Union=14/30.** |
+| ~~done~~ | ~~KB eval harness~~ | | | **Done — 3 ablations, all below baseline** |
+| ~~done~~ | ~~R2b. ColBERT first-stage~~ | | | **Done — 25/30 R@200, 7/30 agent accuracy** |
+| ~~done~~ | ~~R2. ColBERT reranker~~ | | | **Done — 12/30 (40%), historical best** |
+| ~~done~~ | ~~B1. Fuzzy matching~~ | | | **Done — regression** |
 | ~~done~~ | ~~A2. Answer type~~ | | | **Done — no benefit** |
 | ~~skip~~ | ~~A3. Larger model~~ | | | Deprioritized per user preference |
 | ~~skip~~ | ~~R1. Different embeddings~~ | | | Dense vector search doesn't help |
-| ~~skip~~ | ~~B2. Field boosting~~ | | | ColBERT reranking addresses ranking more directly |
