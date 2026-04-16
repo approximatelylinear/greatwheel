@@ -33,8 +33,14 @@ mod tests {
     #[test]
     fn test_rrf_single_list() {
         let list = vec![
-            ScoredKey { key: "a".into(), score: 1.0 },
-            ScoredKey { key: "b".into(), score: 0.5 },
+            ScoredKey {
+                key: "a".into(),
+                score: 1.0,
+            },
+            ScoredKey {
+                key: "b".into(),
+                score: 0.5,
+            },
         ];
         let result = reciprocal_rank_fusion(&[list], 60);
         assert_eq!(result[0].0, "a");
@@ -45,12 +51,24 @@ mod tests {
     #[test]
     fn test_rrf_two_lists_boost_overlap() {
         let list1 = vec![
-            ScoredKey { key: "a".into(), score: 1.0 },
-            ScoredKey { key: "b".into(), score: 0.5 },
+            ScoredKey {
+                key: "a".into(),
+                score: 1.0,
+            },
+            ScoredKey {
+                key: "b".into(),
+                score: 0.5,
+            },
         ];
         let list2 = vec![
-            ScoredKey { key: "b".into(), score: 1.0 },
-            ScoredKey { key: "c".into(), score: 0.5 },
+            ScoredKey {
+                key: "b".into(),
+                score: 1.0,
+            },
+            ScoredKey {
+                key: "c".into(),
+                score: 0.5,
+            },
         ];
         let result = reciprocal_rank_fusion(&[list1, list2], 60);
         // "b" appears in both lists at different ranks, should be boosted
@@ -65,9 +83,10 @@ mod tests {
 
     #[test]
     fn test_rrf_k_parameter() {
-        let list = vec![
-            ScoredKey { key: "a".into(), score: 1.0 },
-        ];
+        let list = vec![ScoredKey {
+            key: "a".into(),
+            score: 1.0,
+        }];
         let r1 = reciprocal_rank_fusion(&[list.clone()], 60);
         let r2 = reciprocal_rank_fusion(&[list], 1);
         // Lower k gives higher scores

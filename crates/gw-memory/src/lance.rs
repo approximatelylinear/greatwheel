@@ -55,13 +55,9 @@ impl LanceStore {
         let flat_values: Vec<f32> = vectors.iter().flat_map(|v| v.iter().copied()).collect();
         let values_array = Float32Array::from(flat_values);
         let field = Arc::new(Field::new("item", DataType::Float32, true));
-        let vector_array = FixedSizeListArray::try_new(
-            field,
-            self.dim,
-            Arc::new(values_array),
-            None,
-        )
-        .map_err(|e| MemoryError::Embedding(format!("Arrow FixedSizeList error: {e}")))?;
+        let vector_array =
+            FixedSizeListArray::try_new(field, self.dim, Arc::new(values_array), None)
+                .map_err(|e| MemoryError::Embedding(format!("Arrow FixedSizeList error: {e}")))?;
 
         RecordBatch::try_new(
             self.schema(),
@@ -86,9 +82,12 @@ impl LanceStore {
                 tracing::info!(table = %name, "Creating new LanceDB table");
                 let schema = self.schema();
                 let empty_batch = RecordBatch::new_empty(schema.clone());
-                let batches =
-                    RecordBatchIterator::new(vec![Ok(empty_batch)], schema);
-                let table = self.conn.create_table(&name, Box::new(batches)).execute().await?;
+                let batches = RecordBatchIterator::new(vec![Ok(empty_batch)], schema);
+                let table = self
+                    .conn
+                    .create_table(&name, Box::new(batches))
+                    .execute()
+                    .await?;
                 Ok(table)
             }
         }
@@ -126,7 +125,7 @@ impl LanceStore {
     ) -> Result<Vec<ScoredKey>, MemoryError> {
         let table = match self
             .conn
-            .open_table(&Self::table_name(org_id))
+            .open_table(Self::table_name(org_id))
             .execute()
             .await
         {
@@ -170,7 +169,7 @@ impl LanceStore {
     pub async fn delete(&self, org_id: &uuid::Uuid, key: &str) -> Result<(), MemoryError> {
         let table = match self
             .conn
-            .open_table(&Self::table_name(org_id))
+            .open_table(Self::table_name(org_id))
             .execute()
             .await
         {

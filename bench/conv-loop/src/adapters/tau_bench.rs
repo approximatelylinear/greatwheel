@@ -49,8 +49,8 @@ impl BenchmarkAdapter for TauBenchAdapter {
     }
 
     fn load(&self, path: &Path) -> Result<Vec<Scenario>, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read {path:?}: {e}"))?;
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("failed to read {path:?}: {e}"))?;
 
         let tasks: Vec<TauBenchTask> = serde_json::from_str(&content)
             .map_err(|e| format!("failed to parse tau-bench JSON: {e}"))?;

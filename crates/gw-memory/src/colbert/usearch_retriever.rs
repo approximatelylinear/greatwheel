@@ -13,7 +13,7 @@
 //!
 //! - `index.usearch`            — usearch HNSW file (mmap'd via `view()`)
 //! - `passage_to_docid.bin`     — packed binary map: `[u64 count]` then
-//!                                 `[u64 passage_id, u32 docid_len, docid_bytes]*`
+//!   `[u64 passage_id, u32 docid_len, docid_bytes]*`
 //!
 //! Each token vector in the index is keyed by:
 //!
@@ -62,13 +62,13 @@ impl UsearchRetriever {
             dimensions: TOKEN_DIM,
             metric: MetricKind::Cos,
             quantization: ScalarKind::F32,
-            connectivity: 0,        // 0 = use file's value
-            expansion_add: 0,       // 0 = use file's value
-            expansion_search: 0,    // 0 = use file's value
+            connectivity: 0,     // 0 = use file's value
+            expansion_add: 0,    // 0 = use file's value
+            expansion_search: 0, // 0 = use file's value
             multi: false,
         };
-        let index = Index::new(&opts)
-            .map_err(|e| MemoryError::Embedding(format!("usearch new: {e}")))?;
+        let index =
+            Index::new(&opts).map_err(|e| MemoryError::Embedding(format!("usearch new: {e}")))?;
 
         let index_path = dir.join("index.usearch");
         let path_str = index_path
@@ -147,10 +147,7 @@ impl FirstStageRetriever for UsearchRetriever {
         }
 
         let mut ranked: Vec<(String, f32)> = doc_scores.into_iter().collect();
-        ranked.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         ranked.truncate(k);
         Ok(ranked.into_iter().map(|(d, _)| d).collect())
     }
@@ -166,8 +163,7 @@ impl FirstStageRetriever for UsearchRetriever {
 ///     [u8; docid_len]:    docid bytes (UTF-8)
 /// ```
 pub fn load_passage_map(path: &Path) -> Result<HashMap<u64, String>, MemoryError> {
-    let f = File::open(path)
-        .map_err(|e| MemoryError::Embedding(format!("open {path:?}: {e}")))?;
+    let f = File::open(path).map_err(|e| MemoryError::Embedding(format!("open {path:?}: {e}")))?;
     let mut r = BufReader::new(f);
 
     let mut buf8 = [0u8; 8];

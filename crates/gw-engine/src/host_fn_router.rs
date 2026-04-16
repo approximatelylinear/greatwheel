@@ -77,9 +77,7 @@ impl HostFnRouter {
             HostFnHandler::Sync(f) => f(args, kwargs),
             HostFnHandler::Async(f) => {
                 let fut = f(args, kwargs);
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(fut)
-                })
+                tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
             }
         };
         Some(result)

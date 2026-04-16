@@ -47,16 +47,16 @@ pub async fn spreading_activation(
 
     // Resolve seed keys to memory IDs
     let seed_keys: Vec<String> = seeds.iter().map(|s| s.key.clone()).collect();
-    let seed_rows: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, key FROM memories WHERE org_id = $1 AND key = ANY($2)",
-    )
-    .bind(org_id)
-    .bind(&seed_keys)
-    .fetch_all(pool)
-    .await?;
+    let seed_rows: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, key FROM memories WHERE org_id = $1 AND key = ANY($2)")
+            .bind(org_id)
+            .bind(&seed_keys)
+            .fetch_all(pool)
+            .await?;
 
     // Initialize frontier with seed activations
-    let seed_score_map: HashMap<&str, f32> = seeds.iter().map(|s| (s.key.as_str(), s.score)).collect();
+    let seed_score_map: HashMap<&str, f32> =
+        seeds.iter().map(|s| (s.key.as_str(), s.score)).collect();
     let mut activations: HashMap<Uuid, f32> = HashMap::new();
     for (id, key) in &seed_rows {
         let base = seed_score_map.get(key.as_str()).copied().unwrap_or(1.0);
@@ -131,12 +131,11 @@ pub async fn spreading_activation(
     }
 
     let discovered_ids: Vec<Uuid> = discovered.iter().map(|(id, _)| *id).collect();
-    let key_rows: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, key FROM memories WHERE id = ANY($1)",
-    )
-    .bind(&discovered_ids)
-    .fetch_all(pool)
-    .await?;
+    let key_rows: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, key FROM memories WHERE id = ANY($1)")
+            .bind(&discovered_ids)
+            .fetch_all(pool)
+            .await?;
 
     let id_to_key: HashMap<Uuid, String> = key_rows.into_iter().collect();
 
@@ -190,20 +189,23 @@ pub async fn temporal_score_memories(
 ) -> Result<Vec<ScoredKey>, sqlx::Error> {
     use crate::temporal::{temporal_proximity_score, TemporalRange};
 
-    let rows: Vec<(String, chrono::DateTime<chrono::Utc>, Option<chrono::DateTime<chrono::Utc>>)> =
-        sqlx::query_as(
-            r#"
+    let rows: Vec<(
+        String,
+        chrono::DateTime<chrono::Utc>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )> = sqlx::query_as(
+        r#"
             SELECT key, occurred_at, occurred_end FROM memories
             WHERE org_id = $1
               AND occurred_at <= $2
               AND COALESCE(occurred_end, occurred_at) >= $3
             "#,
-        )
-        .bind(org_id)
-        .bind(end)
-        .bind(start)
-        .fetch_all(pool)
-        .await?;
+    )
+    .bind(org_id)
+    .bind(end)
+    .bind(start)
+    .fetch_all(pool)
+    .await?;
 
     let query_range = TemporalRange { start, end };
     let mut scored: Vec<ScoredKey> = rows
@@ -215,7 +217,11 @@ pub async fn temporal_score_memories(
         })
         .collect();
 
-    scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     scored.truncate(limit);
     Ok(scored)
 }

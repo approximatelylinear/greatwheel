@@ -39,21 +39,12 @@ const REP_CHUNK_CHARS: usize = 220;
 const SYSTEM_PROMPT: &str = "You classify the relationship between two topics \
 in a knowledge base. Output JSON only — no prose, no markdown fences.";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ClassifyOpts {
     /// Process at most this many edges.
     pub limit: Option<usize>,
     /// If false, skip edges whose `kind` is already not `related`.
     pub reclassify: bool,
-}
-
-impl Default for ClassifyOpts {
-    fn default() -> Self {
-        Self {
-            limit: None,
-            reclassify: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -122,7 +113,8 @@ pub async fn classify_edges(
          ORDER BY confidence DESC
          {limit_sql}"
     );
-    let edges: Vec<(Uuid, Uuid, String, f32)> = sqlx::query_as(&query).fetch_all(&stores.pg).await?;
+    let edges: Vec<(Uuid, Uuid, String, f32)> =
+        sqlx::query_as(&query).fetch_all(&stores.pg).await?;
     info!(edges = edges.len(), "edges to classify");
 
     // 3. Loop, classify, persist.
@@ -160,7 +152,10 @@ pub async fn classify_edges(
         let kind = match kind.as_str() {
             "subtopic_of" | "builds_on" | "contradicts" | "related" => kind,
             other => {
-                warn!(kind = other, "unknown kind from classifier, defaulting to related");
+                warn!(
+                    kind = other,
+                    "unknown kind from classifier, defaulting to related"
+                );
                 "related".to_string()
             }
         };
@@ -310,33 +305,7 @@ Output JSON only, no other text. Format:
 }
 
 fn parse_classifier_output(raw: &str) -> Result<ClassifierOutput, KbError> {
-    let stripped = strip_code_fences(raw);
-    let start = stripped.find('{');
-    let end = stripped.rfind('}');
-    let slice = match (start, end) {
-        (Some(s), Some(e)) if e >= s => &stripped[s..=e],
-        _ => return Err(KbError::Other(format!("no JSON object in response: {raw:?}"))),
-    };
-    let parsed: ClassifierOutput = serde_json::from_str(slice)
-        .map_err(|e| KbError::Other(format!("json parse: {e} in {slice:?}")))?;
-    Ok(parsed)
-}
-
-fn strip_code_fences(s: &str) -> String {
-    let trimmed = s.trim();
-    if let Some(rest) = trimmed.strip_prefix("```json") {
-        rest.trim_start_matches('\n')
-            .trim_end_matches("```")
-            .trim()
-            .to_string()
-    } else if let Some(rest) = trimmed.strip_prefix("```") {
-        rest.trim_start_matches('\n')
-            .trim_end_matches("```")
-            .trim()
-            .to_string()
-    } else {
-        trimmed.to_string()
-    }
+    crate::llm_parse::extract_json(raw)
 }
 
 /// Load one representative chunk per topic into memory.

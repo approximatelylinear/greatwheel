@@ -45,31 +45,23 @@ impl Visit for SpanFields {
     }
 
     fn record_i64(&mut self, field: &Field, value: i64) {
-        self.fields.insert(
-            field.name().to_string(),
-            serde_json::json!(value),
-        );
+        self.fields
+            .insert(field.name().to_string(), serde_json::json!(value));
     }
 
     fn record_u64(&mut self, field: &Field, value: u64) {
-        self.fields.insert(
-            field.name().to_string(),
-            serde_json::json!(value),
-        );
+        self.fields
+            .insert(field.name().to_string(), serde_json::json!(value));
     }
 
     fn record_bool(&mut self, field: &Field, value: bool) {
-        self.fields.insert(
-            field.name().to_string(),
-            serde_json::json!(value),
-        );
+        self.fields
+            .insert(field.name().to_string(), serde_json::json!(value));
     }
 
     fn record_f64(&mut self, field: &Field, value: f64) {
-        self.fields.insert(
-            field.name().to_string(),
-            serde_json::json!(value),
-        );
+        self.fields
+            .insert(field.name().to_string(), serde_json::json!(value));
     }
 }
 
@@ -99,8 +91,10 @@ where
             return;
         }
 
-        let mut fields = SpanFields::default();
-        fields.start = Some(std::time::Instant::now());
+        let mut fields = SpanFields {
+            start: Some(std::time::Instant::now()),
+            ..SpanFields::default()
+        };
         attrs.record(&mut fields);
 
         if let Some(span) = ctx.span(id) {

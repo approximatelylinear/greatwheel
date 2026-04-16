@@ -38,10 +38,7 @@ impl Plugin for HindsightRecallPlugin {
         ctx.register_host_fn(
             "memory.temporal_parse",
             Arc::new(|args: Vec<Value>, _kwargs: HashMap<String, Value>| {
-                let query = args
-                    .first()
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let query = args.first().and_then(|v| v.as_str()).unwrap_or("");
 
                 let now = chrono::Utc::now();
                 let range = tp::parse_temporal(query, now);

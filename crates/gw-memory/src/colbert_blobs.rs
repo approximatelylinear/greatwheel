@@ -200,9 +200,12 @@ mod tests {
         let q = array![[1.0_f32, 0.0, 0.0]];
         let p = array![[1.0_f32, 0.0, 0.0]];
         // For this test we ignore TOKEN_DIM since maxsim() doesn't enforce it.
-        let s = q.dot(&p.t()).map_axis(Axis(1), |r| {
-            r.iter().copied().fold(f32::NEG_INFINITY, f32::max)
-        }).sum();
+        let s = q
+            .dot(&p.t())
+            .map_axis(Axis(1), |r| {
+                r.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+            })
+            .sum();
         assert!((s - 1.0).abs() < 1e-6);
     }
 
@@ -210,9 +213,12 @@ mod tests {
     fn maxsim_orthogonal() {
         let q = array![[1.0_f32, 0.0, 0.0]];
         let p = array![[0.0_f32, 1.0, 0.0]];
-        let s = q.dot(&p.t()).map_axis(Axis(1), |r| {
-            r.iter().copied().fold(f32::NEG_INFINITY, f32::max)
-        }).sum();
+        let s = q
+            .dot(&p.t())
+            .map_axis(Axis(1), |r| {
+                r.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+            })
+            .sum();
         assert!(s.abs() < 1e-6);
     }
 
@@ -224,9 +230,12 @@ mod tests {
         // sims = [[0.9, 0.2], [0.1, 0.8]]; per-row max = [0.9, 0.8]; sum = 1.7
         let q = array![[1.0_f32, 0.0], [0.0, 1.0]];
         let p = array![[0.9_f32, 0.1], [0.2, 0.8]];
-        let s = q.dot(&p.t()).map_axis(Axis(1), |r| {
-            r.iter().copied().fold(f32::NEG_INFINITY, f32::max)
-        }).sum();
+        let s = q
+            .dot(&p.t())
+            .map_axis(Axis(1), |r| {
+                r.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+            })
+            .sum();
         assert!((s - 1.7).abs() < 1e-6, "got {s}");
     }
 

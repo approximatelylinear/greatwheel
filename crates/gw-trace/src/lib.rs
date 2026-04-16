@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 use gw_core::{AgentId, OrgId, SessionId};
-use serde::{Deserialize, Serialize};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig as _;
+use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
 mod postgres_layer;
@@ -103,8 +103,7 @@ pub fn init_tracing(
 ) -> Result<(), TraceError> {
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let fmt_layer = tracing_subscriber::fmt::layer();
 
     let registry = tracing_subscriber::registry()

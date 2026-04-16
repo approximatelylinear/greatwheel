@@ -297,9 +297,11 @@ async fn select_balanced_chunks(
     // Final ordering: by source, then relevance, so related passages
     // appear together in the prompt.
     selected.sort_by(|a, b| {
-        a.source_title
-            .cmp(&b.source_title)
-            .then(b.relevance.partial_cmp(&a.relevance).unwrap_or(std::cmp::Ordering::Equal))
+        a.source_title.cmp(&b.source_title).then(
+            b.relevance
+                .partial_cmp(&a.relevance)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
     });
 
     Ok(selected
@@ -442,11 +444,7 @@ mod tests {
             label: "Test".into(),
             chunk_count: 3,
         };
-        let chunks = vec![
-            row("Source A"),
-            row("Source A"),
-            row("Source B"),
-        ];
+        let chunks = vec![row("Source A"), row("Source A"), row("Source B")];
         let p = build_prompt(&topic, &chunks);
         assert!(p.contains("3 passages"));
         assert!(p.contains("2 different sources"));

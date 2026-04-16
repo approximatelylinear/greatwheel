@@ -9,9 +9,7 @@ pub fn print_summary(results: &[(Scenario, Vec<AssertionResult>)]) {
     let mut total_fail = 0;
 
     for (scenario, assertions) in results {
-        let entry = by_capability
-            .entry(&scenario.capability)
-            .or_insert((0, 0));
+        let entry = by_capability.entry(&scenario.capability).or_insert((0, 0));
         for a in assertions {
             if a.passed {
                 entry.0 += 1;

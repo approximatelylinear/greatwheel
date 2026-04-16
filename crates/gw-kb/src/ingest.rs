@@ -74,22 +74,21 @@ pub async fn ingest_url(stores: &KbStores, url: &str) -> Result<IngestReport, Kb
         .unwrap_or("")
         .to_lowercase();
 
-    let extracted = if content_type.starts_with("application/pdf")
-        || url.to_lowercase().ends_with(".pdf")
-    {
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| KbError::Other(format!("read body: {e}")))?;
-        info!(url, bytes = bytes.len(), "fetched pdf, extracting");
-        extract_pdf_bytes(&bytes)?
-    } else {
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| KbError::Other(format!("read body: {e}")))?;
-        extract_html(url, Some(&body))?
-    };
+    let extracted =
+        if content_type.starts_with("application/pdf") || url.to_lowercase().ends_with(".pdf") {
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| KbError::Other(format!("read body: {e}")))?;
+            info!(url, bytes = bytes.len(), "fetched pdf, extracting");
+            extract_pdf_bytes(&bytes)?
+        } else {
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| KbError::Other(format!("read body: {e}")))?;
+            extract_html(url, Some(&body))?
+        };
 
     finish_ingest(stores, Some(url), None, extracted).await
 }
@@ -221,7 +220,13 @@ pub async fn ingest_inline(
 /// that BrowseComp-Plus and most static-site generators produce. Any
 /// fields beyond title and date are ignored; if the frontmatter is
 /// missing or malformed, returns the text unchanged.
-fn parse_frontmatter(text: &str) -> (Option<String>, Option<chrono::DateTime<chrono::Utc>>, String) {
+fn parse_frontmatter(
+    text: &str,
+) -> (
+    Option<String>,
+    Option<chrono::DateTime<chrono::Utc>>,
+    String,
+) {
     let trimmed = text.trim_start_matches('\u{feff}'); // strip BOM if present
     if !trimmed.starts_with("---\n") && !trimmed.starts_with("---\r\n") {
         return (None, None, text.to_string());
@@ -233,14 +238,20 @@ fn parse_frontmatter(text: &str) -> (Option<String>, Option<chrono::DateTime<chr
     };
     let frontmatter = &rest[..end_idx];
     let body_start = end_idx + 5; // skip "\n---\n"
-    let body = rest[body_start.min(rest.len())..].trim_start_matches('\n').to_string();
+    let body = rest[body_start.min(rest.len())..]
+        .trim_start_matches('\n')
+        .to_string();
 
     let mut title: Option<String> = None;
     let mut date: Option<chrono::DateTime<chrono::Utc>> = None;
     for line in frontmatter.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("title:") {
-            title = Some(rest.trim().trim_matches(|c| c == '"' || c == '\'').to_string());
+            title = Some(
+                rest.trim()
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .to_string(),
+            );
         } else if let Some(rest) = line.strip_prefix("date:") {
             let raw = rest.trim().trim_matches(|c| c == '"' || c == '\'');
             // Try ISO date (YYYY-MM-DD) first, then full RFC3339
@@ -335,9 +346,13 @@ async fn write_chunks(
 
     // 5. Index in tantivy
     let heading_paths: Vec<Vec<String>> = chunks.iter().map(|c| c.heading_path.clone()).collect();
-    stores
-        .tantivy
-        .insert_chunks(source.source_id, &source.title, &chunk_ids, &texts, &heading_paths)?;
+    stores.tantivy.insert_chunks(
+        source.source_id,
+        &source.title,
+        &chunk_ids,
+        &texts,
+        &heading_paths,
+    )?;
 
     info!(source_id = %source.source_id, chunks = count, "chunks indexed");
     Ok(count)

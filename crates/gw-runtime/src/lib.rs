@@ -117,7 +117,8 @@ pub fn run_agent(
                 call_id: _,
                 state,
             } => {
-                let _span = tracing::info_span!("host_function", function = %function_name).entered();
+                let _span =
+                    tracing::info_span!("host_function", function = %function_name).entered();
                 let json_args = args_to_json(&args);
                 let json_kwargs = kwargs_to_map(&kwargs);
 
@@ -278,10 +279,7 @@ impl ReplAgent {
     }
 
     /// Restore a REPL agent from a snapshot.
-    pub fn restore_snapshot(
-        bytes: &[u8],
-        bridge: Box<dyn HostBridge>,
-    ) -> Result<Self, AgentError> {
+    pub fn restore_snapshot(bytes: &[u8], bridge: Box<dyn HostBridge>) -> Result<Self, AgentError> {
         let session = ReplSession::load(bytes, ResourceLimits::new())
             .map_err(|e| AgentError::Runtime(format!("restore_snapshot failed: {e}")))?;
         Ok(Self {
@@ -350,7 +348,8 @@ impl ReplAgent {
                         continue;
                     }
 
-                    let _span = tracing::info_span!("host_function", function = %function_name).entered();
+                    let _span =
+                        tracing::info_span!("host_function", function = %function_name).entered();
                     let json_args = args_to_json(&args);
                     let json_kwargs = kwargs_to_map(&kwargs);
 
@@ -401,9 +400,7 @@ pub fn extract_code_blocks(text: &str) -> Vec<String> {
         if !in_block {
             if trimmed.starts_with("```repl")
                 || trimmed.starts_with("```python")
-                || trimmed == "```"
-                    && blocks.is_empty()
-                    && !current_block.is_empty()
+                || trimmed == "```" && blocks.is_empty() && !current_block.is_empty()
             {
                 in_block = true;
                 current_block.clear();

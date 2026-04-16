@@ -68,7 +68,10 @@ fn run_deterministic(cli: &Cli) {
         std::process::exit(1);
     }
 
-    println!("Running {} scenario(s) in deterministic mode\n", scenarios.len());
+    println!(
+        "Running {} scenario(s) in deterministic mode\n",
+        scenarios.len()
+    );
 
     let mut all_results = Vec::new();
 
@@ -127,21 +130,15 @@ fn run_live(cli: &Cli) {
 }
 
 fn run_adapter(cli: &Cli) {
-    let adapter_name = cli
-        .adapter
-        .as_deref()
-        .unwrap_or_else(|| {
-            eprintln!("--adapter required for adapter mode (mint or tau-bench)");
-            std::process::exit(1);
-        });
+    let adapter_name = cli.adapter.as_deref().unwrap_or_else(|| {
+        eprintln!("--adapter required for adapter mode (mint or tau-bench)");
+        std::process::exit(1);
+    });
 
-    let data_path = cli
-        .data
-        .as_deref()
-        .unwrap_or_else(|| {
-            eprintln!("--data required for adapter mode");
-            std::process::exit(1);
-        });
+    let data_path = cli.data.as_deref().unwrap_or_else(|| {
+        eprintln!("--data required for adapter mode");
+        std::process::exit(1);
+    });
 
     let adapter: Box<dyn BenchmarkAdapter> = match adapter_name {
         "mint" => Box::new(adapters::mint::MintAdapter),

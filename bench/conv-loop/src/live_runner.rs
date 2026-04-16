@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use gw_core::{EntryType, ReplSnapshotData, SessionId};
+use gw_core::{EntryType, SessionId};
 use gw_llm::OllamaClient;
 use gw_loop::{ConversationLoop, LoopConfig, OllamaLlmClient};
 use gw_runtime::{HostBridge, ReplAgent};
@@ -28,10 +28,7 @@ pub struct LiveScenarioResult {
 }
 
 /// Run a scenario in live mode using a real LLM.
-pub async fn run_scenario_live(
-    scenario: &Scenario,
-    config: &LiveConfig,
-) -> LiveScenarioResult {
+pub async fn run_scenario_live(scenario: &Scenario, config: &LiveConfig) -> LiveScenarioResult {
     let start = Instant::now();
     let session_id = SessionId(Uuid::new_v4());
 
@@ -109,9 +106,7 @@ pub async fn run_scenario_live(
                             total_output_tokens += result.output_tokens;
                             println!(
                                 "      → {} iters, {} in/{} out tokens",
-                                result.iterations,
-                                result.input_tokens,
-                                result.output_tokens,
+                                result.iterations, result.input_tokens, result.output_tokens,
                             );
                         }
                         Err(e) => {
@@ -127,7 +122,12 @@ pub async fn run_scenario_live(
                         check,
                         &conv_loop.repl,
                         &conv_loop.tree,
-                        &conv_loop.tree.path_to_leaf().first().map(|_| "").unwrap_or(""),
+                        conv_loop
+                            .tree
+                            .path_to_leaf()
+                            .first()
+                            .map(|_| "")
+                            .unwrap_or(""),
                         scenario.recency_window,
                     ));
                 }
@@ -200,15 +200,13 @@ pub async fn run_scenario_live(
                 }
             }
 
-            ScenarioTurn::Compact => {
-                match conv_loop.compact().await {
-                    Ok(()) => println!("      (compacted)"),
-                    Err(e) => println!("      (compaction failed: {e})"),
-                }
-            }
+            ScenarioTurn::Compact => match conv_loop.compact().await {
+                Ok(()) => println!("      (compacted)"),
+                Err(e) => println!("      (compaction failed: {e})"),
+            },
 
             ScenarioTurn::Steering { content } => {
-                conv_loop.inject_steering(content.clone());
+                conv_loop.inject_steering(content);
                 println!("      (steering injected)");
             }
 

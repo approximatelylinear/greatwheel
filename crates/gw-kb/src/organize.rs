@@ -21,8 +21,8 @@ use crate::embed::Embedder;
 use crate::error::KbError;
 use crate::ingest::KbStores;
 use crate::topics::{
-    cosine, insert_topic, insert_topic_chunk, load_all_topic_states, mark_chunk_tagged,
-    slugify, update_topic_vector, TopicState,
+    cosine, insert_topic, insert_topic_chunk, load_all_topic_states, mark_chunk_tagged, slugify,
+    update_topic_vector, TopicState,
 };
 
 /// Cosine similarity threshold for "this tag is the same as an existing topic".
@@ -55,7 +55,7 @@ pub struct OrganizeReport {
     pub llm_failures: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct OrganizeOpts {
     /// Process at most this many chunks. None = all untagged.
     pub limit: Option<usize>,
@@ -65,23 +65,16 @@ pub struct OrganizeOpts {
     pub retag: bool,
 }
 
-impl Default for OrganizeOpts {
-    fn default() -> Self {
-        Self {
-            limit: None,
-            source_filter: None,
-            retag: false,
-        }
-    }
-}
-
 /// Run the organize pipeline.
 pub async fn organize(stores: &KbStores, opts: OrganizeOpts) -> Result<OrganizeReport, KbError> {
     let mut report = OrganizeReport::default();
 
     // 1. Load existing topics into memory
     let mut topic_state = load_all_topic_states(&stores.pg).await?;
-    info!(loaded = topic_state.len(), "loaded existing topics into memory");
+    info!(
+        loaded = topic_state.len(),
+        "loaded existing topics into memory"
+    );
 
     // Used slug set to avoid collisions when creating new topics
     let mut used_slugs: std::collections::HashSet<String> =
@@ -162,7 +155,7 @@ pub async fn organize(stores: &KbStores, opts: OrganizeOpts) -> Result<OrganizeR
             let mut best: Option<(usize, f32)> = None;
             for (i, t) in topic_state[..snapshot_len].iter().enumerate() {
                 let score = cosine(&label_vec, &t.label_vector);
-                if best.map_or(true, |(_, s)| score > s) {
+                if best.is_none_or(|(_, s)| score > s) {
                     best = Some((i, score));
                 }
             }
@@ -193,7 +186,10 @@ pub async fn organize(stores: &KbStores, opts: OrganizeOpts) -> Result<OrganizeR
                 .iter()
                 .any(|t| cosine(&label_vec, &t.label_vector) >= MATCH_THRESHOLD);
             if already_pending {
-                debug!(label = label_clean, "duplicate of pending new topic, skipping");
+                debug!(
+                    label = label_clean,
+                    "duplicate of pending new topic, skipping"
+                );
                 continue;
             }
 
@@ -359,11 +355,7 @@ const SYSTEM_PROMPT: &str = "You are a topic tagger for a knowledge base of \
 research and reference documents. Output JSON only — no prose, no markdown \
 fences, no commentary.";
 
-fn build_tagger_prompt(
-    chunk: &PendingChunk,
-    chunk_vec: &[f32],
-    topics: &[TopicState],
-) -> String {
+fn build_tagger_prompt(chunk: &PendingChunk, chunk_vec: &[f32], topics: &[TopicState]) -> String {
     // Rank existing topics by RELEVANCE to the current chunk, not by
     // popularity. Without this, a minority cluster (say, 5 medieval-history
     // sources in a 50-source corpus) gets drowned out of the prompt by
@@ -460,16 +452,7 @@ Output JSON only, no other text:
 /// Parse the tagger's response. Strips markdown fences and finds the
 /// outermost JSON object before deserializing.
 fn parse_tagger_output(raw: &str) -> Result<TaggerOutput, KbError> {
-    let stripped = strip_code_fences(raw);
-    // Find the first '{' and last '}' to handle prefixes/suffixes
-    let start = stripped.find('{');
-    let end = stripped.rfind('}');
-    let slice = match (start, end) {
-        (Some(s), Some(e)) if e >= s => &stripped[s..=e],
-        _ => return Err(KbError::Other(format!("no JSON object in response: {raw:?}"))),
-    };
-    let parsed: TaggerOutput = serde_json::from_str(slice)
-        .map_err(|e| KbError::Other(format!("json parse: {e} in {slice:?}")))?;
+    let parsed: TaggerOutput = crate::llm_parse::extract_json(raw)?;
     Ok(TaggerOutput {
         topics: parsed
             .topics
@@ -484,17 +467,6 @@ fn parse_tagger_output(raw: &str) -> Result<TaggerOutput, KbError> {
             .filter(|s| !s.is_empty())
             .collect(),
     })
-}
-
-fn strip_code_fences(s: &str) -> String {
-    let trimmed = s.trim();
-    if let Some(rest) = trimmed.strip_prefix("```json") {
-        rest.trim_start_matches('\n').trim_end_matches("```").trim().to_string()
-    } else if let Some(rest) = trimmed.strip_prefix("```") {
-        rest.trim_start_matches('\n').trim_end_matches("```").trim().to_string()
-    } else {
-        trimmed.to_string()
-    }
 }
 
 /// Embed a topic label via sentence-transformers. Kept as a distinct entry

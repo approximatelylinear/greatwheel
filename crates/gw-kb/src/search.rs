@@ -62,7 +62,10 @@ pub async fn hybrid_search(
 
     // 2. LanceDB (vector) — embed query via sentence-transformers
     let query_vec = stores.embedder.embed_one(query)?;
-    let vector_hits = stores.lance.search(query_vec.clone(), PER_BACKEND_K).await?;
+    let vector_hits = stores
+        .lance
+        .search(query_vec.clone(), PER_BACKEND_K)
+        .await?;
 
     // 3. Topic membership — find chunks belonging to topics nearest to
     //    the query, ordered by topic relevance × per-topic chunk relevance.
@@ -151,7 +154,11 @@ async fn topic_membership_hits(
 
     // Sort the full list by the combined score so chunks from closer
     // topics end up at the top of the ranking RRF sees.
-    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(out)
 }
 

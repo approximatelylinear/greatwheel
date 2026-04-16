@@ -85,7 +85,11 @@ pub async fn clean_outliers(stores: &KbStores, opts: CleanOpts) -> Result<CleanR
 
     let topics = load_topics(&stores.pg, &opts).await?;
     report.topics_considered = topics.len();
-    info!(topics = topics.len(), threshold = opts.threshold, "loaded topics for cleanup");
+    info!(
+        topics = topics.len(),
+        threshold = opts.threshold,
+        "loaded topics for cleanup"
+    );
 
     for topic in topics {
         let members = load_members(&stores.pg, topic.topic_id).await?;
@@ -161,23 +165,20 @@ pub async fn clean_outliers(stores: &KbStores, opts: CleanOpts) -> Result<CleanR
             let m = &members[*i];
             remove_chunk_from_vector(&mut new_vec, current_total, &vectors[*i]);
             current_total -= 1.0;
-            sqlx::query(
-                "DELETE FROM kb_topic_chunks WHERE topic_id = $1 AND chunk_id = $2",
-            )
-            .bind(topic.topic_id)
-            .bind(m.chunk_id)
-            .execute(&mut *tx)
-            .await?;
+            sqlx::query("DELETE FROM kb_topic_chunks WHERE topic_id = $1 AND chunk_id = $2")
+                .bind(topic.topic_id)
+                .bind(m.chunk_id)
+                .execute(&mut *tx)
+                .await?;
             report.outliers_removed += 1;
         }
 
         // Refresh chunk_count and vector on the topic.
-        let new_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM kb_topic_chunks WHERE topic_id = $1",
-        )
-        .bind(topic.topic_id)
-        .fetch_one(&mut *tx)
-        .await?;
+        let new_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM kb_topic_chunks WHERE topic_id = $1")
+                .bind(topic.topic_id)
+                .fetch_one(&mut *tx)
+                .await?;
         sqlx::query(
             r#"
             UPDATE kb_topics
@@ -213,7 +214,7 @@ pub async fn clean_outliers(stores: &KbStores, opts: CleanOpts) -> Result<CleanR
 /// If `vec` was computed as `sum / total`, removing one contributor `v`
 /// gives us `(sum - v) / (total - 1)`, which we can compute in place.
 /// `total` is the number of contributors BEFORE removal.
-pub fn remove_chunk_from_vector(vec: &mut Vec<f32>, total: f32, v: &[f32]) {
+pub fn remove_chunk_from_vector(vec: &mut [f32], total: f32, v: &[f32]) {
     debug_assert_eq!(vec.len(), v.len());
     if total <= 1.0 {
         return; // can't reduce below the label-only vector
@@ -288,12 +289,14 @@ async fn load_members(pool: &PgPool, topic_id: Uuid) -> Result<Vec<MemberChunk>,
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(chunk_id, source_title, heading_path, content)| MemberChunk {
-            chunk_id,
-            source_title,
-            heading_path,
-            content,
-        })
+        .map(
+            |(chunk_id, source_title, heading_path, content)| MemberChunk {
+                chunk_id,
+                source_title,
+                heading_path,
+                content,
+            },
+        )
         .collect())
 }
 

@@ -31,14 +31,27 @@ impl Plugin for HindsightOpinionsPlugin {
     }
 
     fn init(&self, ctx: &mut PluginContext) -> Result<(), PluginError> {
-        let default_confidence = ctx.config
+        let default_confidence = ctx
+            .config
             .get("default_confidence")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.5) as f32;
 
-        let reinforce = ctx.config.get("reinforce_alpha").and_then(|v| v.as_f64()).unwrap_or(0.15) as f32;
-        let weaken = -(ctx.config.get("weaken_alpha").and_then(|v| v.as_f64()).unwrap_or(0.10) as f32);
-        let contradict = -(ctx.config.get("contradict_alpha").and_then(|v| v.as_f64()).unwrap_or(0.25) as f32);
+        let reinforce = ctx
+            .config
+            .get("reinforce_alpha")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.15) as f32;
+        let weaken = -(ctx
+            .config
+            .get("weaken_alpha")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.10) as f32);
+        let contradict = -(ctx
+            .config
+            .get("contradict_alpha")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.25) as f32);
 
         let pool: Option<PgPool> = ctx.shared.get::<PgPool>().cloned();
         if pool.is_none() {
@@ -69,19 +82,26 @@ impl Plugin for HindsightOpinionsPlugin {
 
         // Host functions — each calls UPDATE with the pre-computed signed delta
         let pool_r = pool.clone();
-        ctx.register_host_fn("memory.opinion_reinforce", Arc::new(move |args: Vec<Value>, _| {
-            update_opinion(&pool_r, &args, reinforce, "reinforce")
-        }));
+        ctx.register_host_fn(
+            "memory.opinion_reinforce",
+            Arc::new(move |args: Vec<Value>, _| {
+                update_opinion(&pool_r, &args, reinforce, "reinforce")
+            }),
+        );
 
         let pool_w = pool.clone();
-        ctx.register_host_fn("memory.opinion_weaken", Arc::new(move |args: Vec<Value>, _| {
-            update_opinion(&pool_w, &args, weaken, "weaken")
-        }));
+        ctx.register_host_fn(
+            "memory.opinion_weaken",
+            Arc::new(move |args: Vec<Value>, _| update_opinion(&pool_w, &args, weaken, "weaken")),
+        );
 
         let pool_c = pool;
-        ctx.register_host_fn("memory.opinion_contradict", Arc::new(move |args: Vec<Value>, _| {
-            update_opinion(&pool_c, &args, contradict, "contradict")
-        }));
+        ctx.register_host_fn(
+            "memory.opinion_contradict",
+            Arc::new(move |args: Vec<Value>, _| {
+                update_opinion(&pool_c, &args, contradict, "contradict")
+            }),
+        );
 
         Ok(())
     }
@@ -103,13 +123,15 @@ fn update_opinion(
         }));
     };
 
-    let org_id: uuid::Uuid = args.first()
+    let org_id: uuid::Uuid = args
+        .first()
         .and_then(|v| v.as_str())
         .ok_or_else(|| PluginError::HostFunction("org_id required as first arg".into()))?
         .parse()
         .map_err(|e| PluginError::HostFunction(format!("invalid org_id: {e}")))?;
 
-    let key = args.get(1)
+    let key = args
+        .get(1)
         .and_then(|v| v.as_str())
         .ok_or_else(|| PluginError::HostFunction("key required as second arg".into()))?;
 
@@ -135,7 +157,9 @@ fn update_opinion(
             debug!(key, action, confidence, "opinion confidence updated");
             Ok(serde_json::json!({ "key": key, "action": action, "confidence": confidence }))
         }
-        Ok(None) => Ok(serde_json::json!({ "key": key, "action": action, "error": "not found or not an opinion" })),
+        Ok(None) => Ok(
+            serde_json::json!({ "key": key, "action": action, "error": "not found or not an opinion" }),
+        ),
         Err(e) => {
             warn!(key, action, error = %e, "opinion update failed");
             Err(PluginError::HostFunction(format!("DB error: {e}")))
@@ -152,8 +176,10 @@ mod tests {
         let result = update_opinion(
             &None,
             &[Value::String("org".into()), Value::String("key".into())],
-            0.15, "reinforce",
-        ).unwrap();
+            0.15,
+            "reinforce",
+        )
+        .unwrap();
         assert!(result.get("error").is_some());
     }
 }

@@ -20,7 +20,9 @@ use tracing::{info, info_span, warn};
 
 use gw_llm::{Message, OllamaClient};
 use gw_memory::corpus::CorpusSearcher;
-use gw_runtime::{extract_code_blocks, extract_final_answer, json_to_object, AgentError, HostBridge, ReplAgent};
+use gw_runtime::{
+    extract_code_blocks, extract_final_answer, json_to_object, AgentError, HostBridge, ReplAgent,
+};
 
 // -------------------------------------------------------------------------- //
 // Types matching BrowseComp-Plus output format
@@ -221,8 +223,7 @@ impl BenchConfig {
     fn load(path: &str) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read config {path}: {e}"))?;
-        toml::from_str(&content)
-            .map_err(|e| format!("Failed to parse config {path}: {e}"))
+        toml::from_str(&content).map_err(|e| format!("Failed to parse config {path}: {e}"))
     }
 
     pub(crate) fn system_prompt(&self) -> String {
@@ -312,10 +313,10 @@ impl BrowseCompBridge {
             all_docids: docid_tracker,
             total_input_tokens: 0,
             total_output_tokens: 0,
-            max_llm_calls: 25,   // overridden by BenchConfig when used
+            max_llm_calls: 25,    // overridden by BenchConfig when used
             max_search_calls: 20, // overridden by BenchConfig when used
             start_time: std::time::Instant::now(),
-            timeout_secs: 150,    // overridden by BenchConfig when used
+            timeout_secs: 150, // overridden by BenchConfig when used
             timing_bm25_ms: 0,
             timing_embed_ms: 0,
             timing_vector_ms: 0,
@@ -395,7 +396,7 @@ impl BrowseCompBridge {
                     let corpus_hits = match mode_str.as_str() {
                         "vector" => {
                             let t0 = std::time::Instant::now();
-                            let vecs = llm.embed(&[query_str.clone()]).await.map_err(|e| {
+                            let vecs = llm.embed(std::slice::from_ref(&query_str)).await.map_err(|e| {
                                 AgentError::HostFunction {
                                     function: "search".into(),
                                     message: format!("embed error: {e}"),
@@ -415,7 +416,7 @@ impl BrowseCompBridge {
                         }
                         "hybrid" => {
                             let t0 = std::time::Instant::now();
-                            let vecs = llm.embed(&[query_str.clone()]).await.map_err(|e| {
+                            let vecs = llm.embed(std::slice::from_ref(&query_str)).await.map_err(|e| {
                                 AgentError::HostFunction {
                                     function: "search".into(),
                                     message: format!("embed error: {e}"),
@@ -647,14 +648,13 @@ impl BrowseCompBridge {
                     })
                 })?
             }
-            SearchBackend::Native { searcher } => {
-                searcher.get_document(&docid).map_err(|e| {
-                    AgentError::HostFunction {
-                        function: "get_document".into(),
-                        message: format!("{e}"),
-                    }
-                })?.unwrap_or_else(|| format!("[document '{docid}' not found]"))
-            }
+            SearchBackend::Native { searcher } => searcher
+                .get_document(&docid)
+                .map_err(|e| AgentError::HostFunction {
+                    function: "get_document".into(),
+                    message: format!("{e}"),
+                })?
+                .unwrap_or_else(|| format!("[document '{docid}' not found]")),
         };
 
         self.timing_get_doc_ms += t0.elapsed().as_millis() as u64;
@@ -665,12 +665,16 @@ impl BrowseCompBridge {
     fn llm_query(&mut self, prompt: &str) -> Result<Object, AgentError> {
         let t0 = std::time::Instant::now();
         if self.is_timed_out() {
-            return Ok(Object::String("[timeout — provide your best answer now]".into()));
+            return Ok(Object::String(
+                "[timeout — provide your best answer now]".into(),
+            ));
         }
         let count = self.tool_counts.entry("llm_query".into()).or_insert(0);
         *count += 1;
         if *count > self.max_llm_calls {
-            return Ok(Object::String("[llm_query limit reached — provide your best answer now]".into()));
+            return Ok(Object::String(
+                "[llm_query limit reached — provide your best answer now]".into(),
+            ));
         }
 
         let messages = vec![Message {
@@ -681,12 +685,12 @@ impl BrowseCompBridge {
         let model = self.model.clone();
 
         let resp = self.rt.block_on(async {
-            llm.chat(&messages, Some(&model)).await.map_err(|e| {
-                AgentError::HostFunction {
+            llm.chat(&messages, Some(&model))
+                .await
+                .map_err(|e| AgentError::HostFunction {
                     function: "llm_query".into(),
                     message: format!("{e}"),
-                }
-            })
+                })
         })?;
 
         self.total_input_tokens += resp.input_tokens.unwrap_or(0);
@@ -731,11 +735,13 @@ impl BrowseCompBridge {
                     Ok(Ok(resp)) => responses.push(resp),
                     Ok(Err(e)) => responses.push(gw_llm::CompletionResponse {
                         content: format!("[error: {e}]"),
+                        model: None,
                         input_tokens: None,
                         output_tokens: None,
                     }),
                     Err(e) => responses.push(gw_llm::CompletionResponse {
                         content: format!("[error: {e}]"),
+                        model: None,
                         input_tokens: None,
                         output_tokens: None,
                     }),
@@ -755,23 +761,6 @@ impl BrowseCompBridge {
             .collect();
 
         Ok(Object::List(response_strings))
-    }
-
-    /// Log a timing summary for this query.
-    fn log_timing_summary(&self) {
-        let total = self.start_time.elapsed().as_millis() as u64;
-        let accounted = self.timing_bm25_ms + self.timing_embed_ms + self.timing_vector_ms
-            + self.timing_llm_ms + self.timing_get_doc_ms;
-        info!(
-            total_ms = total,
-            bm25_ms = self.timing_bm25_ms,
-            embed_ms = self.timing_embed_ms,
-            vector_ms = self.timing_vector_ms,
-            llm_query_ms = self.timing_llm_ms,
-            get_doc_ms = self.timing_get_doc_ms,
-            other_ms = total.saturating_sub(accounted),
-            "Bridge timing summary"
-        );
     }
 }
 
@@ -856,11 +845,9 @@ impl HostBridge for BrowseCompBridge {
 // Embedded at compile time via include_str! to avoid duplication.
 // -------------------------------------------------------------------------- //
 
-const FACT_REGISTRY_BOOTSTRAP: &str =
-    include_str!("../../../bench/browsecomp/fact_registry.py");
+const FACT_REGISTRY_BOOTSTRAP: &str = include_str!("../../../bench/browsecomp/fact_registry.py");
 
-const ENTITY_SEARCH_BOOTSTRAP: &str =
-    include_str!("../../../bench/browsecomp/entity_search.py");
+const ENTITY_SEARCH_BOOTSTRAP: &str = include_str!("../../../bench/browsecomp/entity_search.py");
 
 // -------------------------------------------------------------------------- //
 // rLM System Prompt & Iteration Prompts
@@ -975,7 +962,12 @@ RULES:
 
 /no_think"#;
 
-pub(crate) fn iteration_prompt(query: &str, iteration: usize, max_iterations: usize, variables_info: &str) -> String {
+pub(crate) fn iteration_prompt(
+    query: &str,
+    iteration: usize,
+    max_iterations: usize,
+    variables_info: &str,
+) -> String {
     let counter = format!("[Iteration {}/{}]", iteration + 1, max_iterations);
 
     if iteration == 0 {
@@ -1042,9 +1034,27 @@ pub(crate) fn final_prompt(query: &str, variables_info: &str) -> String {
 /// Build a summary of REPL variables (DSPy-style metadata preview).
 /// Shows type, length, and a short preview — NOT full content.
 pub(crate) fn build_variables_info(agent: &ReplAgent) -> String {
-    let var_names = ["context", "evidence", "answer", "doc", "doc1", "doc2", "doc3",
-                     "docs", "results", "hits", "response", "info", "data", "text",
-                     "combined", "analysis", "findings", "candidates", "best"];
+    let var_names = [
+        "context",
+        "evidence",
+        "answer",
+        "doc",
+        "doc1",
+        "doc2",
+        "doc3",
+        "docs",
+        "results",
+        "hits",
+        "response",
+        "info",
+        "data",
+        "text",
+        "combined",
+        "analysis",
+        "findings",
+        "candidates",
+        "best",
+    ];
     let mut lines = Vec::new();
     for name in &var_names {
         if let Some(val) = agent.get_variable(name) {
@@ -1078,7 +1088,17 @@ fn describe_value(val: &serde_json::Value) -> (&'static str, usize, String) {
         serde_json::Value::Null => ("null", 0, "None".to_string()),
         serde_json::Value::Object(m) => {
             let keys: Vec<&String> = m.keys().take(5).collect();
-            ("dict", m.len(), format!("{{{}}}", keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")))
+            (
+                "dict",
+                m.len(),
+                format!(
+                    "{{{}}}",
+                    keys.iter()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
         }
     }
 }
@@ -1094,7 +1114,8 @@ pub(crate) fn fallback_extract(
 ) -> (Option<String>, u32, u32) {
     // Build a condensed history for the extraction prompt
     let mut history = String::new();
-    for msg in messages.iter().skip(1) {  // skip system prompt
+    for msg in messages.iter().skip(1) {
+        // skip system prompt
         let role = &msg.role;
         let content_preview: String = msg.content.chars().take(2000).collect();
         history.push_str(&format!("[{role}]: {content_preview}\n\n"));
@@ -1185,16 +1206,11 @@ pub(crate) fn is_refusal_answer(answer: &str) -> bool {
     refusal_phrases.iter().any(|phrase| lower.contains(phrase))
 }
 
-const QUERY_TIMEOUT_SECS: u64 = 180; // 3 minutes max per query (more iterations need more time)
-
 /// Encode a query into ColBERT token vectors via the encode server.
-async fn encode_colbert_query(
-    url: &Option<String>,
-    query: &str,
-) -> Result<Vec<Vec<f32>>, String> {
-    let url = url.as_ref().ok_or_else(|| {
-        "--colbert-encode-url required for ColBERT search".to_string()
-    })?;
+async fn encode_colbert_query(url: &Option<String>, query: &str) -> Result<Vec<Vec<f32>>, String> {
+    let url = url
+        .as_ref()
+        .ok_or_else(|| "--colbert-encode-url required for ColBERT search".to_string())?;
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{url}/encode"))
@@ -1257,22 +1273,20 @@ fn backend_search(
                 vec![]
             }
         }
-        SearchBackend::Native { searcher } => {
-            match searcher.search_bm25_boosted(query, k) {
-                Ok(hits) => hits
-                    .into_iter()
-                    .map(|h| SearchHit {
-                        docid: h.docid,
-                        score: Some(h.score as f64),
-                        snippet: Some(h.text),
-                    })
-                    .collect(),
-                Err(e) => {
-                    tracing::warn!(error = %e, "Native BM25 search failed");
-                    vec![]
-                }
+        SearchBackend::Native { searcher } => match searcher.search_bm25_boosted(query, k) {
+            Ok(hits) => hits
+                .into_iter()
+                .map(|h| SearchHit {
+                    docid: h.docid,
+                    score: Some(h.score as f64),
+                    snippet: Some(h.text),
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "Native BM25 search failed");
+                vec![]
             }
-        }
+        },
     }
 }
 
@@ -1291,11 +1305,18 @@ fn classify_answer_type(
         role: "user".into(),
         content: prompt,
     }];
-    match rt.block_on(async { llm.chat_with_options(&messages, Some(model), Some(false)).await }) {
+    match rt.block_on(async {
+        llm.chat_with_options(&messages, Some(model), Some(false))
+            .await
+    }) {
         Ok(resp) => {
             let answer = strip_think_tags(resp.content.trim()).to_lowercase();
             // Extract just the type word
-            let atype = answer.split_whitespace().next().unwrap_or("other").to_string();
+            let atype = answer
+                .split_whitespace()
+                .next()
+                .unwrap_or("other")
+                .to_string();
             let input = resp.input_tokens.unwrap_or(0);
             let output = resp.output_tokens.unwrap_or(0);
             info!(answer_type = %atype, "Classified answer type");
@@ -1334,7 +1355,10 @@ fn pre_search(
         content: extract_prompt,
     }];
 
-    let resp = match rt.block_on(async { llm.chat_with_options(&messages, Some(model), Some(false)).await }) {
+    let resp = match rt.block_on(async {
+        llm.chat_with_options(&messages, Some(model), Some(false))
+            .await
+    }) {
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "Pre-search LLM call failed");
@@ -1350,8 +1374,12 @@ fn pre_search(
     let mut seen_docids = std::collections::HashSet::new();
     let mut context_text = String::new();
 
-    let queries: Vec<&str> = content.lines()
-        .map(|l| l.trim().trim_start_matches(|c: char| c.is_numeric() || c == '.' || c == '-' || c == ')'))
+    let queries: Vec<&str> = content
+        .lines()
+        .map(|l| {
+            l.trim()
+                .trim_start_matches(|c: char| c.is_numeric() || c == '.' || c == '-' || c == ')')
+        })
         .map(|l| l.trim().trim_matches('"'))
         .filter(|l| !l.is_empty() && l.len() < 100)
         .take(5)
@@ -1375,15 +1403,21 @@ fn pre_search(
         }
     }
 
-    info!(n_hits = all_hits.len(), n_queries = queries.len(), "Pre-search round 1 complete");
+    info!(
+        n_hits = all_hits.len(),
+        n_queries = queries.len(),
+        "Pre-search round 1 complete"
+    );
 
     // --- Pseudo-relevance feedback: extract distinctive terms from top snippets ---
     let prf_terms = {
-        let mut term_freq: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut term_freq: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         for h in all_hits.iter().take(5) {
             let snippet = h["snippet"].as_str().unwrap_or("");
             for word in snippet.split_whitespace() {
-                let clean: String = word.to_lowercase()
+                let clean: String = word
+                    .to_lowercase()
                     .chars()
                     .filter(|c| c.is_alphanumeric())
                     .collect();
@@ -1400,17 +1434,22 @@ fn pre_search(
             .collect();
         term_freq.retain(|t, _| !query_words.contains(t));
         // Remove very common words
-        let stopwords = ["this", "that", "with", "from", "have", "been",
-            "were", "they", "their", "about", "would", "which", "could", "other",
-            "more", "some", "also", "into", "than", "them", "only", "over",
-            "said", "will", "when", "what", "there", "after", "before", "first",
-            "most", "very", "just", "like", "each", "where", "does", "many"];
+        let stopwords = [
+            "this", "that", "with", "from", "have", "been", "were", "they", "their", "about",
+            "would", "which", "could", "other", "more", "some", "also", "into", "than", "them",
+            "only", "over", "said", "will", "when", "what", "there", "after", "before", "first",
+            "most", "very", "just", "like", "each", "where", "does", "many",
+        ];
         let stop_set: std::collections::HashSet<&str> = stopwords.iter().cloned().collect();
         term_freq.retain(|t, _| !stop_set.contains(t.as_str()));
         // Sort by freq, take top 5
         let mut sorted: Vec<(String, usize)> = term_freq.into_iter().collect();
         sorted.sort_by(|a, b| b.1.cmp(&a.1));
-        sorted.into_iter().take(5).map(|(t, _)| t).collect::<Vec<String>>()
+        sorted
+            .into_iter()
+            .take(5)
+            .map(|(t, _)| t)
+            .collect::<Vec<String>>()
     };
 
     if !prf_terms.is_empty() {
@@ -1438,12 +1477,18 @@ fn pre_search(
     // Show the LLM round-1 results. Ask it to:
     // 1. Pick the most relevant docids from round 1
     // 2. Generate 3 new queries for missing information
-    let round1_preview: String = all_hits.iter().enumerate().take(25).map(|(i, h)| {
-        let docid = h["docid"].as_str().unwrap_or("?");
-        let snippet = h["snippet"].as_str().unwrap_or("");
-        let preview: String = snippet.chars().take(200).collect();
-        format!("  {}. [{}] {}", i + 1, docid, preview)
-    }).collect::<Vec<_>>().join("\n");
+    let round1_preview: String = all_hits
+        .iter()
+        .enumerate()
+        .take(25)
+        .map(|(i, h)| {
+            let docid = h["docid"].as_str().unwrap_or("?");
+            let snippet = h["snippet"].as_str().unwrap_or("");
+            let preview: String = snippet.chars().take(200).collect();
+            format!("  {}. [{}] {}", i + 1, docid, preview)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let prf_hint = if !prf_terms.is_empty() {
         format!(
@@ -1476,7 +1521,10 @@ fn pre_search(
     let mut total_input = input_tokens;
     let mut total_output = output_tokens;
 
-    if let Ok(resp2) = rt.block_on(async { llm.chat_with_options(&refine_messages, Some(model), Some(false)).await }) {
+    if let Ok(resp2) = rt.block_on(async {
+        llm.chat_with_options(&refine_messages, Some(model), Some(false))
+            .await
+    }) {
         total_input += resp2.input_tokens.unwrap_or(0);
         total_output += resp2.output_tokens.unwrap_or(0);
         let content2 = strip_think_tags(&resp2.content);
@@ -1489,7 +1537,7 @@ fn pre_search(
         for line in content2.lines() {
             let trimmed = line.trim();
             if trimmed.to_lowercase().starts_with("keep:") {
-                let nums_part = trimmed.splitn(2, ':').nth(1).unwrap_or("");
+                let nums_part = trimmed.split_once(':').map(|x| x.1).unwrap_or("");
                 for num_str in nums_part.split(',') {
                     if let Ok(n) = num_str.trim().parse::<usize>() {
                         if n >= 1 && n <= all_hits.len() {
@@ -1498,7 +1546,12 @@ fn pre_search(
                     }
                 }
             } else if trimmed.to_lowercase().starts_with("search:") {
-                let q = trimmed.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
+                let q = trimmed
+                    .split_once(':')
+                    .map(|x| x.1)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
                 if !q.is_empty() && q.len() < 100 && seen_queries.insert(q.clone()) {
                     new_query_set.push_back(q);
                 }
@@ -1512,7 +1565,8 @@ fn pre_search(
 
         // If we got valid KEEP indices, filter the context
         if !keep_indices.is_empty() && keep_indices.len() <= 15 {
-            let filtered: Vec<serde_json::Value> = keep_indices.iter()
+            let filtered: Vec<serde_json::Value> = keep_indices
+                .iter()
                 .filter_map(|&i| all_hits.get(i).cloned())
                 .collect();
 
@@ -1551,7 +1605,10 @@ fn pre_search(
             }
         }
 
-        info!(n_hits = all_hits.len(), "Pre-search round 2 complete (filtered + new)");
+        info!(
+            n_hits = all_hits.len(),
+            "Pre-search round 2 complete (filtered + new)"
+        );
     }
 
     let span = tracing::Span::current();
@@ -1635,7 +1692,12 @@ fn run_rlm_loop(
                 max_iterations,
             )
         } else {
-            iteration_prompt(query, iteration as usize, max_iterations as usize, &variables_info)
+            iteration_prompt(
+                query,
+                iteration as usize,
+                max_iterations as usize,
+                &variables_info,
+            )
         };
 
         messages.push(Message {
@@ -1664,7 +1726,12 @@ fn run_rlm_loop(
 
         // Strip <think>...</think> blocks (qwen3.5 thinking mode)
         let content = strip_think_tags(resp.content.trim());
-        info!(iteration, len = content.len(), elapsed_s = start_time.elapsed().as_secs(), "LLM response");
+        info!(
+            iteration,
+            len = content.len(),
+            elapsed_s = start_time.elapsed().as_secs(),
+            "LLM response"
+        );
 
         // Add assistant response to conversation
         messages.push(Message {
@@ -1677,7 +1744,11 @@ fn run_rlm_loop(
         if let Some(answer) = extract_final_answer(&content) {
             // Reject refusal answers — force the model to keep trying
             if is_refusal_answer(&answer) {
-                info!(iteration, answer = answer.as_str(), "Rejected refusal answer, continuing");
+                info!(
+                    iteration,
+                    answer = answer.as_str(),
+                    "Rejected refusal answer, continuing"
+                );
                 messages.push(Message {
                     role: "user".into(),
                     content: "Your answer was a refusal (\"unable to determine\" etc). This is NOT allowed. \
@@ -1817,7 +1888,11 @@ fn run_rlm_loop(
                             };
                             // Reject refusal answers from code too
                             if is_refusal_answer(&answer) {
-                                info!(iteration, answer = answer.as_str(), "Rejected refusal FINAL from code");
+                                info!(
+                                    iteration,
+                                    answer = answer.as_str(),
+                                    "Rejected refusal FINAL from code"
+                                );
                                 exec_output.push_str("[Your answer was rejected because it was a refusal. Give a specific answer.]\n");
                             } else {
                                 result_entries.push(ResultEntry {
@@ -1854,7 +1929,11 @@ fn run_rlm_loop(
             role: "assistant".into(),
             content: content.clone(),
             code_blocks: code_blocks.clone(),
-            repl_output: if exec_output.is_empty() { None } else { Some(exec_output.clone()) },
+            repl_output: if exec_output.is_empty() {
+                None
+            } else {
+                Some(exec_output.clone())
+            },
         });
 
         // Feed execution output back to the LLM
@@ -1907,14 +1986,17 @@ fn run_rlm_loop(
     info!("Max iterations reached, attempting fallback extraction");
 
     // Try extracting the best candidate from the FactRegistry
-    let facts_answer = match agent.execute("_bc = facts.best_candidate()\nif _bc:\n    print(_bc[0])") {
-        Ok(result) if !result.stdout.trim().is_empty() && !is_refusal_answer(result.stdout.trim()) => {
-            let ans = result.stdout.trim().to_string();
-            info!(answer = ans.as_str(), "FactRegistry fallback candidate");
-            Some(ans)
-        }
-        _ => None,
-    };
+    let facts_answer =
+        match agent.execute("_bc = facts.best_candidate()\nif _bc:\n    print(_bc[0])") {
+            Ok(result)
+                if !result.stdout.trim().is_empty() && !is_refusal_answer(result.stdout.trim()) =>
+            {
+                let ans = result.stdout.trim().to_string();
+                info!(answer = ans.as_str(), "FactRegistry fallback candidate");
+                Some(ans)
+            }
+            _ => None,
+        };
 
     let (fallback_answer, fb_input, fb_output) = if facts_answer.is_some() {
         (facts_answer, 0, 0)
@@ -2149,7 +2231,8 @@ fn run_single_query(
     let query_start = std::time::Instant::now();
 
     let search_backend = backend;
-    let docid_tracker: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let docid_tracker: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut bridge = BrowseCompBridge::new(
         search_backend.clone(),
         cli.k,
@@ -2196,7 +2279,9 @@ fn run_single_query(
     // Inject context as ouros variable (list of {docid, snippet} dicts)
     let context_obj = json_to_object(serde_json::Value::Array(context_hits.clone()));
     agent.set_variable("context", context_obj).ok();
-    agent.set_variable("answer_type", Object::String(answer_type.clone())).ok();
+    agent
+        .set_variable("answer_type", Object::String(answer_type.clone()))
+        .ok();
 
     // Bootstrap FactRegistry and entity_search into the REPL namespace
     if let Err(e) = agent.execute(FACT_REGISTRY_BOOTSTRAP) {
@@ -2235,8 +2320,12 @@ fn run_single_query(
         let mut agent2 = ReplAgent::new(ext_fns, bridge2_boxed);
         let context_obj2 = json_to_object(serde_json::Value::Array(context_hits));
         agent2.set_variable("context", context_obj2).ok();
-        agent2.set_variable("question", Object::String(query_text.to_string())).ok();
-        agent2.set_variable("answer_type", Object::String(answer_type.clone())).ok();
+        agent2
+            .set_variable("question", Object::String(query_text.to_string()))
+            .ok();
+        agent2
+            .set_variable("answer_type", Object::String(answer_type.clone()))
+            .ok();
         if let Err(e) = agent2.execute(FACT_REGISTRY_BOOTSTRAP) {
             warn!(error = %e, "Failed to bootstrap FactRegistry (conv_loop)");
         }
@@ -2244,10 +2333,26 @@ fn run_single_query(
             warn!(error = %e, "Failed to bootstrap entity_search (conv_loop)");
         }
         conv_loop_runner::run_rlm_loop_v2_with_agent(
-            llm, &cli.model, agent2, query_text, cli.max_turns, rt, &context_text, bench_config,
+            llm,
+            &cli.model,
+            agent2,
+            query_text,
+            cli.max_turns,
+            rt,
+            &context_text,
+            bench_config,
         )
     } else {
-        run_rlm_loop(llm, &cli.model, &mut agent, query_text, cli.max_turns, rt, &context_text, bench_config)
+        run_rlm_loop(
+            llm,
+            &cli.model,
+            &mut agent,
+            query_text,
+            cli.max_turns,
+            rt,
+            &context_text,
+            bench_config,
+        )
     };
     let rlm_ms = rlm_start.elapsed().as_millis() as u64;
     let total_ms = query_start.elapsed().as_millis() as u64;
@@ -2267,7 +2372,7 @@ fn run_single_query(
     );
 
     // Record status and answer on the rlm.question span
-    tracing::Span::current().record("gw.status", &status.as_str());
+    tracing::Span::current().record("gw.status", status.as_str());
 
     // Extract tracking data from the bridge (it was moved into the agent)
     // We need to get it back — for now, count from result entries
@@ -2285,7 +2390,10 @@ fn run_single_query(
         metadata: RunMetadata {
             model: cli.model.clone(),
             llm_backend: cli.llm_backend.clone(),
-            llm_url: cli.llm_url.clone().unwrap_or_else(|| cli.ollama_url.clone()),
+            llm_url: cli
+                .llm_url
+                .clone()
+                .unwrap_or_else(|| cli.ollama_url.clone()),
             searcher: "rlm-ouros".into(),
             max_turns: cli.max_turns,
             k: cli.k,
@@ -2311,7 +2419,10 @@ fn run_single_query(
         termination_reason,
         iterations_used,
         retrieved_docids: {
-            let mut docids = docid_tracker.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let mut docids = docid_tracker
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             docids.sort();
             docids.dedup();
             docids
@@ -2356,7 +2467,10 @@ fn majority_vote(answers: &[String]) -> String {
     let mut candidates: Vec<_> = counts.into_iter().collect();
     candidates.sort_by(|a, b| {
         b.1.cmp(&a.1).then_with(|| {
-            first_seen.get(&a.0).unwrap_or(&0).cmp(first_seen.get(&b.0).unwrap_or(&0))
+            first_seen
+                .get(&a.0)
+                .unwrap_or(&0)
+                .cmp(first_seen.get(&b.0).unwrap_or(&0))
         })
     });
     // Return the original-cased version of the winning answer
@@ -2381,7 +2495,15 @@ fn run_with_voting(
     native_searcher: Option<&Arc<CorpusSearcher>>,
 ) -> RunRecord {
     if n_runs <= 1 {
-        return run_single_query(llm, cli, bench_config, query_text, query_id, rt, native_searcher);
+        return run_single_query(
+            llm,
+            cli,
+            bench_config,
+            query_text,
+            query_id,
+            rt,
+            native_searcher,
+        );
     }
 
     let mut records: Vec<RunRecord> = Vec::with_capacity(n_runs as usize);
@@ -2389,7 +2511,15 @@ fn run_with_voting(
 
     for run_idx in 0..n_runs {
         info!(run = run_idx + 1, total_runs = n_runs, "Best-of-N run");
-        let record = run_single_query(llm, cli, bench_config, query_text, query_id, rt, native_searcher);
+        let record = run_single_query(
+            llm,
+            cli,
+            bench_config,
+            query_text,
+            query_id,
+            rt,
+            native_searcher,
+        );
         if let Some(answer) = extract_answer(&record) {
             answers.push(answer);
         }
@@ -2435,7 +2565,9 @@ fn run_with_voting(
     };
     // Update the final answer to the voted answer
     if let Some(last_entry) = result.result.last_mut() {
-        last_entry.output = Some(serde_json::Value::String(format!("Exact Answer: {voted_answer}")));
+        last_entry.output = Some(serde_json::Value::String(format!(
+            "Exact Answer: {voted_answer}"
+        )));
     }
     result.status = if result.status == "completed" {
         "completed_voted".into()
@@ -2453,8 +2585,7 @@ async fn main() {
         postgres_export: std::env::var("GW_TRACE_POSTGRES").is_ok_and(|v| v == "true" || v == "1"),
         service_name: "gw-bench".into(),
     };
-    gw_trace::init_tracing(&trace_config, None)
-        .expect("Failed to initialize tracing");
+    gw_trace::init_tracing(&trace_config, None).expect("Failed to initialize tracing");
 
     let cli = Cli::parse();
 
@@ -2469,9 +2600,10 @@ async fn main() {
 
     // Handle --build-index: build tantivy corpus index and exit
     if cli.build_index {
-        let jsonl_path = cli.corpus_jsonl.as_deref().expect(
-            "--corpus-jsonl is required with --build-index"
-        );
+        let jsonl_path = cli
+            .corpus_jsonl
+            .as_deref()
+            .expect("--corpus-jsonl is required with --build-index");
         let tantivy_path = PathBuf::from(&cli.tantivy_index);
         info!(jsonl = jsonl_path, out = %tantivy_path.display(), "Building tantivy corpus index");
         let count = CorpusSearcher::build_index(Path::new(jsonl_path), &tantivy_path)
@@ -2482,12 +2614,21 @@ async fn main() {
 
     // Handle --build-passage-index: build passage-level tantivy index and exit
     if cli.build_passage_index {
-        let jsonl_path = cli.corpus_jsonl.as_deref().expect(
-            "--corpus-jsonl is required with --build-passage-index"
+        let jsonl_path = cli
+            .corpus_jsonl
+            .as_deref()
+            .expect("--corpus-jsonl is required with --build-passage-index");
+        let out_path = cli
+            .passage_index
+            .as_deref()
+            .unwrap_or("data/tantivy-passages/");
+        info!(
+            jsonl = jsonl_path,
+            out = out_path,
+            "Building passage-level tantivy index"
         );
-        let out_path = cli.passage_index.as_deref().unwrap_or("data/tantivy-passages/");
-        info!(jsonl = jsonl_path, out = out_path, "Building passage-level tantivy index");
-        let chunk_sizes: Vec<usize> = cli.passage_chunk_bytes
+        let chunk_sizes: Vec<usize> = cli
+            .passage_chunk_bytes
             .split(',')
             .map(|s| s.trim().parse::<usize>().expect("Invalid chunk size"))
             .collect();
@@ -2497,7 +2638,8 @@ async fn main() {
             Path::new(out_path),
             &chunk_sizes,
             cli.passage_overlap_bytes,
-        ).expect("Failed to build passage index");
+        )
+        .expect("Failed to build passage index");
         info!(count, "Passage index built successfully");
         return;
     }
@@ -2570,7 +2712,16 @@ async fn main() {
             );
 
             let record = tokio::task::block_in_place(|| {
-                run_with_voting(&llm, &cli, &bench_config, query_text, Some(qid), &rt, cli.runs, native_ref)
+                run_with_voting(
+                    &llm,
+                    &cli,
+                    &bench_config,
+                    query_text,
+                    Some(qid),
+                    &rt,
+                    cli.runs,
+                    native_ref,
+                )
             });
 
             let ts = Utc::now().format("%Y%m%dT%H%M%SZ");
@@ -2586,7 +2737,16 @@ async fn main() {
         }
     } else {
         let record = tokio::task::block_in_place(|| {
-            run_with_voting(&llm, &cli, &bench_config, &cli.query, cli.query_id.as_deref(), &rt, cli.runs, native_ref)
+            run_with_voting(
+                &llm,
+                &cli,
+                &bench_config,
+                &cli.query,
+                cli.query_id.as_deref(),
+                &rt,
+                cli.runs,
+                native_ref,
+            )
         });
 
         let ts = Utc::now().format("%Y%m%dT%H%M%SZ");

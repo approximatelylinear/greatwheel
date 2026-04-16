@@ -1,19 +1,20 @@
 use serde::{Deserialize, Serialize};
-use tracing;
 
-/// A chat message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message {
-    pub role: String,
-    pub content: String,
-}
+pub use gw_core::{LlmMessage, LlmResponse};
 
-/// LLM completion response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompletionResponse {
-    pub content: String,
-    pub input_tokens: Option<u32>,
-    pub output_tokens: Option<u32>,
+pub type Message = LlmMessage;
+pub type CompletionResponse = LlmResponse;
+
+/// Parse an embedding vector from a JSON array of numbers.
+fn parse_embedding(value: &serde_json::Value) -> Vec<f32> {
+    value
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// LLM inference backend.
@@ -41,7 +42,9 @@ impl std::str::FromStr for LlmBackend {
         match s.to_lowercase().as_str() {
             "ollama" => Ok(LlmBackend::Ollama),
             "sglang" | "vllm" | "openai" => Ok(LlmBackend::Sglang),
-            _ => Err(format!("unknown LLM backend: {s} (expected: ollama, sglang)")),
+            _ => Err(format!(
+                "unknown LLM backend: {s} (expected: ollama, sglang)"
+            )),
         }
     }
 }
@@ -67,7 +70,13 @@ impl OllamaClient {
         default_model: String,
         embedding_model: String,
     ) -> Self {
-        Self::with_backend(proxy_url, direct_url, default_model, embedding_model, LlmBackend::Ollama)
+        Self::with_backend(
+            proxy_url,
+            direct_url,
+            default_model,
+            embedding_model,
+            LlmBackend::Ollama,
+        )
     }
 
     pub fn with_backend(
@@ -154,12 +163,7 @@ impl OllamaClient {
             }
         }
 
-        let resp = self
-            .client
-            .post(self.chat_url())
-            .json(&body)
-            .send()
-            .await?;
+        let resp = self.client.post(self.chat_url()).json(&body).send().await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -188,7 +192,9 @@ impl OllamaClient {
                     .unwrap_or("")
                     .to_string();
                 let input = json["usage"]["prompt_tokens"].as_u64().map(|n| n as u32);
-                let output = json["usage"]["completion_tokens"].as_u64().map(|n| n as u32);
+                let output = json["usage"]["completion_tokens"]
+                    .as_u64()
+                    .map(|n| n as u32);
                 (content, input, output)
             }
         };
@@ -203,6 +209,7 @@ impl OllamaClient {
 
         Ok(CompletionResponse {
             content,
+            model: Some(model.to_string()),
             input_tokens,
             output_tokens,
         })
@@ -257,10 +264,7 @@ impl OllamaClient {
                 let json: serde_json::Value = resp.json().await?;
                 if let Some(embeddings) = json["embeddings"].as_array() {
                     for emb in embeddings {
-                        let vec: Vec<f32> = emb
-                            .as_array()
-                            .map(|a| a.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect())
-                            .unwrap_or_default();
+                        let vec = parse_embedding(emb);
                         if embedding_dim.is_none() && !vec.is_empty() {
                             embedding_dim = Some(vec.len());
                         }
@@ -268,7 +272,7 @@ impl OllamaClient {
                     }
                 }
             } else {
-                // Batch failed — retry individually
+                // Batch failed — retry individually.
                 tracing::warn!(status = %status, "Batch embed failed, retrying individually");
                 for text in batch {
                     let t = if text.len() > RETRY_MAX_CHARS {
@@ -280,30 +284,27 @@ impl OllamaClient {
                         "model": self.embedding_model,
                         "input": [t],
                     });
-                    match self.client.post(&url).json(&body).send().await {
+                    let vec = match self.client.post(&url).json(&body).send().await {
                         Ok(r) if r.status().is_success() => {
                             let json: serde_json::Value = r.json().await?;
-                            if let Some(emb) = json["embeddings"].as_array().and_then(|a| a.first()) {
-                                let vec: Vec<f32> = emb
-                                    .as_array()
-                                    .map(|a| a.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect())
-                                    .unwrap_or_default();
-                                if embedding_dim.is_none() && !vec.is_empty() {
-                                    embedding_dim = Some(vec.len());
-                                }
-                                all_embeddings.push(vec);
-                            } else {
-                                // Zero-vector fallback
-                                let dim = embedding_dim.unwrap_or(768);
-                                tracing::warn!("Using zero-vector fallback for text");
-                                all_embeddings.push(vec![0.0; dim]);
-                            }
+                            json["embeddings"]
+                                .as_array()
+                                .and_then(|a| a.first())
+                                .map(parse_embedding)
+                                .unwrap_or_default()
                         }
                         _ => {
-                            let dim = embedding_dim.unwrap_or(768);
                             tracing::warn!("Single embed failed, using zero-vector fallback");
-                            all_embeddings.push(vec![0.0; dim]);
+                            Vec::new()
                         }
+                    };
+                    if embedding_dim.is_none() && !vec.is_empty() {
+                        embedding_dim = Some(vec.len());
+                    }
+                    if vec.is_empty() {
+                        all_embeddings.push(vec![0.0; embedding_dim.unwrap_or(768)]);
+                    } else {
+                        all_embeddings.push(vec);
                     }
                 }
             }
@@ -311,7 +312,6 @@ impl OllamaClient {
 
         Ok(all_embeddings)
     }
-
 
     /// Streaming chat — returns the raw reqwest Response for line-by-line processing.
     ///

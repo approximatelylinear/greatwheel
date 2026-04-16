@@ -26,6 +26,12 @@ pub struct PluginRegistry {
     capabilities: Vec<String>,
 }
 
+impl Default for PluginRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PluginRegistry {
     pub fn new() -> Self {
         Self::new_with_shared(SharedState::default())
@@ -80,19 +86,18 @@ impl PluginRegistry {
             let config = plugin_configs.get(name).unwrap_or(&empty_config);
             let mut registrations = PluginRegistrations::default();
 
-            let mut ctx = PluginContext::new(
-                config,
-                &mut self.shared,
-                &mut registrations,
-            );
+            let mut ctx = PluginContext::new(config, &mut self.shared, &mut registrations);
 
-            let init_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                plugin.init(&mut ctx)
-            }));
+            let init_result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| plugin.init(&mut ctx)));
 
             match init_result {
                 Ok(Ok(())) => {
-                    info!(plugin = name, version = plugin.version(), "plugin initialized");
+                    info!(
+                        plugin = name,
+                        version = plugin.version(),
+                        "plugin initialized"
+                    );
                 }
                 Ok(Err(e)) => {
                     return Err(PluginError::Init(format!(
@@ -142,9 +147,8 @@ impl PluginRegistry {
     pub fn shutdown(&self) -> Vec<(String, PluginError)> {
         let mut errors = Vec::new();
         for plugin in self.plugins.iter().rev() {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                plugin.shutdown()
-            }));
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| plugin.shutdown()));
             match result {
                 Ok(Ok(())) => {
                     info!(plugin = plugin.name(), "plugin shut down");

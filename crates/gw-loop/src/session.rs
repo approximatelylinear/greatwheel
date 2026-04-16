@@ -138,30 +138,14 @@ impl SessionManager {
         llm_factory: Arc<dyn Fn() -> Box<dyn LlmClient> + Send + Sync>,
         default_config: LoopConfig,
         idle_timeout: Duration,
+        pg_pool: Option<PgPool>,
     ) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
             llm_factory,
             default_config: default_config.into(),
             idle_timeout,
-            pg_pool: None,
-            plugin_router: None,
-        }
-    }
-
-    /// Create a session manager with Postgres persistence.
-    pub fn with_pg(
-        llm_factory: Arc<dyn Fn() -> Box<dyn LlmClient> + Send + Sync>,
-        default_config: LoopConfig,
-        idle_timeout: Duration,
-        pg_pool: PgPool,
-    ) -> Self {
-        Self {
-            sessions: Mutex::new(HashMap::new()),
-            llm_factory,
-            default_config: default_config.into(),
-            idle_timeout,
-            pg_pool: Some(pg_pool),
+            pg_pool,
             plugin_router: None,
         }
     }
@@ -171,11 +155,8 @@ impl SessionManager {
     /// before falling through to its legacy inner bridge.
     ///
     /// Builder-style so server startup can chain:
-    /// `SessionManager::with_pg(...).with_plugin_router(router)`.
-    pub fn with_plugin_router(
-        mut self,
-        router: Arc<gw_engine::HostFnRouter>,
-    ) -> Self {
+    /// `SessionManager::new(...).with_plugin_router(router)`.
+    pub fn with_plugin_router(mut self, router: Arc<gw_engine::HostFnRouter>) -> Self {
         self.plugin_router = Some(router);
         self
     }
@@ -264,39 +245,24 @@ impl SessionManager {
             return Err(LoopError::SessionEnded);
         }
 
-        // Restore REPL from the latest snapshot on the active path.
-        let repl = if let Some(leaf) = tree.active_leaf() {
+        // Restore REPL: try snapshot first, fall back to replaying code.
+        let repl = 'restore: {
+            let Some(leaf) = tree.active_leaf() else {
+                break 'restore ReplAgent::new(vec!["FINAL".into()], Box::new(NullBridge));
+            };
             if let Some(snapshot) = tree.find_latest_snapshot(leaf) {
                 if let Some(raw_bytes) = &snapshot.raw_bytes {
-                    ReplAgent::restore_snapshot(raw_bytes, Box::new(NullBridge))?
-                } else {
-                    // Replay code executions.
-                    let mut repl =
-                        ReplAgent::new(vec!["FINAL".into()], Box::new(NullBridge));
-                    let path = tree.path_to(leaf);
-                    for entry in &path {
-                        if let gw_core::EntryType::CodeExecution { code, .. } =
-                            &entry.entry_type
-                        {
-                            let _ = repl.execute(code);
-                        }
-                    }
-                    repl
+                    break 'restore ReplAgent::restore_snapshot(raw_bytes, Box::new(NullBridge))?;
                 }
-            } else {
-                // No snapshot — replay all code.
-                let mut repl = ReplAgent::new(vec!["FINAL".into()], Box::new(NullBridge));
-                let path = tree.path_to(leaf);
-                for entry in &path {
-                    if let gw_core::EntryType::CodeExecution { code, .. } = &entry.entry_type
-                    {
-                        let _ = repl.execute(code);
-                    }
-                }
-                repl
             }
-        } else {
-            ReplAgent::new(vec!["FINAL".into()], Box::new(NullBridge))
+            // No usable snapshot — replay code executions.
+            let mut repl = ReplAgent::new(vec!["FINAL".into()], Box::new(NullBridge));
+            for entry in &tree.path_to(leaf) {
+                if let gw_core::EntryType::CodeExecution { code, .. } = &entry.entry_type {
+                    let _ = repl.execute(code);
+                }
+            }
+            repl
         };
 
         let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -345,10 +311,7 @@ impl SessionManager {
     }
 
     /// Get the REPL state summary for a session.
-    pub async fn get_repl_state(
-        &self,
-        session_id: SessionId,
-    ) -> Result<String, LoopError> {
+    pub async fn get_repl_state(&self, session_id: SessionId) -> Result<String, LoopError> {
         let session = self.get_session(session_id).await?;
         let inner = session.inner.lock().unwrap();
         let loop_ = inner.as_ref().ok_or(LoopError::SessionEnded)?;

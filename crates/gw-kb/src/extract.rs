@@ -123,12 +123,8 @@ impl Extracted {
             .ok_or_else(|| KbError::Extraction("missing markdown field".into()))?
             .extract()?;
 
-        let title: Option<String> = dict
-            .get_item("title")?
-            .and_then(|v| v.extract().ok());
-        let author: Option<String> = dict
-            .get_item("author")?
-            .and_then(|v| v.extract().ok());
+        let title: Option<String> = dict.get_item("title")?.and_then(|v| v.extract().ok());
+        let author: Option<String> = dict.get_item("author")?.and_then(|v| v.extract().ok());
         let published_raw: Option<String> = dict
             .get_item("published_at")?
             .and_then(|v| v.extract().ok());

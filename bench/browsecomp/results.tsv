@@ -94,3 +94,6 @@ h2h-4096-rerank	0.4333	~12	113430	NEW-BEST	H2H: 4096 passages + doc RRF + rerank
 hierarchical-rerank	0.3333	~12	93185	keep	Hierarchical passages (512-4096) + title metadata + doc RRF + rerank. 10/30 exact, 11/30 fuzzy. Q893 correct! Most efficient (93K tokens).
 colbert-hier-rerank	0.3000	~12	125851	keep	ColBERT retrieval + hier passage snippets (title) + rerank. 9/30 exact, 12/30 fuzzy. Q706 correct.
 colbert-passage-rerank-v2	0.3333	~12	127327	keep	ColBERT retrieval + passage expansion rerank. 10/30 exact, 12/30 fuzzy. Q747 correct. +4 over no expansion.
+gw-kb-search-only	0.2000	~12	56388	keep	gw-kb hybrid search (BM25+vector+topic-membership RRF), search-only prompt. 6/30 exact, 6/30 fuzzy. Gold doc recall 21/30 but only 4/30 read. Apostrophe bug (fixed post-run).
+gw-kb-+topic	0.1333	~12	60008	discard	gw-kb + kb_topic/kb_topics tools. 4/30 exact, 4/30 fuzzy. Topic browsing wastes turns — answer rate dropped from 12/30 to 11/30.
+gw-kb-full	0.0667	~12	67110	discard	gw-kb + kb_topic/kb_topics/kb_explore tools. 2/30 exact, 2/30 fuzzy. Worst variant — agent enters explore loops (q853: 36 kb_topic + 17 kb_explore). Topic summaries contain answers but agent can't extract them.

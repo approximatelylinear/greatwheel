@@ -6,7 +6,6 @@ members = [
     "crates/gw-llm",
     "crates/gw-memory",
     "crates/gw-engine",
-    "crates/gw-scheduler",
     "crates/gw-trace",
     "crates/gw-server",
     "crates/gw-bench",
@@ -22,7 +21,6 @@ gw-runtime = { path = "crates/gw-runtime" }
 gw-llm = { path = "crates/gw-llm" }
 gw-memory = { path = "crates/gw-memory" }
 gw-engine = { path = "crates/gw-engine" }
-gw-scheduler = { path = "crates/gw-scheduler" }
 gw-trace = { path = "crates/gw-trace" }
 gw-server = { path = "crates/gw-server" }
 gw-loop = { path = "crates/gw-loop" }
@@ -69,3 +67,15 @@ tracing = "0.1"
 tracing-opentelemetry = "0.28"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[workspace.lints.rust]
+unused_imports = "deny"
+unused_variables = "deny"
+dead_code = "deny"
+
+[workspace.lints.clippy]
+redundant_closure = "warn"
+manual_split_once = "warn"
+needless_pass_by_value = "warn"
+large_enum_variant = "warn"
+let_unit_value = "warn"

@@ -3181,16 +3181,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gw-scheduler"
-version = "0.1.0"
-dependencies = [
- "gw-core",
- "sqlx",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "gw-server"
 version = "0.1.0"
 dependencies = [
@@ -3204,7 +3194,6 @@ dependencies = [
  "gw-loop",
  "gw-memory",
  "gw-runtime",
- "gw-scheduler",
  "gw-trace",
  "reqwest",
  "serde",

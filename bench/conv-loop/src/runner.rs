@@ -14,7 +14,7 @@ pub fn run_scenario(scenario: &Scenario) -> Vec<AssertionResult> {
     let session_id = SessionId(Uuid::new_v4());
     let mut tree = SessionTree::new(session_id);
 
-    let bridge = Box::new(MockBridge::new());
+    let bridge = Box::new(MockBridge);
     let mut repl = ReplAgent::new(vec!["FINAL".into()], bridge);
 
     let mut results = Vec::new();
@@ -91,10 +91,7 @@ pub fn run_scenario(scenario: &Scenario) -> Vec<AssertionResult> {
                 if let Some(leaf) = tree.active_leaf() {
                     if let Some(snapshot) = tree.find_latest_snapshot(leaf) {
                         if let Some(raw_bytes) = &snapshot.raw_bytes {
-                            match ReplAgent::restore_snapshot(
-                                raw_bytes,
-                                Box::new(NullBridge),
-                            ) {
+                            match ReplAgent::restore_snapshot(raw_bytes, Box::new(NullBridge)) {
                                 Ok(restored) => {
                                     repl = restored;
                                 }

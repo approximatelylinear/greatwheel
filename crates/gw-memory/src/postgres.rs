@@ -7,6 +7,28 @@ use crate::error::MemoryError;
 use crate::fusion::ScoredKey;
 use crate::{MemoryMeta, MemoryScope};
 
+/// sqlx tuple for `get_by_keys_hydrated` rows.
+type MemoryRow = (
+    String,
+    serde_json::Value,
+    String,
+    Option<f32>,
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+    Option<Vec<String>>,
+);
+
+/// Bundled parameters for [`PgMemoryStore::upsert`].
+pub struct UpsertParams<'a> {
+    pub org_id: &'a Uuid,
+    pub user_id: Option<&'a Uuid>,
+    pub agent_id: Option<&'a Uuid>,
+    pub session_id: Option<&'a Uuid>,
+    pub key: &'a str,
+    pub value: &'a serde_json::Value,
+    pub meta: Option<&'a MemoryMeta>,
+}
+
 /// A fully hydrated memory row from Postgres, including Hindsight metadata.
 #[derive(Debug, Clone)]
 pub struct HydratedMemory {
@@ -43,24 +65,16 @@ impl PgMemoryStore {
     }
 
     /// Upsert a memory (INSERT ON CONFLICT UPDATE).
-    pub async fn upsert(
-        &self,
-        org_id: &Uuid,
-        user_id: Option<&Uuid>,
-        agent_id: Option<&Uuid>,
-        session_id: Option<&Uuid>,
-        key: &str,
-        value: &serde_json::Value,
-        meta: Option<&MemoryMeta>,
-    ) -> Result<(), MemoryError> {
-        let text_content = Self::flatten_value(value);
+    pub async fn upsert(&self, params: &UpsertParams<'_>) -> Result<(), MemoryError> {
+        let text_content = Self::flatten_value(params.value);
 
         // Extract metadata fields (default to Fact with no extras)
-        let kind = meta.map(|m| m.kind).unwrap_or_default();
-        let confidence: Option<f32> = meta.and_then(|m| m.confidence);
-        let occurred_at: Option<DateTime<Utc>> = meta.and_then(|m| m.occurred_at);
-        let occurred_end: Option<DateTime<Utc>> = meta.and_then(|m| m.occurred_end);
-        let entities: Option<&[String]> = meta
+        let kind = params.meta.map(|m| m.kind).unwrap_or_default();
+        let confidence: Option<f32> = params.meta.and_then(|m| m.confidence);
+        let occurred_at: Option<DateTime<Utc>> = params.meta.and_then(|m| m.occurred_at);
+        let occurred_end: Option<DateTime<Utc>> = params.meta.and_then(|m| m.occurred_end);
+        let entities: Option<&[String]> = params
+            .meta
             .map(|m| m.entities.as_slice())
             .filter(|e| !e.is_empty());
 
@@ -84,12 +98,12 @@ impl PgMemoryStore {
                 updated_at = now()
             "#,
         )
-        .bind(org_id)
-        .bind(user_id)
-        .bind(agent_id)
-        .bind(session_id)
-        .bind(key)
-        .bind(value)
+        .bind(params.org_id)
+        .bind(params.user_id)
+        .bind(params.agent_id)
+        .bind(params.session_id)
+        .bind(params.key)
+        .bind(params.value)
         .bind(&text_content)
         .bind(kind)
         .bind(confidence)
@@ -113,10 +127,9 @@ impl PgMemoryStore {
         // Build scope filter clause
         let (scope_clause, scope_id): (String, Option<Uuid>) = match scope {
             MemoryScope::Org => (String::new(), None),
-            MemoryScope::User(uid) => (
-                " AND (user_id = $3 OR user_id IS NULL)".into(),
-                Some(uid.0),
-            ),
+            MemoryScope::User(uid) => {
+                (" AND (user_id = $3 OR user_id IS NULL)".into(), Some(uid.0))
+            }
             MemoryScope::Agent(aid) => (
                 " AND (agent_id = $3 OR agent_id IS NULL)".into(),
                 Some(aid.0),
@@ -170,13 +183,12 @@ impl PgMemoryStore {
             return Ok(vec![]);
         }
 
-        let rows: Vec<(String, serde_json::Value)> = sqlx::query_as(
-            "SELECT key, value FROM memories WHERE org_id = $1 AND key = ANY($2)",
-        )
-        .bind(org_id)
-        .bind(keys)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String, serde_json::Value)> =
+            sqlx::query_as("SELECT key, value FROM memories WHERE org_id = $1 AND key = ANY($2)")
+                .bind(org_id)
+                .bind(keys)
+                .fetch_all(&self.pool)
+                .await?;
 
         Ok(rows)
     }
@@ -194,15 +206,7 @@ impl PgMemoryStore {
             return Ok(vec![]);
         }
 
-        let rows: Vec<(
-            String,                   // key
-            serde_json::Value,        // value
-            String,                   // kind (as text)
-            Option<f32>,              // confidence
-            Option<DateTime<Utc>>,    // occurred_at
-            Option<DateTime<Utc>>,    // occurred_end
-            Option<Vec<String>>,      // entities
-        )> = sqlx::query_as(
+        let rows: Vec<MemoryRow> = sqlx::query_as(
             r#"SELECT key, value, kind::text, confidence, occurred_at, occurred_end, entities
                FROM memories WHERE org_id = $1 AND key = ANY($2)"#,
         )
@@ -213,23 +217,25 @@ impl PgMemoryStore {
 
         Ok(rows
             .into_iter()
-            .map(|(key, value, kind_str, confidence, occurred_at, occurred_end, entities)| {
-                let kind = match kind_str.as_str() {
-                    "experience" => MemoryKind::Experience,
-                    "opinion" => MemoryKind::Opinion,
-                    "observation" => MemoryKind::Observation,
-                    _ => MemoryKind::Fact,
-                };
-                HydratedMemory {
-                    key,
-                    value,
-                    kind,
-                    confidence,
-                    occurred_at,
-                    occurred_end,
-                    entities: entities.unwrap_or_default(),
-                }
-            })
+            .map(
+                |(key, value, kind_str, confidence, occurred_at, occurred_end, entities)| {
+                    let kind = match kind_str.as_str() {
+                        "experience" => MemoryKind::Experience,
+                        "opinion" => MemoryKind::Opinion,
+                        "observation" => MemoryKind::Observation,
+                        _ => MemoryKind::Fact,
+                    };
+                    HydratedMemory {
+                        key,
+                        value,
+                        kind,
+                        confidence,
+                        occurred_at,
+                        occurred_end,
+                        entities: entities.unwrap_or_default(),
+                    }
+                },
+            )
             .collect())
     }
 
@@ -243,5 +249,4 @@ impl PgMemoryStore {
 
         Ok(())
     }
-
 }

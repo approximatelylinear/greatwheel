@@ -11,8 +11,13 @@ use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, BoostQuery, Occur, PhraseQuery, QueryParser};
-use tantivy::schema::{Field, Schema, TextFieldIndexing, TextOptions, Value, IndexRecordOption, STORED, STRING};
-use tantivy::tokenizer::{Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, StopWordFilter, TextAnalyzer, TokenStream};
+use tantivy::schema::{
+    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING,
+};
+use tantivy::tokenizer::{
+    Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, StopWordFilter, TextAnalyzer,
+    TokenStream,
+};
 use tantivy::{doc, Index, IndexReader, ReloadPolicy, Term};
 use tracing;
 
@@ -85,7 +90,15 @@ impl CorpusSearcher {
         colbert_lance_path: Option<&str>,
         colbert_table_name: Option<&str>,
     ) -> Result<Self, MemoryError> {
-        Self::open_with_passages(tantivy_path, None, lance_db_path, lance_table_name, colbert_lance_path, colbert_table_name).await
+        Self::open_with_passages(
+            tantivy_path,
+            None,
+            lance_db_path,
+            lance_table_name,
+            colbert_lance_path,
+            colbert_table_name,
+        )
+        .await
     }
 
     /// Open existing tantivy index with optional passage index and LanceDB tables.
@@ -196,9 +209,9 @@ impl CorpusSearcher {
         let query_parser = QueryParser::for_index(&self.index, vec![self.f_text]);
 
         let sanitized = sanitize_query(query);
-        let parsed = query_parser.parse_query(&sanitized).map_err(|e| {
-            MemoryError::Tantivy(format!("query parse error: {e}"))
-        })?;
+        let parsed = query_parser
+            .parse_query(&sanitized)
+            .map_err(|e| MemoryError::Tantivy(format!("query parse error: {e}")))?;
 
         let top_docs = searcher
             .search(&parsed, &TopDocs::with_limit(k))
@@ -206,9 +219,9 @@ impl CorpusSearcher {
 
         let mut hits = Vec::with_capacity(top_docs.len());
         for (score, doc_address) in top_docs {
-            let doc: tantivy::TantivyDocument = searcher.doc(doc_address).map_err(|e| {
-                MemoryError::Tantivy(format!("doc retrieval failed: {e}"))
-            })?;
+            let doc: tantivy::TantivyDocument = searcher
+                .doc(doc_address)
+                .map_err(|e| MemoryError::Tantivy(format!("doc retrieval failed: {e}")))?;
 
             let docid = doc
                 .get_first(self.f_docid)
@@ -248,10 +261,15 @@ impl CorpusSearcher {
     }
 
     /// Extract document fields from a tantivy document address.
-    fn extract_hit(&self, searcher: &tantivy::Searcher, score: f32, doc_address: tantivy::DocAddress) -> Result<CorpusHit, MemoryError> {
-        let doc: tantivy::TantivyDocument = searcher.doc(doc_address).map_err(|e| {
-            MemoryError::Tantivy(format!("doc retrieval failed: {e}"))
-        })?;
+    fn extract_hit(
+        &self,
+        searcher: &tantivy::Searcher,
+        score: f32,
+        doc_address: tantivy::DocAddress,
+    ) -> Result<CorpusHit, MemoryError> {
+        let doc: tantivy::TantivyDocument = searcher
+            .doc(doc_address)
+            .map_err(|e| MemoryError::Tantivy(format!("doc retrieval failed: {e}")))?;
         let docid = doc
             .get_first(self.f_docid)
             .and_then(|v| Value::as_str(&v).map(|s| s.to_string()))
@@ -261,7 +279,11 @@ impl CorpusSearcher {
             .and_then(|v| Value::as_str(&v).map(|s| s.to_string()))
             .unwrap_or_default();
         let snippet: String = text.chars().take(3000).collect();
-        Ok(CorpusHit { docid, text: snippet, score })
+        Ok(CorpusHit {
+            docid,
+            text: snippet,
+            score,
+        })
     }
 
     /// BM25 search with compound boosted query stacking multiple signals:
@@ -269,13 +291,18 @@ impl CorpusSearcher {
     /// 2. Phrase with slop (boost 2.0)
     /// 3. All terms AND'd (boost 1.5)
     /// 4. Individual terms OR'd (boost 1.0, fallback)
-    pub fn search_bm25_boosted(&self, query: &str, k: usize) -> Result<Vec<CorpusHit>, MemoryError> {
+    pub fn search_bm25_boosted(
+        &self,
+        query: &str,
+        k: usize,
+    ) -> Result<Vec<CorpusHit>, MemoryError> {
         let terms = self.tokenize_query(query);
         if terms.is_empty() {
             return Ok(vec![]);
         }
 
-        let tantivy_terms: Vec<Term> = terms.iter()
+        let tantivy_terms: Vec<Term> = terms
+            .iter()
             .map(|t| Term::from_field_text(self.f_text, t))
             .collect();
 
@@ -290,7 +317,8 @@ impl CorpusSearcher {
             ));
 
             // Signal 2: Phrase with slop 2 (boost 2.0) — terms near each other
-            let positioned: Vec<(usize, Term)> = tantivy_terms.iter()
+            let positioned: Vec<(usize, Term)> = tantivy_terms
+                .iter()
                 .enumerate()
                 .map(|(i, t)| (i, t.clone()))
                 .collect();
@@ -301,12 +329,11 @@ impl CorpusSearcher {
             ));
 
             // Signal 3: All terms AND'd together (boost 1.5)
-            let and_clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = tantivy_terms.iter()
+            let and_clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = tantivy_terms
+                .iter()
                 .map(|t| {
-                    let tq = tantivy::query::TermQuery::new(
-                        t.clone(),
-                        IndexRecordOption::WithFreqs,
-                    );
+                    let tq =
+                        tantivy::query::TermQuery::new(t.clone(), IndexRecordOption::WithFreqs);
                     (Occur::Must, Box::new(tq) as Box<dyn tantivy::query::Query>)
                 })
                 .collect();
@@ -319,10 +346,7 @@ impl CorpusSearcher {
 
         // Signal 4: Individual terms OR'd (boost 1.0) — broadest fallback
         for t in &tantivy_terms {
-            let tq = tantivy::query::TermQuery::new(
-                t.clone(),
-                IndexRecordOption::WithFreqs,
-            );
+            let tq = tantivy::query::TermQuery::new(t.clone(), IndexRecordOption::WithFreqs);
             clauses.push((Occur::Should, Box::new(tq)));
         }
 
@@ -362,9 +386,11 @@ impl CorpusSearcher {
             .await?;
 
         let mut hits = Vec::new();
-        while let Some(batch) = stream.try_next().await.map_err(|e| {
-            MemoryError::Embedding(format!("error reading vector results: {e}"))
-        })? {
+        while let Some(batch) = stream
+            .try_next()
+            .await
+            .map_err(|e| MemoryError::Embedding(format!("error reading vector results: {e}")))?
+        {
             let docid_col = batch.column_by_name("docid");
             let text_col = batch.column_by_name("text");
             let dist_col = batch.column_by_name("_distance");
@@ -426,7 +452,9 @@ impl CorpusSearcher {
         // Build a lookup of docid -> text from both result sets
         let mut text_map = std::collections::HashMap::new();
         for h in bm25_hits.iter().chain(vec_hits.iter()) {
-            text_map.entry(h.docid.clone()).or_insert_with(|| h.text.clone());
+            text_map
+                .entry(h.docid.clone())
+                .or_insert_with(|| h.text.clone());
         }
 
         let results: Vec<CorpusHit> = fused
@@ -473,22 +501,25 @@ impl CorpusSearcher {
             .map_err(|e| MemoryError::Embedding(format!("ColBERT search error: {e}")))?;
 
         for token_vec in query_token_vecs.iter().skip(1) {
-            vq = vq.add_query_vector(token_vec.clone())
-                .map_err(|e| MemoryError::Embedding(format!("ColBERT add_query_vector error: {e}")))?;
+            vq = vq.add_query_vector(token_vec.clone()).map_err(|e| {
+                MemoryError::Embedding(format!("ColBERT add_query_vector error: {e}"))
+            })?;
         }
 
         let mut stream = vq
             .column("vector")
-            .nprobes(1)         // Best recall AND fastest for our IVF index
-            .refine_factor(2)   // Post-refine against full-precision vectors
+            .nprobes(1) // Best recall AND fastest for our IVF index
+            .refine_factor(2) // Post-refine against full-precision vectors
             .limit(k)
             .execute()
             .await?;
 
         let mut hits = Vec::new();
-        while let Some(batch) = stream.try_next().await.map_err(|e| {
-            MemoryError::Embedding(format!("error reading ColBERT results: {e}"))
-        })? {
+        while let Some(batch) = stream
+            .try_next()
+            .await
+            .map_err(|e| MemoryError::Embedding(format!("error reading ColBERT results: {e}")))?
+        {
             let docid_col = batch.column_by_name("docid");
             let dist_col = batch.column_by_name("_distance");
 
@@ -505,7 +536,8 @@ impl CorpusSearcher {
 
                         // Look up best passage for this docid (focused snippet)
                         // Falls back to first 3000 chars of doc if no passage index
-                        let text = self.best_passage_for_colbert(&docid, query_text)
+                        let text = self
+                            .best_passage_for_colbert(&docid, query_text)
                             .unwrap_or_else(|| {
                                 self.get_document(&docid)
                                     .ok()
@@ -514,11 +546,7 @@ impl CorpusSearcher {
                                     .unwrap_or_default()
                             });
 
-                        hits.push(CorpusHit {
-                            docid,
-                            text,
-                            score,
-                        });
+                        hits.push(CorpusHit { docid, text, score });
                     }
                 }
             }
@@ -543,11 +571,17 @@ impl CorpusSearcher {
 
         let bm25_keys: Vec<ScoredKey> = bm25_hits
             .iter()
-            .map(|h| ScoredKey { key: h.docid.clone(), score: h.score })
+            .map(|h| ScoredKey {
+                key: h.docid.clone(),
+                score: h.score,
+            })
             .collect();
         let colbert_keys: Vec<ScoredKey> = colbert_hits
             .iter()
-            .map(|h| ScoredKey { key: h.docid.clone(), score: h.score })
+            .map(|h| ScoredKey {
+                key: h.docid.clone(),
+                score: h.score,
+            })
             .collect();
 
         let fused = reciprocal_rank_fusion(&[bm25_keys, colbert_keys], 60);
@@ -555,12 +589,14 @@ impl CorpusSearcher {
         // Build text lookup from both result sets
         let mut text_map = std::collections::HashMap::new();
         for h in bm25_hits.iter().chain(colbert_hits.iter()) {
-            text_map.entry(h.docid.clone()).or_insert_with(|| h.text.clone());
+            text_map
+                .entry(h.docid.clone())
+                .or_insert_with(|| h.text.clone());
         }
 
         let results: Vec<CorpusHit> = fused
             .into_iter()
-            .take(k * 2)  // return more results since both channels contribute
+            .take(k * 2) // return more results since both channels contribute
             .map(|(docid, score)| CorpusHit {
                 text: text_map.remove(&docid).unwrap_or_default(),
                 docid,
@@ -574,13 +610,15 @@ impl CorpusSearcher {
     /// Look up the best matching passage for a docid given a query.
     /// Returns None if no passage index or no matching passage found.
     fn best_passage_for_colbert(&self, docid: &str, query: &str) -> Option<String> {
-        self.passage_index.as_ref()
+        self.passage_index
+            .as_ref()
             .and_then(|pi| pi.best_passage_for_docid(query, docid).ok().flatten())
     }
 
     /// Get ALL passages for a docid (for external reranking).
     pub fn all_passages_for_docid(&self, docid: &str) -> Vec<String> {
-        self.passage_index.as_ref()
+        self.passage_index
+            .as_ref()
             .and_then(|pi| pi.all_passages_for_docid(docid).ok())
             .unwrap_or_default()
     }
@@ -590,19 +628,16 @@ impl CorpusSearcher {
         let searcher = self.reader.searcher();
 
         let term = tantivy::Term::from_field_text(self.f_docid, docid);
-        let query = tantivy::query::TermQuery::new(
-            term,
-            tantivy::schema::IndexRecordOption::Basic,
-        );
+        let query = tantivy::query::TermQuery::new(term, tantivy::schema::IndexRecordOption::Basic);
 
         let top_docs = searcher
             .search(&query, &TopDocs::with_limit(1))
             .map_err(|e| MemoryError::Tantivy(format!("get_document search failed: {e}")))?;
 
         if let Some((_score, doc_address)) = top_docs.first() {
-            let doc: tantivy::TantivyDocument = searcher.doc(*doc_address).map_err(|e| {
-                MemoryError::Tantivy(format!("doc retrieval failed: {e}"))
-            })?;
+            let doc: tantivy::TantivyDocument = searcher
+                .doc(*doc_address)
+                .map_err(|e| MemoryError::Tantivy(format!("doc retrieval failed: {e}")))?;
 
             let text = doc
                 .get_first(self.f_text)
@@ -623,13 +658,11 @@ impl CorpusSearcher {
         let f_text = schema_builder.add_text_field("text", text_field_options());
         let schema = schema_builder.build();
 
-        std::fs::create_dir_all(tantivy_out).map_err(|e| {
-            MemoryError::Tantivy(format!("failed to create output dir: {e}"))
-        })?;
+        std::fs::create_dir_all(tantivy_out)
+            .map_err(|e| MemoryError::Tantivy(format!("failed to create output dir: {e}")))?;
 
-        let index = Index::create_in_dir(tantivy_out, schema).map_err(|e| {
-            MemoryError::Tantivy(format!("failed to create index: {e}"))
-        })?;
+        let index = Index::create_in_dir(tantivy_out, schema)
+            .map_err(|e| MemoryError::Tantivy(format!("failed to create index: {e}")))?;
 
         // Register custom tokenizer so indexing uses stopword removal
         register_tokenizer(&index);
@@ -639,16 +672,14 @@ impl CorpusSearcher {
             .writer(256_000_000)
             .map_err(|e| MemoryError::Tantivy(format!("{e}")))?;
 
-        let file = std::fs::File::open(jsonl_path).map_err(|e| {
-            MemoryError::Tantivy(format!("failed to open JSONL: {e}"))
-        })?;
+        let file = std::fs::File::open(jsonl_path)
+            .map_err(|e| MemoryError::Tantivy(format!("failed to open JSONL: {e}")))?;
         let reader = std::io::BufReader::new(file);
 
         let mut count = 0usize;
         for (line_num, line) in reader.lines().enumerate() {
-            let line = line.map_err(|e| {
-                MemoryError::Tantivy(format!("read error at line {line_num}: {e}"))
-            })?;
+            let line = line
+                .map_err(|e| MemoryError::Tantivy(format!("read error at line {line_num}: {e}")))?;
             if line.trim().is_empty() {
                 continue;
             }
@@ -657,12 +688,12 @@ impl CorpusSearcher {
                 MemoryError::Tantivy(format!("JSON parse error at line {line_num}: {e}"))
             })?;
 
-            let docid = parsed["docid"]
-                .as_str()
-                .ok_or_else(|| MemoryError::Tantivy(format!("missing 'docid' at line {line_num}")))?;
-            let text = parsed["text"]
-                .as_str()
-                .ok_or_else(|| MemoryError::Tantivy(format!("missing 'text' at line {line_num}")))?;
+            let docid = parsed["docid"].as_str().ok_or_else(|| {
+                MemoryError::Tantivy(format!("missing 'docid' at line {line_num}"))
+            })?;
+            let text = parsed["text"].as_str().ok_or_else(|| {
+                MemoryError::Tantivy(format!("missing 'text' at line {line_num}"))
+            })?;
 
             writer
                 .add_document(doc!(
@@ -672,14 +703,14 @@ impl CorpusSearcher {
                 .map_err(|e| MemoryError::Tantivy(format!("add_document failed: {e}")))?;
 
             count += 1;
-            if count % 10_000 == 0 {
+            if count.is_multiple_of(10_000) {
                 tracing::info!(count, "Indexing progress");
             }
         }
 
-        writer.commit().map_err(|e| {
-            MemoryError::Tantivy(format!("commit failed: {e}"))
-        })?;
+        writer
+            .commit()
+            .map_err(|e| MemoryError::Tantivy(format!("commit failed: {e}")))?;
 
         tracing::info!(count, "Corpus tantivy index built");
         Ok(count)
@@ -703,7 +734,9 @@ impl CorpusSearcher {
         let f_text = schema_builder.add_text_field("text", text_field_options());
         let f_granularity = schema_builder.add_u64_field(
             "granularity",
-            tantivy::schema::NumericOptions::default().set_fast().set_stored(),
+            tantivy::schema::NumericOptions::default()
+                .set_fast()
+                .set_stored(),
         );
         let schema = schema_builder.build();
 
@@ -711,26 +744,23 @@ impl CorpusSearcher {
             MemoryError::Tantivy(format!("failed to create passage index dir: {e}"))
         })?;
 
-        let index = Index::create_in_dir(tantivy_out, schema).map_err(|e| {
-            MemoryError::Tantivy(format!("failed to create passage index: {e}"))
-        })?;
+        let index = Index::create_in_dir(tantivy_out, schema)
+            .map_err(|e| MemoryError::Tantivy(format!("failed to create passage index: {e}")))?;
         register_tokenizer(&index);
 
         let mut writer = index
             .writer(256_000_000)
             .map_err(|e| MemoryError::Tantivy(format!("{e}")))?;
 
-        let file = std::fs::File::open(jsonl_path).map_err(|e| {
-            MemoryError::Tantivy(format!("failed to open JSONL: {e}"))
-        })?;
+        let file = std::fs::File::open(jsonl_path)
+            .map_err(|e| MemoryError::Tantivy(format!("failed to open JSONL: {e}")))?;
         let reader = std::io::BufReader::new(file);
 
         let mut passage_count = 0usize;
         let mut doc_count = 0usize;
         for (line_num, line) in reader.lines().enumerate() {
-            let line = line.map_err(|e| {
-                MemoryError::Tantivy(format!("read error at line {line_num}: {e}"))
-            })?;
+            let line = line
+                .map_err(|e| MemoryError::Tantivy(format!("read error at line {line_num}: {e}")))?;
             if line.trim().is_empty() {
                 continue;
             }
@@ -739,12 +769,12 @@ impl CorpusSearcher {
                 MemoryError::Tantivy(format!("JSON parse error at line {line_num}: {e}"))
             })?;
 
-            let docid = parsed["docid"]
-                .as_str()
-                .ok_or_else(|| MemoryError::Tantivy(format!("missing 'docid' at line {line_num}")))?;
-            let text = parsed["text"]
-                .as_str()
-                .ok_or_else(|| MemoryError::Tantivy(format!("missing 'text' at line {line_num}")))?;
+            let docid = parsed["docid"].as_str().ok_or_else(|| {
+                MemoryError::Tantivy(format!("missing 'docid' at line {line_num}"))
+            })?;
+            let text = parsed["text"].as_str().ok_or_else(|| {
+                MemoryError::Tantivy(format!("missing 'text' at line {line_num}"))
+            })?;
 
             // Extract title from YAML frontmatter (first "title: ..." line)
             let title = extract_doc_title(text);
@@ -773,14 +803,14 @@ impl CorpusSearcher {
             }
 
             doc_count += 1;
-            if doc_count % 10_000 == 0 {
+            if doc_count.is_multiple_of(10_000) {
                 tracing::info!(doc_count, passage_count, "Passage indexing progress");
             }
         }
 
-        writer.commit().map_err(|e| {
-            MemoryError::Tantivy(format!("commit failed: {e}"))
-        })?;
+        writer
+            .commit()
+            .map_err(|e| MemoryError::Tantivy(format!("commit failed: {e}")))?;
 
         tracing::info!(
             doc_count,
@@ -814,17 +844,29 @@ impl CorpusSearcher {
     /// Returns deduplicated results from both indexes, ranked by RRF score.
     /// Passage hits that surface documents not in the doc-level top-k are the
     /// key win — they catch answers buried in long documents.
-    pub fn search_with_passages(&self, query: &str, k: usize) -> Result<Vec<CorpusHit>, MemoryError> {
+    pub fn search_with_passages(
+        &self,
+        query: &str,
+        k: usize,
+    ) -> Result<Vec<CorpusHit>, MemoryError> {
         // Doc-level BM25
         let doc_hits = self.search_bm25_boosted(query, k)?;
-        let doc_scored: Vec<ScoredKey> = doc_hits.iter()
-            .map(|h| ScoredKey { key: h.docid.clone(), score: h.score })
+        let doc_scored: Vec<ScoredKey> = doc_hits
+            .iter()
+            .map(|h| ScoredKey {
+                key: h.docid.clone(),
+                score: h.score,
+            })
             .collect();
 
         // Passage-level BM25 (if available)
         let passage_hits = self.search_passages(query, k)?;
-        let passage_scored: Vec<ScoredKey> = passage_hits.iter()
-            .map(|h| ScoredKey { key: h.docid.clone(), score: h.score })
+        let passage_scored: Vec<ScoredKey> = passage_hits
+            .iter()
+            .map(|h| ScoredKey {
+                key: h.docid.clone(),
+                score: h.score,
+            })
             .collect();
 
         if passage_scored.is_empty() {
@@ -871,19 +913,27 @@ impl PassageIndex {
             .map_err(|e: tantivy::TantivyError| MemoryError::Tantivy(format!("{e}")))?;
 
         let schema = index.schema();
-        let f_docid = schema.get_field("docid")
+        let f_docid = schema
+            .get_field("docid")
             .map_err(|e| MemoryError::Tantivy(format!("missing 'docid' field: {e}")))?;
-        let f_text = schema.get_field("text")
+        let f_text = schema
+            .get_field("text")
             .map_err(|e| MemoryError::Tantivy(format!("missing 'text' field: {e}")))?;
 
-        Ok(Self { index, reader, f_docid, f_text })
+        Ok(Self {
+            index,
+            reader,
+            f_docid,
+            f_text,
+        })
     }
 
     fn search(&self, query: &str, k: usize) -> Result<Vec<CorpusHit>, MemoryError> {
         let searcher = self.reader.searcher();
         let query_parser = QueryParser::for_index(&self.index, vec![self.f_text]);
         let sanitized = sanitize_query(query);
-        let parsed = query_parser.parse_query(&sanitized)
+        let parsed = query_parser
+            .parse_query(&sanitized)
             .map_err(|e| MemoryError::Tantivy(format!("passage query parse error: {e}")))?;
 
         // Retrieve more than k to account for dedup by docid
@@ -895,10 +945,12 @@ impl PassageIndex {
         let mut hits = Vec::with_capacity(k);
 
         for (score, doc_address) in top_docs {
-            let doc = searcher.doc::<tantivy::TantivyDocument>(doc_address)
+            let doc = searcher
+                .doc::<tantivy::TantivyDocument>(doc_address)
                 .map_err(|e| MemoryError::Tantivy(format!("doc retrieval failed: {e}")))?;
 
-            let docid = doc.get_first(self.f_docid)
+            let docid = doc
+                .get_first(self.f_docid)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -907,7 +959,8 @@ impl PassageIndex {
                 continue; // Skip duplicates
             }
 
-            let text = doc.get_first(self.f_text)
+            let text = doc
+                .get_first(self.f_text)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -923,7 +976,11 @@ impl PassageIndex {
 
     /// Find the best matching passage for a specific docid given a query.
     /// Returns the passage text, or None if no passage found for that docid.
-    fn best_passage_for_docid(&self, query: &str, docid: &str) -> Result<Option<String>, MemoryError> {
+    fn best_passage_for_docid(
+        &self,
+        query: &str,
+        docid: &str,
+    ) -> Result<Option<String>, MemoryError> {
         let searcher = self.reader.searcher();
 
         // Build a combined query: text matches query AND docid matches exactly
@@ -935,14 +992,15 @@ impl PassageIndex {
         };
 
         let docid_term = Term::from_field_text(self.f_docid, docid);
-        let docid_query = tantivy::query::TermQuery::new(
-            docid_term,
-            tantivy::schema::IndexRecordOption::Basic,
-        );
+        let docid_query =
+            tantivy::query::TermQuery::new(docid_term, tantivy::schema::IndexRecordOption::Basic);
 
         // Both must match: text relevance + correct docid
         let combined = BooleanQuery::new(vec![
-            (Occur::Must, Box::new(docid_query) as Box<dyn tantivy::query::Query>),
+            (
+                Occur::Must,
+                Box::new(docid_query) as Box<dyn tantivy::query::Query>,
+            ),
             (Occur::Must, text_query),
         ]);
 
@@ -951,9 +1009,11 @@ impl PassageIndex {
             .map_err(|e| MemoryError::Tantivy(format!("passage lookup failed: {e}")))?;
 
         if let Some((_score, doc_address)) = top_docs.first() {
-            let doc = searcher.doc::<tantivy::TantivyDocument>(*doc_address)
+            let doc = searcher
+                .doc::<tantivy::TantivyDocument>(*doc_address)
                 .map_err(|e| MemoryError::Tantivy(format!("doc retrieval failed: {e}")))?;
-            let text = doc.get_first(self.f_text)
+            let text = doc
+                .get_first(self.f_text)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -969,10 +1029,8 @@ impl PassageIndex {
         let searcher = self.reader.searcher();
 
         let docid_term = Term::from_field_text(self.f_docid, docid);
-        let docid_query = tantivy::query::TermQuery::new(
-            docid_term,
-            tantivy::schema::IndexRecordOption::Basic,
-        );
+        let docid_query =
+            tantivy::query::TermQuery::new(docid_term, tantivy::schema::IndexRecordOption::Basic);
 
         // Get up to 50 passages per doc (generous limit)
         let top_docs = searcher
@@ -981,9 +1039,11 @@ impl PassageIndex {
 
         let mut passages = Vec::new();
         for (_score, doc_address) in top_docs {
-            let doc = searcher.doc::<tantivy::TantivyDocument>(doc_address)
+            let doc = searcher
+                .doc::<tantivy::TantivyDocument>(doc_address)
                 .map_err(|e| MemoryError::Tantivy(format!("doc retrieval failed: {e}")))?;
-            let text = doc.get_first(self.f_text)
+            let text = doc
+                .get_first(self.f_text)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -1038,7 +1098,8 @@ fn split_into_passages(text: &str, chunk_bytes: usize, overlap_bytes: usize) -> 
         let end = snap_to_char_boundary(text, (start + chunk_bytes).min(text.len()));
 
         // Try to break at a sentence boundary within the last 20% of the chunk
-        let break_zone_start = snap_to_char_boundary(text, (start + (chunk_bytes * 4 / 5)).min(end));
+        let break_zone_start =
+            snap_to_char_boundary(text, (start + (chunk_bytes * 4 / 5)).min(end));
         let actual_end = if end < text.len() {
             let zone = &text[break_zone_start..end];
             zone.rfind(". ")
@@ -1105,7 +1166,11 @@ mod tests {
     fn split_into_multiple_passages() {
         let text = "A".repeat(1200);
         let passages = split_into_passages(&text, 512, 100);
-        assert!(passages.len() >= 2, "should produce multiple passages, got {}", passages.len());
+        assert!(
+            passages.len() >= 2,
+            "should produce multiple passages, got {}",
+            passages.len()
+        );
         // Each passage should be roughly chunk_bytes
         for p in &passages {
             assert!(p.len() <= 600, "passage too long: {}", p.len());
@@ -1127,7 +1192,11 @@ mod tests {
         // Each char here is 2-4 bytes — slicing on arbitrary byte offsets would panic
         let text = "Ünïcödé tëxt wïth äccënts. Más información aquí. 日本語テスト。";
         let passages = split_into_passages(text, 30, 10);
-        assert!(passages.len() >= 2, "should split, got {} passages", passages.len());
+        assert!(
+            passages.len() >= 2,
+            "should split, got {} passages",
+            passages.len()
+        );
         // All passages should be valid UTF-8 (no panic)
         for p in &passages {
             assert!(p.len() <= 50, "passage too long: {} bytes", p.len());
@@ -1142,6 +1211,9 @@ mod tests {
         // With overlap, the second passage should start before the first ends
         // Total coverage should exceed text length
         let total_chars: usize = passages.iter().map(|p| p.len()).sum();
-        assert!(total_chars > text.len(), "overlap should cause total > original");
+        assert!(
+            total_chars > text.len(),
+            "overlap should cause total > original"
+        );
     }
 }

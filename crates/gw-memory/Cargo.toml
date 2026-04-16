@@ -3,6 +3,9 @@ name = "gw-memory"
 version = "0.1.0"
 edition = "2021"
 
+[lints]
+workspace = true
+
 [dependencies]
 gw-core = { workspace = true, features = ["sqlx"] }
 gw-llm = { workspace = true }

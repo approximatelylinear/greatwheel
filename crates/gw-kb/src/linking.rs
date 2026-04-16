@@ -36,6 +36,13 @@ pub struct LinkOpts {
     pub min_cosine: f32,
     /// Drop any edge whose final confidence is below this floor.
     pub min_confidence: f32,
+    /// Optional per-topic fan-out cap. After candidates are collected,
+    /// each topic keeps at most its top-K strongest edges (by
+    /// confidence). The final edge set is the union across topics, so
+    /// the total can exceed `topics × K / 2` only when both endpoints
+    /// of an edge keep it. Bounds blow-up on dense corpora where
+    /// every topic correlates weakly with every other.
+    pub max_per_topic: Option<usize>,
 }
 
 impl Default for LinkOpts {
@@ -44,6 +51,7 @@ impl Default for LinkOpts {
             min_shared_chunks: 2,
             min_cosine: 0.65,
             min_confidence: 0.20,
+            max_per_topic: None,
         }
     }
 }
@@ -97,7 +105,10 @@ pub async fn link(pool: &PgPool, opts: LinkOpts) -> Result<LinkReport, KbError> 
     .fetch_all(pool)
     .await?;
     report.cooccurrence_pairs = cooc_rows.len();
-    info!(pairs = report.cooccurrence_pairs, "co-occurrence candidates");
+    info!(
+        pairs = report.cooccurrence_pairs,
+        "co-occurrence candidates"
+    );
 
     for (from_id, to_id, shared) in cooc_rows {
         let count_a = *chunk_counts.get(&from_id).unwrap_or(&0);
@@ -143,7 +154,35 @@ pub async fn link(pool: &PgPool, opts: LinkOpts) -> Result<LinkReport, KbError> 
     report.embedding_pairs = embed_count;
     info!(pairs = embed_count, "embedding candidates");
 
-    // 5. Insert all edges that pass the confidence floor.
+    // 5. Optional per-topic fan-out cap. For each topic keep its top-K
+    //    edges by confidence; an edge survives if at least one endpoint
+    //    keeps it. Bounds runaway edge counts on dense corpora.
+    if let Some(k) = opts.max_per_topic {
+        #[allow(clippy::type_complexity)]
+        let mut by_topic: HashMap<Uuid, Vec<((Uuid, Uuid), f32)>> = HashMap::new();
+        for (&(a, b), &conf) in edges.iter() {
+            if conf < opts.min_confidence {
+                continue;
+            }
+            by_topic.entry(a).or_default().push(((a, b), conf));
+            by_topic.entry(b).or_default().push(((a, b), conf));
+        }
+        let mut keep: std::collections::HashSet<(Uuid, Uuid)> = std::collections::HashSet::new();
+        for list in by_topic.values_mut() {
+            list.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            for (key, _) in list.iter().take(k) {
+                keep.insert(*key);
+            }
+        }
+        edges.retain(|key, _| keep.contains(key));
+        info!(
+            kept = edges.len(),
+            max_per_topic = k,
+            "applied per-topic fan-out cap"
+        );
+    }
+
+    // 6. Insert all edges that pass the confidence floor.
     let mut written = 0usize;
     for ((from_id, to_id), confidence) in &edges {
         if *confidence < opts.min_confidence {

@@ -127,7 +127,10 @@ pub async fn merge_topics(stores: &KbStores, opts: MergeOpts) -> Result<MergeRep
     if let Some(limit) = opts.limit {
         candidates.truncate(limit);
     }
-    info!(candidates = candidates.len(), "candidate pairs above ask threshold");
+    info!(
+        candidates = candidates.len(),
+        "candidate pairs above ask threshold"
+    );
     report.candidates_considered = candidates.len();
 
     // 3. Load representative chunk excerpts for any topic that might need
@@ -296,12 +299,10 @@ async fn execute_merge(
     .await?;
 
     // 4. Surgical edge cleanup — see module docs.
-    sqlx::query(
-        "DELETE FROM kb_topic_links WHERE from_topic_id = $1 OR to_topic_id = $1",
-    )
-    .bind(loser.topic_id)
-    .execute(&mut *tx)
-    .await?;
+    sqlx::query("DELETE FROM kb_topic_links WHERE from_topic_id = $1 OR to_topic_id = $1")
+        .bind(loser.topic_id)
+        .execute(&mut *tx)
+        .await?;
 
     // 5. Drop the loser. CASCADE removes any leftover kb_topic_chunks rows.
     sqlx::query("DELETE FROM kb_topics WHERE topic_id = $1")
@@ -422,15 +423,7 @@ Output JSON only:
         .await
         .map_err(|e| KbError::Other(format!("llm chat: {e}")))?;
 
-    let stripped = resp.content.trim();
-    let start = stripped.find('{');
-    let end = stripped.rfind('}');
-    let slice = match (start, end) {
-        (Some(s), Some(e)) if e >= s => &stripped[s..=e],
-        _ => return Err(KbError::Other(format!("no JSON: {:?}", resp.content))),
-    };
-    let parsed: ConfirmOutput = serde_json::from_str(slice)
-        .map_err(|e| KbError::Other(format!("json parse: {e}")))?;
+    let parsed: ConfirmOutput = crate::llm_parse::extract_json(&resp.content)?;
     Ok(parsed.merge)
 }
 

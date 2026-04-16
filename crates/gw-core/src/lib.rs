@@ -14,10 +14,26 @@ pub use channel::{ChannelAdapter, TaskChannelAdapter};
 pub use loop_event::LoopEvent;
 pub use plugin::{
     EventData, EventHandler, EventPayload, EventResult, HostFnHandler, HostFnHandlerAsync,
-    HostFnHandlerFn, HostFnRegistration, LifecycleEvent, LlmMessageData, Plugin, PluginContext,
-    PluginError, PluginManifest, PluginRegistrations, SharedState,
+    HostFnHandlerFn, HostFnRegistration, LifecycleEvent, Plugin, PluginContext, PluginError,
+    PluginManifest, PluginRegistrations, SharedState,
 };
 pub use session_tree::{EntryId, EntryType, ReplSnapshotData, SessionEntry, SessionState};
+
+/// A chat message sent to or received from an LLM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmMessage {
+    pub role: String,
+    pub content: String,
+}
+
+/// LLM completion response with token usage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmResponse {
+    pub content: String,
+    pub model: Option<String>,
+    pub input_tokens: Option<u32>,
+    pub output_tokens: Option<u32>,
+}
 
 /// Newtype wrappers for domain IDs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -72,7 +88,11 @@ pub enum AgentSource {
     Bare,
     File(String),
     Inline(String),
-    Git { repo: String, path: String, rev: String },
+    Git {
+        repo: String,
+        path: String,
+        rev: String,
+    },
 }
 
 /// Allowed/denied host function sets for an agent or user.
@@ -122,9 +142,14 @@ pub struct RateLimitConfig {
 /// and synthesized observations.  See `docs/design-hindsight-memory.md` §2.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
-#[cfg_attr(feature = "sqlx", sqlx(type_name = "memory_kind", rename_all = "snake_case"))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "memory_kind", rename_all = "snake_case")
+)]
+#[derive(Default)]
 pub enum MemoryKind {
     /// Objective facts about the external world.
+    #[default]
     Fact,
     /// Agent's own biographical history (first-person).
     Experience,
@@ -133,10 +158,3 @@ pub enum MemoryKind {
     /// Preference-neutral entity summaries synthesized from facts.
     Observation,
 }
-
-impl Default for MemoryKind {
-    fn default() -> Self {
-        Self::Fact
-    }
-}
-

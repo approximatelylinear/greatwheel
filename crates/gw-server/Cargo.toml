@@ -3,6 +3,9 @@ name = "gw-server"
 version = "0.1.0"
 edition = "2021"
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "greatwheel"
 path = "src/main.rs"
@@ -16,7 +19,6 @@ gw-memory = { workspace = true }
 gw-kb = { workspace = true }
 gw-loop = { workspace = true }
 uuid = { workspace = true }
-gw-scheduler = { workspace = true }
 gw-trace = { workspace = true }
 axum = { workspace = true }
 futures = { workspace = true }

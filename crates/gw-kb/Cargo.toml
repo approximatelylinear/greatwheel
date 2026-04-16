@@ -2,8 +2,10 @@
 name = "gw-kb"
 version = "0.1.0"
 edition = "2021"
-
 build = "build.rs"
+
+[lints]
+workspace = true
 
 [lib]
 name = "gw_kb"
@@ -19,6 +21,7 @@ gw-memory = { workspace = true }
 gw-llm = { workspace = true }
 gw-engine = { workspace = true }
 arrow-array = { workspace = true }
+axum = { workspace = true }
 arrow-schema = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }

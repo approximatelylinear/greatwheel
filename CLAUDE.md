@@ -6,7 +6,7 @@ with a Rust core managing memory, routing, and inter-agent communication.
 
 ## Architecture
 See `ARCHITECTURE.md` for the full design. Key points:
-- 9-crate Rust workspace under `crates/`
+- 10-crate Rust workspace under `crates/` + `bench/conv-loop`
 - Postgres for persistence, LanceDB for vector search, tantivy for BM25
 - Ollama (via rl-play proxy) for LLM inference
 - ouros for sandboxed Python agent execution
@@ -16,11 +16,12 @@ See `ARCHITECTURE.md` for the full design. Key points:
 - `gw-runtime` — ouros integration, session management
 - `gw-llm` — LLM provider trait + Ollama client (via rl-play)
 - `gw-memory` — hybrid memory (LanceDB + tantivy BM25 + Postgres)
-- `gw-bus` — inter-agent message bus
-- `gw-channels` — channel adapters (HTTP, WS, etc.)
-- `gw-scheduler` — task queue + rate limiting
+- `gw-engine` — plugin framework, lifecycle events, host function routing
+- `gw-loop` — conversation loop, session management
+- `gw-kb` — knowledge base ingestor and topic graph
 - `gw-trace` — OTel GenAI tracing
 - `gw-server` — binary that wires everything together
+- `gw-bench` — BrowseComp benchmark harness
 
 ## Conventions
 - Use workspace dependencies (define versions in root `Cargo.toml`)
@@ -29,6 +30,10 @@ See `ARCHITECTURE.md` for the full design. Key points:
 - Tracing via the `tracing` crate (not `log`)
 - Database access via `sqlx` with compile-time query checking where possible
 - Prefer `thiserror` for error types when adding error handling
+- `cargo fmt` and `cargo clippy --workspace` must pass before merging
+- Workspace lints: `deny(unused_imports, unused_variables, dead_code)`
+- Exhaustive matches — no `_ => {}` catch-alls on internal enums
+- Extract sqlx result tuples into type aliases for readability
 
 ## Running
 ```bash

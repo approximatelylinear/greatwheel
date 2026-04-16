@@ -30,3 +30,8 @@ lance_data/
 
 # Claude Code
 .claude/
+
+# LaTeX build artifacts
+docs/*.aux
+docs/*.log
+docs/*.out

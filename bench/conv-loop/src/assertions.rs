@@ -19,7 +19,9 @@ pub fn evaluate_assertion(
 ) -> AssertionResult {
     match assertion {
         Assertion::VariableEquals { name, expected } => {
-            let actual = repl.get_variable(name).map(|obj| gw_runtime::object_to_json(&obj));
+            let actual = repl
+                .get_variable(name)
+                .map(|obj| gw_runtime::object_to_json(&obj));
             let passed = match (&actual, expected) {
                 (Some(a), e) => values_approx_equal(a, e),
                 _ => false,
@@ -181,13 +183,16 @@ fn values_approx_equal(a: &serde_json::Value, b: &serde_json::Value) -> bool {
         }
         (serde_json::Value::Array(aa), serde_json::Value::Array(ba)) => {
             aa.len() == ba.len()
-                && aa.iter().zip(ba.iter()).all(|(x, y)| values_approx_equal(x, y))
+                && aa
+                    .iter()
+                    .zip(ba.iter())
+                    .all(|(x, y)| values_approx_equal(x, y))
         }
         (serde_json::Value::Object(ao), serde_json::Value::Object(bo)) => {
             ao.len() == bo.len()
-                && ao.iter().all(|(k, v)| {
-                    bo.get(k).map_or(false, |bv| values_approx_equal(v, bv))
-                })
+                && ao
+                    .iter()
+                    .all(|(k, v)| bo.get(k).is_some_and(|bv| values_approx_equal(v, bv)))
         }
         _ => a == b,
     }

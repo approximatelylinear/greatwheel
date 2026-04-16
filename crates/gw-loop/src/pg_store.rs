@@ -4,6 +4,16 @@ use sqlx::PgPool;
 use tracing::warn;
 use uuid::Uuid;
 
+/// Row type returned when loading session entries from Postgres.
+type EntryRow = (
+    Uuid,
+    Uuid,
+    Option<Uuid>,
+    String,
+    serde_json::Value,
+    DateTime<Utc>,
+);
+
 /// Postgres persistence layer for session tree entries.
 ///
 /// Uses runtime queries (not compile-time checked) following the
@@ -94,18 +104,17 @@ impl PgSessionStore {
         &self,
         session_id: SessionId,
     ) -> Result<Vec<SessionEntry>, sqlx::Error> {
-        let rows: Vec<(Uuid, Uuid, Option<Uuid>, String, serde_json::Value, DateTime<Utc>)> =
-            sqlx::query_as(
-                r#"
+        let rows: Vec<EntryRow> = sqlx::query_as(
+            r#"
                 SELECT id, session_id, parent_id, entry_type, content, created_at
                 FROM session_entries
                 WHERE session_id = $1
                 ORDER BY created_at ASC
                 "#,
-            )
-            .bind(session_id.0)
-            .fetch_all(&self.pool)
-            .await?;
+        )
+        .bind(session_id.0)
+        .fetch_all(&self.pool)
+        .await?;
 
         let mut entries = Vec::with_capacity(rows.len());
         for (id, sid, parent_id, _entry_type_tag, content, created_at) in rows {
@@ -144,15 +153,11 @@ impl PgSessionStore {
     }
 
     /// Delete all entries for a session (used in tests or session cleanup).
-    pub async fn delete_session_entries(
-        &self,
-        session_id: SessionId,
-    ) -> Result<u64, sqlx::Error> {
-        let result =
-            sqlx::query("DELETE FROM session_entries WHERE session_id = $1")
-                .bind(session_id.0)
-                .execute(&self.pool)
-                .await?;
+    pub async fn delete_session_entries(&self, session_id: SessionId) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM session_entries WHERE session_id = $1")
+            .bind(session_id.0)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected())
     }
 }

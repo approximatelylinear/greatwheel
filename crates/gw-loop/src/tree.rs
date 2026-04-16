@@ -67,8 +67,7 @@ impl SessionTree {
         };
 
         if self.flush_cursor < self.entries.len() {
-            let new_entries: Vec<SessionEntry> =
-                self.entries[self.flush_cursor..].to_vec();
+            let new_entries: Vec<SessionEntry> = self.entries[self.flush_cursor..].to_vec();
             pg_store.insert_entries(&new_entries).await?;
             self.flush_cursor = self.entries.len();
         }
@@ -179,11 +178,7 @@ impl SessionTree {
     }
 
     /// Get entries on the branch from `from_leaf` that are NOT on the path to `to_target`.
-    pub fn branch_entries(
-        &self,
-        from_leaf: EntryId,
-        to_target: EntryId,
-    ) -> Vec<&SessionEntry> {
+    pub fn branch_entries(&self, from_leaf: EntryId, to_target: EntryId) -> Vec<&SessionEntry> {
         let target_ancestors: std::collections::HashSet<EntryId> =
             self.ancestor_ids(to_target).into_iter().collect();
         let from_path = self.path_to(from_leaf);

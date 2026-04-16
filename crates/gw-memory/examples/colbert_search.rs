@@ -96,11 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reranker = BlobReranker::open(&args.blob_store).await?;
     eprintln!("  blob store loaded in {:.1}s", t0.elapsed().as_secs_f32());
 
-    let mut store = ColbertStore::new(
-        Arc::new(encoder),
-        Arc::new(retriever),
-        reranker,
-    );
+    let mut store = ColbertStore::new(Arc::new(encoder), Arc::new(retriever), reranker);
     store.first_stage_k = args.first_stage_k;
 
     eprintln!("Ready. Reading queries from stdin (one per line)...");
@@ -126,7 +122,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let first_stage_ms = t_fs.elapsed().as_millis();
 
         let t_rr = Instant::now();
-        let mut scored = store.reranker().rerank(q_tokens.view(), &candidates).await?;
+        let mut scored = store
+            .reranker()
+            .rerank(q_tokens.view(), &candidates)
+            .await?;
         let rerank_ms = t_rr.elapsed().as_millis();
 
         scored.truncate(args.k);
@@ -141,7 +140,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             total_ms,
             results: scored
                 .into_iter()
-                .map(|s| Hit { docid: s.docid, score: s.score })
+                .map(|s| Hit {
+                    docid: s.docid,
+                    score: s.score,
+                })
                 .collect(),
         };
         writeln!(stdout, "{}", serde_json::to_string(&out)?)?;

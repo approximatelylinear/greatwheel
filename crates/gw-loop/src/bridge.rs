@@ -77,7 +77,6 @@ impl ConversationBridge {
     }
 }
 
-
 impl HostBridge for ConversationBridge {
     fn call(
         &mut self,
@@ -151,9 +150,7 @@ impl HostBridge for ConversationBridge {
                 //    async handlers are resolved via block_in_place +
                 //    Handle::current().block_on inside HostFnRouter::dispatch.
                 if let Some(router) = &self.plugin_router {
-                    if let Some(result) =
-                        router.dispatch(function, args.clone(), kwargs.clone())
-                    {
+                    if let Some(result) = router.dispatch(function, args.clone(), kwargs.clone()) {
                         return match result {
                             Ok(value) => Ok(json_to_object(value)),
                             Err(e) => Err(AgentError::HostFunction {

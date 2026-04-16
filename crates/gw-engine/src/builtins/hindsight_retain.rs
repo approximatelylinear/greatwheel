@@ -99,14 +99,19 @@ impl Plugin for HindsightRetainPlugin {
                     Some(Value::Object(m)) => m,
                     _ => serde_json::Map::new(),
                 };
-                m.entry("kind").or_insert_with(|| Value::String(kind.into()));
+                m.entry("kind")
+                    .or_insert_with(|| Value::String(kind.into()));
                 if !entities.is_empty() {
                     m.entry("entities").or_insert_with(|| {
                         Value::Array(entities.iter().map(|e| Value::String(e.clone())).collect())
                     });
                 }
 
-                debug!(kind, entity_count = entities.len(), "hindsight-retain enriched memory");
+                debug!(
+                    kind,
+                    entity_count = entities.len(),
+                    "hindsight-retain enriched memory"
+                );
                 *meta = Some(Value::Object(m));
                 EventResult::Modified
             }),
@@ -118,10 +123,7 @@ impl Plugin for HindsightRetainPlugin {
         ctx.register_host_fn(
             "memory.extract_entities",
             Arc::new(move |args: Vec<Value>, _kwargs: HashMap<String, Value>| {
-                let text = args
-                    .first()
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let text = args.first().and_then(|v| v.as_str()).unwrap_or("");
                 let entities = patterns_for_host.extract(text, max_entities);
                 Ok(Value::Array(
                     entities.into_iter().map(Value::String).collect(),
@@ -158,8 +160,18 @@ impl EntityPatterns {
             proper_nouns: Regex::new(r"[a-z,;:]\s([A-Z][a-z]{2,})\b").unwrap(),
             years: Regex::new(r"\b(1[5-9]\d{2}|20\d{2})\b").unwrap(),
             stopwords: vec![
-                "The", "This", "That", "These", "Those", "However", "Also",
-                "Additionally", "Furthermore", "Moreover", "Therefore", "Because",
+                "The",
+                "This",
+                "That",
+                "These",
+                "Those",
+                "However",
+                "Also",
+                "Additionally",
+                "Furthermore",
+                "Moreover",
+                "Therefore",
+                "Because",
                 "Although",
             ],
         }
@@ -188,12 +200,7 @@ impl EntityPatterns {
         for cap in self.capitalized_phrases.captures_iter(text) {
             if let Some(m) = cap.get(1) {
                 let phrase = m.as_str().trim();
-                if phrase.len() > 3
-                    && !self
-                        .stopwords
-                        .iter()
-                        .any(|&sw| sw == phrase)
-                {
+                if phrase.len() > 3 && !self.stopwords.contains(&phrase) {
                     add(phrase);
                 }
             }
@@ -203,7 +210,7 @@ impl EntityPatterns {
         for cap in self.proper_nouns.captures_iter(text) {
             if let Some(m) = cap.get(1) {
                 let word = m.as_str();
-                if !self.stopwords.iter().any(|&sw| sw == word) {
+                if !self.stopwords.contains(&word) {
                     add(word);
                 }
             }
@@ -236,10 +243,18 @@ fn classify_kind(text: &str) -> &'static str {
     let lower = unquoted.to_lowercase();
 
     // Opinion: first-person belief/preference markers
-    if has_sentence_start(&lower, &[
-        "i think", "i believe", "in my opinion", "i feel that",
-        "i prefer", "i recommend", "i suggest",
-    ]) {
+    if has_sentence_start(
+        &lower,
+        &[
+            "i think",
+            "i believe",
+            "in my opinion",
+            "i feel that",
+            "i prefer",
+            "i recommend",
+            "i suggest",
+        ],
+    ) {
         return "opinion";
     }
     // "seems like" / "it seems" are opinion even without "I"
@@ -252,18 +267,40 @@ fn classify_kind(text: &str) -> &'static str {
     }
 
     // Experience: first-person past actions (at sentence start)
-    if has_sentence_start(&lower, &[
-        "i did", "i found", "i searched", "i discovered", "i tried",
-        "i ran", "i called", "i asked", "i created", "i learned",
-        "we found", "we discovered", "we tried", "we ran",
-    ]) {
+    if has_sentence_start(
+        &lower,
+        &[
+            "i did",
+            "i found",
+            "i searched",
+            "i discovered",
+            "i tried",
+            "i ran",
+            "i called",
+            "i asked",
+            "i created",
+            "i learned",
+            "we found",
+            "we discovered",
+            "we tried",
+            "we ran",
+        ],
+    ) {
         return "experience";
     }
 
     // Observation: label-style prefixes (colon-terminated or sentence-initial)
-    if has_label_prefix(&lower, &[
-        "summary", "observation", "pattern", "note", "key finding", "takeaway",
-    ]) {
+    if has_label_prefix(
+        &lower,
+        &[
+            "summary",
+            "observation",
+            "pattern",
+            "note",
+            "key finding",
+            "takeaway",
+        ],
+    ) {
         return "observation";
     }
     // "in summary" / "to summarize" at sentence start
@@ -299,15 +336,11 @@ fn has_sentence_start(lower: &str, markers: &[&str]) -> bool {
 fn has_label_prefix(lower: &str, labels: &[&str]) -> bool {
     for label in labels {
         // "summary:" or "summary," at start
-        if lower.starts_with(&format!("{label}:"))
-            || lower.starts_with(&format!("{label},"))
-        {
+        if lower.starts_with(&format!("{label}:")) || lower.starts_with(&format!("{label},")) {
             return true;
         }
         // After newline
-        if lower.contains(&format!("\n{label}:"))
-            || lower.contains(&format!("\n{label},"))
-        {
+        if lower.contains(&format!("\n{label}:")) || lower.contains(&format!("\n{label},")) {
             return true;
         }
     }
@@ -378,25 +411,43 @@ mod tests {
 
     #[test]
     fn classify_kind_opinion() {
-        assert_eq!(classify_kind("I think this approach is better than the alternative"), "opinion");
+        assert_eq!(
+            classify_kind("I think this approach is better than the alternative"),
+            "opinion"
+        );
         assert_eq!(classify_kind("I believe the data shows a trend"), "opinion");
         assert_eq!(classify_kind("It seems like the API changed"), "opinion");
-        assert_eq!(classify_kind("First sentence. I recommend using Rust"), "opinion");
+        assert_eq!(
+            classify_kind("First sentence. I recommend using Rust"),
+            "opinion"
+        );
     }
 
     #[test]
     fn classify_kind_opinion_false_positives() {
         // "should" without first-person subject is a fact
-        assert_eq!(classify_kind("The experiment should be run at 20°C"), "fact");
+        assert_eq!(
+            classify_kind("The experiment should be run at 20°C"),
+            "fact"
+        );
         // "probably" embedded in factual text is not enough
-        assert_eq!(classify_kind("The server probably handles 1000 RPS"), "fact");
+        assert_eq!(
+            classify_kind("The server probably handles 1000 RPS"),
+            "fact"
+        );
         // Quoted first-person is not the author's opinion
-        assert_eq!(classify_kind(r#"Einstein said: "I believe in God""#), "fact");
+        assert_eq!(
+            classify_kind(r#"Einstein said: "I believe in God""#),
+            "fact"
+        );
     }
 
     #[test]
     fn classify_kind_experience() {
-        assert_eq!(classify_kind("I found the document in the archive"), "experience");
+        assert_eq!(
+            classify_kind("I found the document in the archive"),
+            "experience"
+        );
         assert_eq!(classify_kind("We discovered a new pattern"), "experience");
         assert_eq!(classify_kind("Done. I searched for the term"), "experience");
     }
@@ -404,16 +455,28 @@ mod tests {
     #[test]
     fn classify_kind_experience_false_positives() {
         // Quoted first-person is attributed speech, not agent experience
-        assert_eq!(classify_kind(r#"The explorer wrote "I found the ruins""#), "fact");
+        assert_eq!(
+            classify_kind(r#"The explorer wrote "I found the ruins""#),
+            "fact"
+        );
         // "found" without "I" subject
         assert_eq!(classify_kind("The team found a bug in production"), "fact");
     }
 
     #[test]
     fn classify_kind_observation() {
-        assert_eq!(classify_kind("Summary: the results show improvement"), "observation");
-        assert_eq!(classify_kind("Key finding: latency dropped 40%"), "observation");
-        assert_eq!(classify_kind("In summary, the approach works"), "observation");
+        assert_eq!(
+            classify_kind("Summary: the results show improvement"),
+            "observation"
+        );
+        assert_eq!(
+            classify_kind("Key finding: latency dropped 40%"),
+            "observation"
+        );
+        assert_eq!(
+            classify_kind("In summary, the approach works"),
+            "observation"
+        );
     }
 
     #[test]

@@ -1,12 +1,4 @@
-use gw_core::{EntryType, SessionEntry};
-use serde::{Deserialize, Serialize};
-
-/// A single message in the LLM prompt.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LlmMessage {
-    pub role: String,
-    pub content: String,
-}
+use gw_core::{EntryType, LlmMessage, SessionEntry};
 
 /// The assembled context for an LLM turn.
 #[derive(Debug, Clone)]
@@ -93,10 +85,7 @@ pub fn build_turn_context_with_opts(
                     content: content.clone(),
                 });
             }
-            EntryType::AssistantMessage {
-                content,
-                model: m,
-            } => {
+            EntryType::AssistantMessage { content, model: m } => {
                 if let Some(m) = m {
                     model = Some(m.clone());
                 }
@@ -105,9 +94,7 @@ pub fn build_turn_context_with_opts(
                     content: content.clone(),
                 });
             }
-            EntryType::CodeExecution {
-                stdout, result, ..
-            } if opts.include_code_output => {
+            EntryType::CodeExecution { stdout, result, .. } if opts.include_code_output => {
                 let output = format_code_output(stdout, result, opts.repl_output_max_chars);
                 if !output.is_empty() {
                     conversation.push(LlmMessage {
@@ -124,7 +111,11 @@ pub fn build_turn_context_with_opts(
             }
             // Skip other entry types (CodeExecution when not include_code_output,
             // HostCall, ReplSnapshot, System, Compaction)
-            _ => {}
+            EntryType::CodeExecution { .. }
+            | EntryType::HostCall { .. }
+            | EntryType::ReplSnapshot(_)
+            | EntryType::Compaction { .. }
+            | EntryType::System(_) => {}
         }
     }
 
@@ -167,11 +158,7 @@ pub fn build_turn_context_with_opts(
 }
 
 /// Format CodeExecution output for inclusion in the LLM prompt.
-fn format_code_output(
-    stdout: &str,
-    result: &serde_json::Value,
-    max_chars: usize,
-) -> String {
+fn format_code_output(stdout: &str, result: &serde_json::Value, max_chars: usize) -> String {
     let mut output = String::new();
 
     if !stdout.is_empty() {

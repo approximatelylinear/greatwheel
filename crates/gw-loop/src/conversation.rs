@@ -1,12 +1,15 @@
-use gw_core::{EntryId, EntryType, LoopEvent, ReplSnapshotData, SessionId};
+use gw_core::{EntryId, EntryType, LlmMessage, LoopEvent, ReplSnapshotData, SessionId};
 use gw_runtime::{extract_code_blocks, HostBridge, ReplAgent};
 use tokio::sync::mpsc;
 use tracing::{info, info_span, warn};
 
-use crate::context::{build_turn_context_with_opts, ContextOptions, LlmMessage};
+use crate::context::{build_turn_context_with_opts, ContextOptions};
 use crate::error::LoopError;
 use crate::llm::LlmClient;
 use crate::tree::SessionTree;
+
+/// Boxed predicate that checks whether a FINAL answer is acceptable.
+type AnswerValidator = Box<dyn Fn(&str) -> bool + Send>;
 
 /// Auto-snapshot policy — when to save REPL state.
 #[derive(Debug, Clone)]
@@ -76,7 +79,7 @@ pub struct LoopConfig {
     /// Optional answer validator. When FINAL is called and this returns
     /// false, the loop continues with a rejection message instead of
     /// returning. Used to reject refusal/hedge answers.
-    pub answer_validator: Option<Box<dyn Fn(&str) -> bool + Send>>,
+    pub answer_validator: Option<AnswerValidator>,
     /// Optional per-iteration callback for benchmark-style coaching.
     pub iteration_callback: Option<Box<dyn IterationCallback>>,
 }
@@ -184,7 +187,7 @@ impl ConversationLoop {
     }
 
     /// Inject a steering message to be included before the next LLM call.
-    pub fn inject_steering(&mut self, content: String) {
+    pub fn inject_steering(&mut self, content: &str) {
         self.pending_steering.push(LlmMessage {
             role: "user".into(),
             content: format!("[Steering] {content}"),
@@ -254,7 +257,10 @@ impl ConversationLoop {
                 }
 
                 // Other events are outbound or handled elsewhere.
-                _ => {}
+                LoopEvent::Response { .. }
+                | LoopEvent::InputRequest(_)
+                | LoopEvent::HostCallCompleted { .. }
+                | LoopEvent::TurnComplete => {}
             }
         }
     }
@@ -304,13 +310,10 @@ impl ConversationLoop {
 
             // 2a. Call iteration callback (if configured) to inject coaching prompts.
             if let Some(callback) = &mut self.config.iteration_callback {
-                if let Some(prompt) = callback.before_iteration(
-                    iterations,
-                    self.config.max_iterations,
-                    &self.repl,
-                ) {
-                    self.tree
-                        .append(EntryType::UserMessage(prompt));
+                if let Some(prompt) =
+                    callback.before_iteration(iterations, self.config.max_iterations, &self.repl)
+                {
+                    self.tree.append(EntryType::UserMessage(prompt));
                 }
             }
 
@@ -443,7 +446,8 @@ impl ConversationLoop {
                         if !validator(&answer) {
                             warn!(answer = %answer, "text FINAL answer rejected by validator");
                             self.tree.append(EntryType::UserMessage(
-                                "That answer was rejected. Please provide a specific answer.".into()
+                                "That answer was rejected. Please provide a specific answer."
+                                    .into(),
                             ));
                             continue; // Skip to next iteration.
                         }
@@ -473,7 +477,11 @@ impl ConversationLoop {
                     span.record("gw.input_tokens", total_input_tokens);
                     span.record("gw.output_tokens", total_output_tokens);
                     span.record("gw.is_final", result.is_final);
-                    info!(is_final = result.is_final, has_follow_up = !self.pending_follow_ups.is_empty(), "turn complete");
+                    info!(
+                        is_final = result.is_final,
+                        has_follow_up = !self.pending_follow_ups.is_empty(),
+                        "turn complete"
+                    );
                     self.flush_tree().await;
                     return Ok(result);
                 }
@@ -497,8 +505,7 @@ impl ConversationLoop {
         span.record("gw.is_final", has_fallback);
         info!(
             is_final = has_fallback,
-            has_fallback,
-            "turn complete (max iterations)"
+            has_fallback, "turn complete (max iterations)"
         );
         self.flush_tree().await;
         Ok(TurnResult {
@@ -610,7 +617,11 @@ impl ConversationLoop {
                     }
                     transcript.push_str(&format!("Result: {result}\n"));
                 }
-                _ => {}
+                EntryType::HostCall { .. }
+                | EntryType::ReplSnapshot(_)
+                | EntryType::Compaction { .. }
+                | EntryType::BranchSummary(_)
+                | EntryType::System(_) => {}
             }
         }
 
@@ -695,7 +706,7 @@ impl ConversationLoop {
 
         if let Some(raw_bytes) = &snapshot_data.raw_bytes {
             self.repl = ReplAgent::restore_snapshot(raw_bytes, Box::new(NullBridge))
-                .map_err(|e| LoopError::Agent(e))?;
+                .map_err(LoopError::Agent)?;
         } else {
             // Slow path: replay code executions from the path.
             let path = self.tree.path_to(entry_id);
@@ -769,10 +780,7 @@ impl ConversationLoop {
             // Only compact if there are enough turns beyond what we keep.
             let keep = self.config.compaction_keep_count as u32;
             if user_turns > keep {
-                info!(
-                    user_turns,
-                    threshold, "auto-compaction triggered"
-                );
+                info!(user_turns, threshold, "auto-compaction triggered");
                 if let Err(e) = self.compact().await {
                     // NothingToCompact is expected if we already compacted recently.
                     if !matches!(e, LoopError::NothingToCompact) {

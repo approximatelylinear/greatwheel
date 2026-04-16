@@ -8,7 +8,7 @@
 //! - Temporal proximity scoring (§2.4.3)
 //! - Recency decay fallback (§2.4.4)
 
-use chrono::{Datelike, DateTime, Duration, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Utc};
 
 /// A resolved temporal range from a query.
 #[derive(Debug, Clone, PartialEq)]
@@ -108,15 +108,20 @@ pub fn recency_score(occurred_at: DateTime<Utc>, now: DateTime<Utc>, sigma_days:
 fn day_range(date: NaiveDate) -> TemporalRange {
     TemporalRange {
         start: date.and_time(NaiveTime::MIN).and_utc(),
-        end: date.succ_opt().unwrap_or(date).and_time(NaiveTime::MIN).and_utc(),
+        end: date
+            .succ_opt()
+            .unwrap_or(date)
+            .and_time(NaiveTime::MIN)
+            .and_utc(),
     }
 }
 
 fn parse_last_n_days(lower: &str) -> Option<i64> {
     for prefix in ["last ", "past "] {
-        if let Some(rest) = lower.strip_prefix(prefix).or_else(|| {
-            lower.find(prefix).map(|i| &lower[i + prefix.len()..])
-        }) {
+        if let Some(rest) = lower
+            .strip_prefix(prefix)
+            .or_else(|| lower.find(prefix).map(|i| &lower[i + prefix.len()..]))
+        {
             let rest = rest.trim_start();
             if let Some(space) = rest.find(' ') {
                 let num_str = &rest[..space];
@@ -137,12 +142,29 @@ const AMBIGUOUS_MONTHS: &[&str] = &["may", "mar", "aug"];
 
 fn parse_month_year(original: &str, lower: &str) -> Option<TemporalRange> {
     let months = [
-        ("january", 1), ("february", 2), ("march", 3), ("april", 4),
-        ("may", 5), ("june", 6), ("july", 7), ("august", 8),
-        ("september", 9), ("october", 10), ("november", 11), ("december", 12),
-        ("jan", 1), ("feb", 2), ("mar", 3), ("apr", 4),
-        ("jun", 6), ("jul", 7), ("aug", 8), ("sep", 9),
-        ("oct", 10), ("nov", 11), ("dec", 12),
+        ("january", 1),
+        ("february", 2),
+        ("march", 3),
+        ("april", 4),
+        ("may", 5),
+        ("june", 6),
+        ("july", 7),
+        ("august", 8),
+        ("september", 9),
+        ("october", 10),
+        ("november", 11),
+        ("december", 12),
+        ("jan", 1),
+        ("feb", 2),
+        ("mar", 3),
+        ("apr", 4),
+        ("jun", 6),
+        ("jul", 7),
+        ("aug", 8),
+        ("sep", 9),
+        ("oct", 10),
+        ("nov", 11),
+        ("dec", 12),
     ];
 
     for (name, month) in months {
@@ -194,14 +216,20 @@ mod tests {
     fn parse_yesterday() {
         let now = utc(2026, 3, 26);
         let range = parse_temporal("What happened yesterday?", now).unwrap();
-        assert_eq!(range.start.date_naive(), NaiveDate::from_ymd_opt(2026, 3, 25).unwrap());
+        assert_eq!(
+            range.start.date_naive(),
+            NaiveDate::from_ymd_opt(2026, 3, 25).unwrap()
+        );
     }
 
     #[test]
     fn parse_today() {
         let now = utc(2026, 3, 26);
         let range = parse_temporal("What did I learn today?", now).unwrap();
-        assert_eq!(range.start.date_naive(), NaiveDate::from_ymd_opt(2026, 3, 26).unwrap());
+        assert_eq!(
+            range.start.date_naive(),
+            NaiveDate::from_ymd_opt(2026, 3, 26).unwrap()
+        );
     }
 
     #[test]
@@ -216,24 +244,42 @@ mod tests {
     fn parse_month_year() {
         let now = utc(2026, 3, 26);
         let range = parse_temporal("What happened in January 2026?", now).unwrap();
-        assert_eq!(range.start, Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap());
-        assert_eq!(range.end, Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap());
+        assert_eq!(
+            range.start,
+            Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()
+        );
+        assert_eq!(
+            range.end,
+            Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap()
+        );
     }
 
     #[test]
     fn parse_last_month() {
         let now = utc(2026, 3, 15);
         let range = parse_temporal("What happened last month?", now).unwrap();
-        assert_eq!(range.start, Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap());
-        assert_eq!(range.end, Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap());
+        assert_eq!(
+            range.start,
+            Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap()
+        );
+        assert_eq!(
+            range.end,
+            Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap()
+        );
     }
 
     #[test]
     fn parse_may_capitalized() {
         let now = utc(2026, 3, 26);
         let range = parse_temporal("What happened in May 2026?", now).unwrap();
-        assert_eq!(range.start, Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap());
-        assert_eq!(range.end, Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap());
+        assert_eq!(
+            range.start,
+            Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap()
+        );
+        assert_eq!(
+            range.end,
+            Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap()
+        );
     }
 
     #[test]
@@ -257,7 +303,10 @@ mod tests {
             end: utc(2026, 3, 31),
         };
         let score = temporal_proximity_score(utc(2026, 3, 15), utc(2026, 3, 16), &query);
-        assert!(score > 0.9, "centered fact should score near 1.0, got {score}");
+        assert!(
+            score > 0.9,
+            "centered fact should score near 1.0, got {score}"
+        );
     }
 
     #[test]
@@ -274,14 +323,19 @@ mod tests {
     fn recency_score_recent() {
         let now = utc(2026, 3, 26);
         let score = recency_score(utc(2026, 3, 25), now, 7.0);
-        assert!(score > 0.8, "1-day-old memory should score high, got {score}");
+        assert!(
+            score > 0.8,
+            "1-day-old memory should score high, got {score}"
+        );
     }
 
     #[test]
     fn recency_score_old() {
         let now = utc(2026, 3, 26);
         let score = recency_score(utc(2026, 1, 1), now, 7.0);
-        assert!(score < 0.01, "3-month-old memory should score near 0, got {score}");
+        assert!(
+            score < 0.01,
+            "3-month-old memory should score near 0, got {score}"
+        );
     }
-
 }

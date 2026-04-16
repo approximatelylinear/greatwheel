@@ -100,8 +100,9 @@ impl CandleColbertEncoder {
         // ColBERT projection head — separate file in 1_Dense/
         let dense_path = dir.join("1_Dense").join("model.safetensors");
         let vb_dense = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[dense_path], DType::F32, &device)
-                .map_err(|e| MemoryError::Embedding(format!("load 1_Dense/model.safetensors: {e}")))?
+            VarBuilder::from_mmaped_safetensors(&[dense_path], DType::F32, &device).map_err(
+                |e| MemoryError::Embedding(format!("load 1_Dense/model.safetensors: {e}")),
+            )?
         };
         // The dense head is stored as `linear.weight` in sentence-transformers checkpoints.
         // candle's `linear_no_bias` expects the weight under the `vb` root, so we pp into "linear".
@@ -136,9 +137,9 @@ impl CandleColbertEncoder {
         repo.get("model.safetensors")
             .await
             .map_err(|e| MemoryError::Embedding(format!("download model.safetensors: {e}")))?;
-        repo.get("1_Dense/model.safetensors")
-            .await
-            .map_err(|e| MemoryError::Embedding(format!("download 1_Dense/model.safetensors: {e}")))?;
+        repo.get("1_Dense/model.safetensors").await.map_err(|e| {
+            MemoryError::Embedding(format!("download 1_Dense/model.safetensors: {e}"))
+        })?;
 
         // The downloaded files share a parent directory in the cache.
         let dir: PathBuf = config

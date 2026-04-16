@@ -235,7 +235,12 @@ fn atomize(chars: &[char], target: usize, overlap: usize) -> Vec<Range> {
 /// `chars[first_atom.start..last_atom.end]`. Atoms need not be contiguous —
 /// the slice naturally captures any gap chars (e.g. paragraph-separating
 /// `\n\n`) between them. The bound is on slice length, not atom-sum length.
-fn pack_atoms(chars: &[char], atoms: &[Range], base_offset: usize, target: usize) -> Vec<(String, usize)> {
+fn pack_atoms(
+    chars: &[char],
+    atoms: &[Range],
+    base_offset: usize,
+    target: usize,
+) -> Vec<(String, usize)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < atoms.len() {
@@ -288,7 +293,10 @@ fn paragraph_ranges(chars: &[char]) -> Vec<Range> {
     }
 
     if start < chars.len() && chars[start..].iter().any(|c| !c.is_whitespace()) {
-        out.push(Range { start, end: chars.len() });
+        out.push(Range {
+            start,
+            end: chars.len(),
+        });
     }
     out
 }
@@ -311,7 +319,10 @@ fn sentence_ranges(chars: &[char], start: usize, end: usize) -> Vec<Range> {
         if is_terminal {
             let sent_end = i + 1; // include the punctuation
             if s < sent_end {
-                out.push(Range { start: s, end: sent_end });
+                out.push(Range {
+                    start: s,
+                    end: sent_end,
+                });
             }
             // Advance past the whitespace that separates sentences so the
             // next sentence's range starts on its first non-whitespace char.
@@ -487,9 +498,11 @@ mod tests {
             );
         }
         // The subsection chunk should have both headings in scope
-        let sub = chunks
-            .iter()
-            .find(|c| c.heading_path.last().is_some_and(|s| s.contains("Subsection")));
+        let sub = chunks.iter().find(|c| {
+            c.heading_path
+                .last()
+                .is_some_and(|s| s.contains("Subsection"))
+        });
         assert!(sub.is_some(), "no subsection chunk found");
         let path = &sub.unwrap().heading_path;
         assert_eq!(path.len(), 2);
@@ -507,7 +520,11 @@ mod tests {
         }
         md.push('\n');
         let chunks = chunk_markdown(&md, ChunkOpts::default());
-        assert!(chunks.len() > 1, "expected multiple chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() > 1,
+            "expected multiple chunks, got {}",
+            chunks.len()
+        );
         for c in &chunks {
             assert!(
                 c.char_length <= DEFAULT_TARGET_CHARS + DEFAULT_OVERLAP_CHARS,
@@ -527,7 +544,11 @@ mod tests {
             md.push_str("\n\n");
         }
         let chunks = chunk_markdown(&md, ChunkOpts::default());
-        assert!(chunks.len() > 1, "expected multiple chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() > 1,
+            "expected multiple chunks, got {}",
+            chunks.len()
+        );
         for c in &chunks {
             assert!(
                 c.char_length <= DEFAULT_TARGET_CHARS + DEFAULT_OVERLAP_CHARS * 2,

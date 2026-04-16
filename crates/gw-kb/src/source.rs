@@ -9,6 +9,18 @@ use uuid::Uuid;
 use crate::error::KbError;
 use crate::extract::Extracted;
 
+/// sqlx tuple for `list_sources` rows.
+type SourceListRow = (
+    Uuid,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+    i64,
+);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
     pub source_id: Uuid,
@@ -182,9 +194,8 @@ pub struct SourceSummary {
 
 /// List all sources, newest first, with chunk counts.
 pub async fn list_sources(pool: &PgPool, limit: i64) -> Result<Vec<SourceSummary>, KbError> {
-    let rows: Vec<(Uuid, String, Option<String>, Option<String>, String, DateTime<Utc>, Option<DateTime<Utc>>, i64)> =
-        sqlx::query_as(
-            r#"
+    let rows: Vec<SourceListRow> = sqlx::query_as(
+        r#"
             SELECT s.source_id,
                    s.title,
                    s.url,
@@ -202,10 +213,10 @@ pub async fn list_sources(pool: &PgPool, limit: i64) -> Result<Vec<SourceSummary
             ORDER BY s.ingested_at DESC
             LIMIT $1
             "#,
-        )
-        .bind(limit)
-        .fetch_all(pool)
-        .await?;
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
 
     Ok(rows
         .into_iter()

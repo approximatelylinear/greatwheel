@@ -2,10 +2,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use gw_core::{EntryType, SessionId};
-use gw_loop::context::LlmMessage;
+use gw_core::{EntryType, LlmMessage, LlmResponse, SessionId};
 use gw_loop::error::LoopError;
-use gw_loop::llm::{LlmClient, LlmResponse};
+use gw_loop::llm::LlmClient;
 use gw_loop::{ConversationLoop, LoopConfig, SnapshotPolicy};
 use gw_runtime::{AgentError, HostBridge, ReplAgent};
 use ouros::Object;
@@ -196,7 +195,7 @@ async fn test_steering_injection() {
         seen: seen_clone.clone(),
         responses: Arc::new(Mutex::new(vec![
             "```python\nx = 1\n```".into(), // iter 1: no FINAL, loops
-            "FINAL(\"done\")".into(),        // iter 2: ends
+            "FINAL(\"done\")".into(),       // iter 2: ends
         ])),
     });
 
@@ -206,7 +205,7 @@ async fn test_steering_injection() {
     let mut loop_ = ConversationLoop::new(session_id, repl, llm, config, event_tx);
 
     // Inject steering before the turn starts — it should appear in the 2nd LLM call.
-    loop_.inject_steering("Focus on auth".into());
+    loop_.inject_steering("Focus on auth");
 
     let _result = loop_.handle_turn("Analyze code").await.unwrap();
 
@@ -393,10 +392,7 @@ async fn test_branch_switch_restores_state() {
     assert_eq!(x, Some(serde_json::json!(100)));
 
     // Switch back to the branch point.
-    loop_
-        .switch_branch(branch_point, true)
-        .await
-        .unwrap();
+    loop_.switch_branch(branch_point, true).await.unwrap();
 
     // x should be restored to 1 (from the snapshot at turn 2).
     let x = loop_
@@ -489,11 +485,8 @@ async fn test_channel_ask_reply() {
     // Create a bridge with ask support.
     let ask_handle = gw_loop::bridge::new_ask_handle();
 
-    let conv_bridge = gw_loop::bridge::ConversationBridge::new(
-        event_tx.clone(),
-        ask_handle.clone(),
-        None,
-    );
+    let conv_bridge =
+        gw_loop::bridge::ConversationBridge::new(event_tx.clone(), ask_handle.clone(), None);
 
     let repl = ReplAgent::new(
         vec!["FINAL".into(), "ask_user".into()],
@@ -646,11 +639,7 @@ async fn test_plugin_router_dispatch_sync_and_async() {
 
     // A function that isn't in the router falls through to UnknownFunction
     // because there's no inner bridge configured.
-    let result = bridge.call(
-        "test.missing",
-        vec![],
-        HashMap::new(),
-    );
+    let result = bridge.call("test.missing", vec![], HashMap::new());
     match result {
         Err(AgentError::UnknownFunction(name)) => assert_eq!(name, "test.missing"),
         other => panic!("expected UnknownFunction error, got {:?}", other),

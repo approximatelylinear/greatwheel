@@ -5,9 +5,7 @@ use axum::{
     },
     response::IntoResponse,
 };
-use gw_core::LoopEvent;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::AppState;
@@ -58,10 +56,7 @@ enum WsOutbound {
 }
 
 /// WebSocket upgrade handler. Creates a session on connect.
-pub async fn ws_session(
-    ws: WebSocketUpgrade,
-    State(app): State<AppState>,
-) -> impl IntoResponse {
+pub async fn ws_session(ws: WebSocketUpgrade, State(app): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws_session(socket, app))
 }
 
@@ -104,13 +99,7 @@ async fn handle_ws_session(socket: WebSocket, app: AppState) {
                 let text_str: &str = &text;
                 match serde_json::from_str::<WsInbound>(text_str) {
                     Ok(inbound) => {
-                        handle_inbound(
-                            &app,
-                            session_id,
-                            inbound,
-                            out_tx.clone(),
-                        )
-                        .await;
+                        handle_inbound(&app, session_id, inbound, out_tx.clone()).await;
                     }
                     Err(e) => {
                         let _ = out_tx.send(WsOutbound::Error {
@@ -150,9 +139,7 @@ async fn handle_inbound(
                 match result {
                     Ok(turn_result) => {
                         let _ = out.send(WsOutbound::Response {
-                            content: turn_result
-                                .response
-                                .unwrap_or_default(),
+                            content: turn_result.response.unwrap_or_default(),
                             is_final: turn_result.is_final,
                             iterations: turn_result.iterations,
                             input_tokens: turn_result.input_tokens,
@@ -208,20 +195,16 @@ async fn handle_inbound(
             }
         }
 
-        WsInbound::GetState => {
-            match app.session_mgr.get_repl_state(session_id).await {
-                Ok(state) => {
-                    let _ = out_tx.send(WsOutbound::State {
-                        repl_state: state,
-                    });
-                }
-                Err(e) => {
-                    let _ = out_tx.send(WsOutbound::Error {
-                        message: e.to_string(),
-                    });
-                }
+        WsInbound::GetState => match app.session_mgr.get_repl_state(session_id).await {
+            Ok(state) => {
+                let _ = out_tx.send(WsOutbound::State { repl_state: state });
             }
-        }
+            Err(e) => {
+                let _ = out_tx.send(WsOutbound::Error {
+                    message: e.to_string(),
+                });
+            }
+        },
     }
 }
 

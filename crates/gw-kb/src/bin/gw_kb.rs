@@ -23,14 +23,10 @@ use gw_kb::linking::{
 };
 use gw_kb::merge::{merge_topics, MergeOpts};
 use gw_kb::organize::{organize, OrganizeOpts};
-use gw_kb::synthesize::{fetch_summary, synthesize_topics, SynthesizeOpts};
 use gw_kb::search::hybrid_search;
-use gw_kb::source::{
-    fetch_source, list_chunks_for_source, list_sources, resolve_source_id,
-};
-use gw_kb::topics::{
-    fetch_topic_by_slug, list_chunks_for_topic, list_topic_summaries,
-};
+use gw_kb::source::{fetch_source, list_chunks_for_source, list_sources, resolve_source_id};
+use gw_kb::synthesize::{fetch_summary, synthesize_topics, SynthesizeOpts};
+use gw_kb::topics::{fetch_topic_by_slug, list_chunks_for_topic, list_topic_summaries};
 use gw_kb::KbError;
 
 #[derive(Parser, Debug)]
@@ -41,26 +37,51 @@ struct Cli {
     database_url: Option<String>,
 
     /// LanceDB directory.
-    #[arg(long, global = true, env = "GW_KB_LANCE_PATH", default_value = "data/kb-lancedb")]
+    #[arg(
+        long,
+        global = true,
+        env = "GW_KB_LANCE_PATH",
+        default_value = "data/kb-lancedb"
+    )]
     lance_path: String,
 
     /// Tantivy index directory.
-    #[arg(long, global = true, env = "GW_KB_TANTIVY_PATH", default_value = "data/kb-tantivy")]
+    #[arg(
+        long,
+        global = true,
+        env = "GW_KB_TANTIVY_PATH",
+        default_value = "data/kb-tantivy"
+    )]
     tantivy_path: String,
 
     /// Ollama base URL (used for embeddings).
-    #[arg(long, global = true, env = "OLLAMA_URL", default_value = "http://localhost:11434")]
+    #[arg(
+        long,
+        global = true,
+        env = "OLLAMA_URL",
+        default_value = "http://localhost:11434"
+    )]
     ollama_url: String,
 
     /// Embedding model identifier. Passed to sentence-transformers (loaded
     /// in-process via PyO3, NOT through Ollama — Ollama's nomic wrapper is
     /// broken on short label inputs).
-    #[arg(long, global = true, env = "GW_KB_EMBEDDING_MODEL", default_value = "nomic-ai/nomic-embed-text-v1.5")]
+    #[arg(
+        long,
+        global = true,
+        env = "GW_KB_EMBEDDING_MODEL",
+        default_value = "nomic-ai/nomic-embed-text-v1.5"
+    )]
     embedding_model: String,
 
     /// Embedding dimension (must match the model).
     /// 768 for nomic-embed-text-v1.5, 1024 for mxbai-embed-large / bge-m3.
-    #[arg(long, global = true, env = "GW_KB_EMBEDDING_DIM", default_value_t = 768)]
+    #[arg(
+        long,
+        global = true,
+        env = "GW_KB_EMBEDDING_DIM",
+        default_value_t = 768
+    )]
     embedding_dim: i32,
 
     #[command(subcommand)]
@@ -243,6 +264,11 @@ enum Command {
         /// Drop edges with confidence below this floor.
         #[arg(long, default_value_t = 0.20)]
         min_confidence: f32,
+        /// Per-topic fan-out cap. Each topic keeps at most its top-K
+        /// strongest edges. An edge survives if at least one endpoint
+        /// keeps it. Bounds blow-up on dense corpora.
+        #[arg(long)]
+        max_per_topic: Option<usize>,
     },
 
     /// Spreading-activation discovery from a free-text query.
@@ -266,6 +292,18 @@ enum Command {
 
     /// Smoke test the embedded Python interpreter.
     PyPing,
+
+    /// Run the read-only HTTP server (search/topic/topics/explore).
+    /// Used by external eval harnesses (BrowseComp-Plus) and other
+    /// non-agent consumers that want to drive the KB over JSON.
+    Serve {
+        /// Bind host. Stay on loopback unless you really mean it.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Bind port.
+        #[arg(long, default_value_t = 9099)]
+        port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -300,7 +338,9 @@ enum FeedAction {
 #[tokio::main]
 async fn main() -> Result<(), KbError> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let cli = Cli::parse();
@@ -308,7 +348,11 @@ async fn main() -> Result<(), KbError> {
     // Build stores up-front for commands that need them. Cheap construction;
     // py-ping doesn't need them but it's the only exception.
     let need_stores = !matches!(cli.command, Command::PyPing);
-    let stores = if need_stores { Some(build_stores(&cli).await?) } else { None };
+    let stores = if need_stores {
+        Some(build_stores(&cli).await?)
+    } else {
+        None
+    };
 
     match cli.command {
         Command::PyPing => {
@@ -321,7 +365,13 @@ async fn main() -> Result<(), KbError> {
                 Ok(())
             })?;
         }
-        Command::Ingest { url, file, url_list, jsonl, query_ids } => {
+        Command::Ingest {
+            url,
+            file,
+            url_list,
+            jsonl,
+            query_ids,
+        } => {
             let stores = stores.as_ref().expect("stores built above");
 
             if let Some(list_path) = url_list {
@@ -341,22 +391,20 @@ async fn main() -> Result<(), KbError> {
                     use std::io::Write;
                     let _ = std::io::stdout().flush();
                     match ingest_url(stores, u).await {
-                        Ok(r) => {
-                            match r.outcome {
-                                gw_kb::source::UpsertOutcome::Unchanged => {
-                                    n_unchanged += 1;
-                                    println!("unchanged");
-                                }
-                                gw_kb::source::UpsertOutcome::Updated => {
-                                    n_ok += 1;
-                                    println!("updated ({} chunks)", r.chunks_written);
-                                }
-                                gw_kb::source::UpsertOutcome::Inserted => {
-                                    n_ok += 1;
-                                    println!("inserted ({} chunks)", r.chunks_written);
-                                }
+                        Ok(r) => match r.outcome {
+                            gw_kb::source::UpsertOutcome::Unchanged => {
+                                n_unchanged += 1;
+                                println!("unchanged");
                             }
-                        }
+                            gw_kb::source::UpsertOutcome::Updated => {
+                                n_ok += 1;
+                                println!("updated ({} chunks)", r.chunks_written);
+                            }
+                            gw_kb::source::UpsertOutcome::Inserted => {
+                                n_ok += 1;
+                                println!("inserted ({} chunks)", r.chunks_written);
+                            }
+                        },
                         Err(e) => {
                             n_fail += 1;
                             println!("FAILED: {}", e);
@@ -407,8 +455,8 @@ async fn main() -> Result<(), KbError> {
             }
             // Header
             println!(
-                "{:<10} {:<6} {:>6}  {:<19}  {}",
-                "ID", "FORMAT", "CHUNKS", "INGESTED", "TITLE"
+                "{:<10} {:<6} {:>6}  {:<19}  TITLE",
+                "ID", "FORMAT", "CHUNKS", "INGESTED"
             );
             for s in &rows {
                 let short = s.source_id.simple().to_string()[..8].to_string();
@@ -481,8 +529,8 @@ async fn main() -> Result<(), KbError> {
             } else if chunks {
                 println!();
                 println!(
-                    "{:>4} {:>7} {:>6}  {:<60}  {}",
-                    "ORD", "OFFSET", "LEN", "HEADING", "PREVIEW"
+                    "{:>4} {:>7} {:>6}  {:<60}  PREVIEW",
+                    "ORD", "OFFSET", "LEN", "HEADING"
                 );
                 for c in &all_chunks {
                     let heading = if c.heading_path.is_empty() {
@@ -509,7 +557,11 @@ async fn main() -> Result<(), KbError> {
                 }
             }
         }
-        Command::Organize { limit, source, retag } => {
+        Command::Organize {
+            limit,
+            source,
+            retag,
+        } => {
             let stores = stores.as_ref().expect("stores built above");
             let source_filter = if let Some(s) = source {
                 Some(resolve_source_id(&stores.pg, &s).await?)
@@ -537,10 +589,7 @@ async fn main() -> Result<(), KbError> {
                 println!("no topics yet — run `gw-kb organize` first");
                 return Ok(());
             }
-            println!(
-                "{:>6} {:>6}  {:<30}  {}",
-                "CHUNKS", "SRCS", "SLUG", "LABEL"
-            );
+            println!("{:>6} {:>6}  {:<30}  LABEL", "CHUNKS", "SRCS", "SLUG");
             for t in &rows {
                 let slug_short = if t.slug.chars().count() > 30 {
                     let s: String = t.slug.chars().take(28).collect();
@@ -566,9 +615,7 @@ async fn main() -> Result<(), KbError> {
             println!("last_seen    = {}", topic.last_seen);
 
             // Summary (Phase 3) — prominent placement right after metadata.
-            if let Some((summary, summary_at)) =
-                fetch_summary(&stores.pg, topic.topic_id).await?
-            {
+            if let Some((summary, summary_at)) = fetch_summary(&stores.pg, topic.topic_id).await? {
                 println!("summary_at   = {}", summary_at);
                 println!();
                 println!("{}", summary);
@@ -593,7 +640,12 @@ async fn main() -> Result<(), KbError> {
                     c.source_title,
                     path
                 );
-                let preview: String = c.content.chars().take(220).collect::<String>().replace('\n', " ");
+                let preview: String = c
+                    .content
+                    .chars()
+                    .take(220)
+                    .collect::<String>()
+                    .replace('\n', " ");
                 println!("    {}", preview);
                 if let Some(url) = &c.source_url {
                     println!("    {}", url);
@@ -658,11 +710,21 @@ async fn main() -> Result<(), KbError> {
                 }
             }
         }
-        Command::Merge { auto_threshold, ask_threshold, limit, dry_run } => {
+        Command::Merge {
+            auto_threshold,
+            ask_threshold,
+            limit,
+            dry_run,
+        } => {
             let stores = stores.as_ref().expect("stores built above");
             let report = merge_topics(
                 stores,
-                MergeOpts { auto_threshold, ask_threshold, limit, dry_run },
+                MergeOpts {
+                    auto_threshold,
+                    ask_threshold,
+                    limit,
+                    dry_run,
+                },
             )
             .await?;
             println!("merge report:");
@@ -757,7 +819,11 @@ async fn main() -> Result<(), KbError> {
         } => {
             let stores = stores.as_ref().expect("stores built above");
             let only_topic = if let Some(slug) = topic.as_ref() {
-                Some(gw_kb::topics::fetch_topic_by_slug(&stores.pg, slug).await?.topic_id)
+                Some(
+                    gw_kb::topics::fetch_topic_by_slug(&stores.pg, slug)
+                        .await?
+                        .topic_id,
+                )
             } else {
                 None
             };
@@ -809,10 +875,7 @@ async fn main() -> Result<(), KbError> {
                         println!("no feeds registered");
                         return Ok(());
                     }
-                    println!(
-                        "{:<24} {:<20}  {:<19}  URL",
-                        "SLUG", "NAME", "LAST SYNCED"
-                    );
+                    println!("{:<24} {:<20}  {:<19}  URL", "SLUG", "NAME", "LAST SYNCED");
                     for f in &feeds {
                         let slug_short = if f.slug.chars().count() > 24 {
                             let s: String = f.slug.chars().take(22).collect();
@@ -830,7 +893,10 @@ async fn main() -> Result<(), KbError> {
                             .last_synced_at
                             .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
                             .unwrap_or_else(|| "(never)".to_string());
-                        println!("{:<24} {:<20}  {:<19}  {}", slug_short, name_short, when, f.url);
+                        println!(
+                            "{:<24} {:<20}  {:<19}  {}",
+                            slug_short, name_short, when, f.url
+                        );
                     }
                     println!("\n{} feed(s)", feeds.len());
                 }
@@ -893,11 +959,21 @@ async fn main() -> Result<(), KbError> {
                 println!("    {:14} {}", k, n);
             }
         }
-        Command::Link { min_shared, min_cosine, min_confidence } => {
+        Command::Link {
+            min_shared,
+            min_cosine,
+            min_confidence,
+            max_per_topic,
+        } => {
             let stores = stores.as_ref().expect("stores built above");
             let report = link(
                 &stores.pg,
-                LinkOpts { min_shared_chunks: min_shared, min_cosine, min_confidence },
+                LinkOpts {
+                    min_shared_chunks: min_shared,
+                    min_cosine,
+                    min_confidence,
+                    max_per_topic,
+                },
             )
             .await?;
             println!("link report:");
@@ -906,7 +982,13 @@ async fn main() -> Result<(), KbError> {
             println!("  embedding_pairs    = {}", report.embedding_pairs);
             println!("  edges_written      = {}", report.edges_written);
         }
-        Command::Explore { query, seeds, hops, decay, limit } => {
+        Command::Explore {
+            query,
+            seeds,
+            hops,
+            decay,
+            limit,
+        } => {
             let stores = stores.as_ref().expect("stores built above");
 
             // Embed the query and pick the nearest topics as seeds.
@@ -919,12 +1001,11 @@ async fn main() -> Result<(), KbError> {
 
             println!("seeds (nearest topics to query):");
             for (id, sim) in &seed_pairs {
-                let label: String = sqlx::query_scalar(
-                    "SELECT label FROM kb_topics WHERE topic_id = $1",
-                )
-                .bind(id)
-                .fetch_one(&stores.pg)
-                .await?;
+                let label: String =
+                    sqlx::query_scalar("SELECT label FROM kb_topics WHERE topic_id = $1")
+                        .bind(id)
+                        .fetch_one(&stores.pg)
+                        .await?;
                 println!("  {:.4}  {}", sim, label);
             }
             println!();
@@ -932,12 +1013,18 @@ async fn main() -> Result<(), KbError> {
             let activated = spread_from_seeds(
                 &stores.pg,
                 &seed_pairs,
-                SpreadOpts { max_hops: hops, decay, limit },
+                SpreadOpts {
+                    max_hops: hops,
+                    decay,
+                    limit,
+                },
             )
             .await?;
 
             if activated.is_empty() {
-                println!("no neighbors reached — try increasing --hops or lowering link thresholds");
+                println!(
+                    "no neighbors reached — try increasing --hops or lowering link thresholds"
+                );
                 return Ok(());
             }
             println!("activated topics (top {}):", activated.len());
@@ -980,6 +1067,10 @@ async fn main() -> Result<(), KbError> {
                 println!("    {}", preview);
             }
         }
+        Command::Serve { host, port } => {
+            let stores = stores.expect("stores built above");
+            gw_kb::server::run(Arc::new(stores), &host, port).await?;
+        }
     }
 
     Ok(())
@@ -998,9 +1089,9 @@ fn print_neighbors_grouped(neigh: &[LinkedNeighbor]) {
 
     // Bucket by (kind, direction-relative-to-query-topic)
     let mut subtopics_of_query: Vec<&LinkedNeighbor> = vec![]; // query subtopic_of neighbor → neighbor is broader
-    let mut parents_of_query: Vec<&LinkedNeighbor> = vec![];   // neighbor subtopic_of query → neighbor is narrower
-    let mut query_builds_on: Vec<&LinkedNeighbor> = vec![];    // query builds_on neighbor → neighbor is prerequisite
-    let mut builds_on_query: Vec<&LinkedNeighbor> = vec![];    // neighbor builds_on query → neighbor is dependent
+    let mut parents_of_query: Vec<&LinkedNeighbor> = vec![]; // neighbor subtopic_of query → neighbor is narrower
+    let mut query_builds_on: Vec<&LinkedNeighbor> = vec![]; // query builds_on neighbor → neighbor is prerequisite
+    let mut builds_on_query: Vec<&LinkedNeighbor> = vec![]; // neighbor builds_on query → neighbor is dependent
     let mut contradicts: Vec<&LinkedNeighbor> = vec![];
     let mut related: Vec<&LinkedNeighbor> = vec![];
 
@@ -1016,7 +1107,10 @@ fn print_neighbors_grouped(neigh: &[LinkedNeighbor]) {
     }
 
     let sections: &[(&str, &[&LinkedNeighbor])] = &[
-        ("Broader topics (this is a subtopic of):", &subtopics_of_query),
+        (
+            "Broader topics (this is a subtopic of):",
+            &subtopics_of_query,
+        ),
         ("Narrower topics (subtopics of this):", &parents_of_query),
         ("Prerequisites (this builds on):", &query_builds_on),
         ("Built on this:", &builds_on_query),
@@ -1050,9 +1144,9 @@ fn parse_since(s: &str) -> Result<chrono::DateTime<chrono::Utc>, KbError> {
     let last = s.chars().last().unwrap();
     if last.is_ascii_alphabetic() {
         let num_part = &s[..s.len() - last.len_utf8()];
-        let n: i64 = num_part.parse().map_err(|_| {
-            KbError::Other(format!("--since: could not parse number in {s:?}"))
-        })?;
+        let n: i64 = num_part
+            .parse()
+            .map_err(|_| KbError::Other(format!("--since: could not parse number in {s:?}")))?;
         let dur = match last.to_ascii_lowercase() {
             's' => Duration::seconds(n),
             'm' => Duration::minutes(n),
@@ -1113,8 +1207,7 @@ async fn run_jsonl_ingest(
             .collect()
     });
 
-    let file = std::fs::File::open(path)
-        .map_err(|e| KbError::Other(format!("open jsonl: {e}")))?;
+    let file = std::fs::File::open(path).map_err(|e| KbError::Other(format!("open jsonl: {e}")))?;
     let reader = BufReader::new(file);
 
     // First pass: collect unique (docid, url, text) tuples.
@@ -1128,15 +1221,12 @@ async fn run_jsonl_ingest(
         if line.trim().is_empty() {
             continue;
         }
-        let row: serde_json::Value = serde_json::from_str(&line)
-            .map_err(|e| KbError::Other(format!("parse jsonl: {e}")))?;
+        let row: serde_json::Value =
+            serde_json::from_str(&line).map_err(|e| KbError::Other(format!("parse jsonl: {e}")))?;
         queries_seen += 1;
 
         if let Some(filter) = &filter {
-            let qid = row
-                .get("query_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let qid = row.get("query_id").and_then(|v| v.as_str()).unwrap_or("");
             if !filter.contains(qid) {
                 continue;
             }
@@ -1182,13 +1272,11 @@ async fn run_jsonl_ingest(
             "source": "browsecomp-plus",
         });
         match gw_kb::ingest::ingest_inline(stores, &url, &text, Some(meta)).await {
-            Ok(report) => {
-                match report.outcome {
-                    gw_kb::source::UpsertOutcome::Inserted => n_inserted += 1,
-                    gw_kb::source::UpsertOutcome::Updated => n_updated += 1,
-                    gw_kb::source::UpsertOutcome::Unchanged => n_unchanged += 1,
-                }
-            }
+            Ok(report) => match report.outcome {
+                gw_kb::source::UpsertOutcome::Inserted => n_inserted += 1,
+                gw_kb::source::UpsertOutcome::Updated => n_updated += 1,
+                gw_kb::source::UpsertOutcome::Unchanged => n_unchanged += 1,
+            },
             Err(e) => {
                 n_failed += 1;
                 eprintln!("[{}/{}] {} FAILED: {}", i + 1, total, docid, e);
@@ -1225,7 +1313,9 @@ async fn run_jsonl_ingest(
 async fn build_stores(cli: &Cli) -> Result<KbStores, KbError> {
     let pg = connect_pg(cli.database_url.as_deref()).await?;
     let lance = Arc::new(KbLanceStore::open(&cli.lance_path, cli.embedding_dim).await?);
-    let tantivy = Arc::new(KbTantivyStore::open(std::path::Path::new(&cli.tantivy_path))?);
+    let tantivy = Arc::new(KbTantivyStore::open(std::path::Path::new(
+        &cli.tantivy_path,
+    ))?);
     let embedder = Arc::new(Embedder::new(cli.embedding_model.clone()));
     let llm = Arc::new(OllamaClient::new(
         cli.ollama_url.clone(),
@@ -1236,7 +1326,13 @@ async fn build_stores(cli: &Cli) -> Result<KbStores, KbError> {
         "qwen3.5:9b".to_string(),
         "unused".to_string(),
     ));
-    Ok(KbStores { pg, lance, tantivy, embedder, llm })
+    Ok(KbStores {
+        pg,
+        lance,
+        tantivy,
+        embedder,
+        llm,
+    })
 }
 
 async fn connect_pg(database_url: Option<&str>) -> Result<PgPool, KbError> {

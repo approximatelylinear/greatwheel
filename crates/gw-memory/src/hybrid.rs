@@ -109,11 +109,19 @@ impl HybridStore {
             dispatch(&mut payload);
             // Extract potentially modified value and meta from the payload
             match payload.data {
-                EventData::Memory { value: Some(v), meta: Some(m), .. } => {
+                EventData::Memory {
+                    value: Some(v),
+                    meta: Some(m),
+                    ..
+                } => {
                     let enriched_meta = serde_json::from_value::<MemoryMeta>(m).ok();
                     (v, enriched_meta.or(meta))
                 }
-                EventData::Memory { value: Some(v), meta: None, .. } => (v, meta),
+                EventData::Memory {
+                    value: Some(v),
+                    meta: None,
+                    ..
+                } => (v, meta),
                 _ => (value, meta),
             }
         } else {
@@ -128,7 +136,7 @@ impl HybridStore {
         // Generate embedding
         let embeddings = self
             .llm
-            .embed(&[text.clone()])
+            .embed(std::slice::from_ref(&text))
             .await
             .map_err(|e| MemoryError::Embedding(e.to_string()))?;
 
@@ -140,15 +148,16 @@ impl HybridStore {
         let org_id = ctx.org_id.0;
 
         // Upsert to Postgres and LanceDB concurrently
-        let pg_fut = self.pg.upsert(
-            &org_id,
-            Some(&ctx.user_id.0),
-            Some(&ctx.agent_id.0),
-            Some(&ctx.session_id.0),
+        let upsert_params = crate::postgres::UpsertParams {
+            org_id: &org_id,
+            user_id: Some(&ctx.user_id.0),
+            agent_id: Some(&ctx.agent_id.0),
+            session_id: Some(&ctx.session_id.0),
             key,
-            &value,
-            meta.as_ref(),
-        );
+            value: &value,
+            meta: meta.as_ref(),
+        };
+        let pg_fut = self.pg.upsert(&upsert_params);
         let lance_fut = self.lance.upsert(&org_id, key, &text, vector);
 
         tokio::try_join!(pg_fut, lance_fut)?;
@@ -203,7 +212,8 @@ impl HybridStore {
 
                 let scored = self.lance.search(&org_id, query_vec, top_k).await?;
                 let keys: Vec<String> = scored.iter().map(|s| s.key.clone()).collect();
-                let ordered: Vec<(String, f32)> = scored.into_iter().map(|s| (s.key, s.score)).collect();
+                let ordered: Vec<(String, f32)> =
+                    scored.into_iter().map(|s| (s.key, s.score)).collect();
                 let hydrated = self.pg.get_by_keys_hydrated(&org_id, &keys).await?;
                 Self::build_records(&ordered, hydrated)
             }
@@ -212,7 +222,8 @@ impl HybridStore {
                 // BM25 search via tantivy
                 let scored = self.tantivy.search(&org_id, query, &opts.scope, top_k)?;
                 let keys: Vec<String> = scored.iter().map(|s| s.key.clone()).collect();
-                let ordered: Vec<(String, f32)> = scored.into_iter().map(|s| (s.key, s.score)).collect();
+                let ordered: Vec<(String, f32)> =
+                    scored.into_iter().map(|s| (s.key, s.score)).collect();
                 let hydrated = self.pg.get_by_keys_hydrated(&org_id, &keys).await?;
                 Self::build_records(&ordered, hydrated)
             }
@@ -235,16 +246,12 @@ impl HybridStore {
                 let bm25_query = query.to_string();
                 let bm25_scope = opts.scope.clone();
                 let tantivy = &self.tantivy;
-                let bm25_results =
-                    tantivy.search(&org_id, &bm25_query, &bm25_scope, top_k)?;
+                let bm25_results = tantivy.search(&org_id, &bm25_query, &bm25_scope, top_k)?;
 
                 let vector_results = vector_fut.await?;
 
                 // RRF fusion
-                let fused = fusion::reciprocal_rank_fusion(
-                    &[vector_results, bm25_results],
-                    60,
-                );
+                let fused = fusion::reciprocal_rank_fusion(&[vector_results, bm25_results], 60);
 
                 let ordered: Vec<(String, f32)> = fused.into_iter().take(top_k).collect();
                 let top_keys: Vec<String> = ordered.iter().map(|(k, _)| k.clone()).collect();
@@ -252,7 +259,11 @@ impl HybridStore {
                 Self::build_records(&ordered, hydrated)
             }
 
-            SearchMode::Full { graph_hops, graph_decay, recency_sigma_days } => {
+            SearchMode::Full {
+                graph_hops,
+                graph_decay,
+                recency_sigma_days,
+            } => {
                 // Four-channel retrieval: vector + BM25 + graph + temporal
 
                 // Channel 1 & 2: vector + BM25 (same as Hybrid)
@@ -269,7 +280,9 @@ impl HybridStore {
                 let vector_fut = self.lance.search(&org_id, query_vec, top_k);
                 let bm25_query = query.to_string();
                 let bm25_scope = opts.scope.clone();
-                let bm25_results = self.tantivy.search(&org_id, &bm25_query, &bm25_scope, top_k)?;
+                let bm25_results = self
+                    .tantivy
+                    .search(&org_id, &bm25_query, &bm25_scope, top_k)?;
                 let vector_results = vector_fut.await?;
 
                 // Channel 3: graph traversal (spreading activation from vector+BM25 seeds)
@@ -280,7 +293,10 @@ impl HybridStore {
                 let seeds: Vec<fusion::ScoredKey> = seed_fused
                     .iter()
                     .take(top_k)
-                    .map(|(k, s)| fusion::ScoredKey { key: k.clone(), score: *s })
+                    .map(|(k, s)| fusion::ScoredKey {
+                        key: k.clone(),
+                        score: *s,
+                    })
                     .collect();
 
                 // Parse temporal range for temporal-constrained graph traversal
@@ -289,8 +305,13 @@ impl HybridStore {
 
                 let temporal_filter = if let Some(ref range) = temporal_range {
                     match crate::graph::fetch_temporal_set(
-                        self.pg.pool(), &org_id, range.start, range.end,
-                    ).await {
+                        self.pg.pool(),
+                        &org_id,
+                        range.start,
+                        range.end,
+                    )
+                    .await
+                    {
                         Ok(set) => Some(set),
                         Err(e) => {
                             tracing::warn!(error = %e, "fetch_temporal_set failed, falling back to unfiltered graph traversal");
@@ -315,19 +336,25 @@ impl HybridStore {
                 let temporal_fut = async {
                     if let Some(ref range) = temporal_range {
                         crate::graph::temporal_score_memories(
-                            self.pg.pool(), &org_id, range.start, range.end, top_k,
-                        ).await
+                            self.pg.pool(),
+                            &org_id,
+                            range.start,
+                            range.end,
+                            top_k,
+                        )
+                        .await
                     } else {
                         // Recency decay fallback
                         let rows: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
                             "SELECT key, occurred_at FROM memories WHERE org_id = $1 AND occurred_at IS NOT NULL ORDER BY occurred_at DESC LIMIT $2",
                         )
-                        .bind(&org_id)
+                        .bind(org_id)
                         .bind(top_k as i64)
                         .fetch_all(self.pg.pool())
                         .await?;
 
-                        Ok(rows.into_iter()
+                        Ok(rows
+                            .into_iter()
                             .map(|(key, occ)| fusion::ScoredKey {
                                 key,
                                 score: crate::temporal::recency_score(occ, now, recency_sigma_days),
@@ -355,7 +382,12 @@ impl HybridStore {
 
                 // Fuse all four channels via RRF
                 let fused = fusion::reciprocal_rank_fusion(
-                    &[vector_results, bm25_results, graph_results, temporal_results],
+                    &[
+                        vector_results,
+                        bm25_results,
+                        graph_results,
+                        temporal_results,
+                    ],
                     60,
                 );
 
@@ -400,10 +432,7 @@ impl HybridStore {
         use gw_core::MemoryKind;
         results
             .into_iter()
-            .filter(|r| {
-                r.kind != MemoryKind::Opinion
-                    || r.confidence.unwrap_or(0.5) >= threshold
-            })
+            .filter(|r| r.kind != MemoryKind::Opinion || r.confidence.unwrap_or(0.5) >= threshold)
             .collect()
     }
 

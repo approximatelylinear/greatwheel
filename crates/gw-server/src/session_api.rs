@@ -1,7 +1,4 @@
-use axum::{
-    extract::State,
-    Json,
-};
+use axum::{extract::State, Json};
 use gw_core::SessionId;
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -38,9 +35,7 @@ fn parse_sid(s: &str) -> Result<SessionId, (StatusCode, String)> {
     Ok(SessionId(uuid))
 }
 
-pub async fn create_session(
-    State(app): State<AppState>,
-) -> Json<serde_json::Value> {
+pub async fn create_session(State(app): State<AppState>) -> Json<serde_json::Value> {
     let session_id = app.session_mgr.create_session().await;
     Json(serde_json::json!({ "session_id": session_id.0 }))
 }
@@ -58,7 +53,12 @@ pub async fn send_message(
         tokio::runtime::Handle::current().block_on(mgr.send_message(sid, &message))
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(serde_json::json!({
@@ -106,11 +106,16 @@ pub async fn compact(
     // compact() holds non-Send ouros types across LLM await.
     // Run on a dedicated thread with its own tokio runtime.
     let mgr = app.session_mgr.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         tokio::runtime::Handle::current().block_on(mgr.compact(sid))
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(serde_json::json!({ "status": "compacted" })))
@@ -133,7 +138,12 @@ pub async fn switch_branch(
         tokio::runtime::Handle::current().block_on(mgr.switch_branch(sid, target, summarize))
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(serde_json::json!({ "status": "switched" })))
@@ -188,12 +198,12 @@ pub async fn resume_session(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(serde_json::json!({ "status": "resumed", "session_id": req.session_id })))
+    Ok(Json(
+        serde_json::json!({ "status": "resumed", "session_id": req.session_id }),
+    ))
 }
 
-pub async fn list_sessions(
-    State(app): State<AppState>,
-) -> Json<serde_json::Value> {
+pub async fn list_sessions(State(app): State<AppState>) -> Json<serde_json::Value> {
     let sessions = app.session_mgr.list_sessions().await;
     let list: Vec<serde_json::Value> = sessions
         .iter()

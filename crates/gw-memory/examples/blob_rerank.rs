@@ -58,7 +58,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let nq = req.query_tokens.len();
     assert!(nq > 0, "empty query");
-    assert_eq!(req.query_tokens[0].len(), TOKEN_DIM, "query token dim must be {TOKEN_DIM}");
+    assert_eq!(
+        req.query_tokens[0].len(),
+        TOKEN_DIM,
+        "query token dim must be {TOKEN_DIM}"
+    );
     let mut q = Array2::<f32>::zeros((nq, TOKEN_DIM));
     for (i, row) in req.query_tokens.iter().enumerate() {
         for (j, v) in row.iter().enumerate() {
@@ -75,7 +79,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out = Response {
         scored: scored
             .into_iter()
-            .map(|s| ScoredOut { docid: s.docid, score: s.score })
+            .map(|s| ScoredOut {
+                docid: s.docid,
+                score: s.score,
+            })
             .collect(),
         elapsed_ms,
     };

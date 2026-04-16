@@ -70,7 +70,9 @@ pub struct RecallOpts {
 pub enum SearchMode {
     Vector,
     FullText,
-    Hybrid { alpha: f32 },
+    Hybrid {
+        alpha: f32,
+    },
     /// Four-channel retrieval: vector + BM25 + graph + temporal, fused via RRF.
     Full {
         /// Max graph traversal depth (default 2).
@@ -85,9 +87,15 @@ pub enum SearchMode {
     },
 }
 
-fn default_graph_hops() -> usize { 2 }
-fn default_graph_decay() -> f32 { 0.5 }
-fn default_recency_sigma() -> f64 { 7.0 }
+fn default_graph_hops() -> usize {
+    2
+}
+fn default_graph_decay() -> f32 {
+    0.5
+}
+fn default_recency_sigma() -> f64 {
+    7.0
+}
 
 /// Scope of memory search.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,11 +125,7 @@ pub trait MemoryStore {
         opts: RecallOpts,
     ) -> Result<Vec<MemoryRecord>, MemoryError>;
 
-    async fn forget(
-        &self,
-        ctx: &CallContext,
-        key: &str,
-    ) -> Result<(), MemoryError>;
+    async fn forget(&self, ctx: &CallContext, key: &str) -> Result<(), MemoryError>;
 }
 
 impl MemoryStore for HybridStore {
@@ -144,11 +148,7 @@ impl MemoryStore for HybridStore {
         self.recall(ctx, query, opts).await
     }
 
-    async fn forget(
-        &self,
-        ctx: &CallContext,
-        key: &str,
-    ) -> Result<(), MemoryError> {
+    async fn forget(&self, ctx: &CallContext, key: &str) -> Result<(), MemoryError> {
         self.forget(ctx, key).await
     }
 }

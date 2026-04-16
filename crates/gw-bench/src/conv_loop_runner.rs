@@ -8,24 +8,18 @@ use gw_core::{EntryType, SessionId};
 use gw_llm::{Message, OllamaClient};
 use gw_loop::{ConversationLoop, IterationCallback, LoopConfig, OllamaLlmClient, SnapshotPolicy};
 use gw_runtime::ReplAgent;
-use ouros::Object;
-use std::collections::HashMap;
 use tracing::info;
 use uuid::Uuid;
 
 use crate::{
+    build_variables_info, fallback_extract, final_prompt, is_refusal_answer, iteration_prompt,
     BenchConfig, ResultEntry, RlmLoopResult, TrajectoryMessage,
-    build_variables_info, fallback_extract, is_refusal_answer,
-    iteration_prompt, final_prompt, strip_think_tags,
 };
 
 /// Iteration callback that reproduces the exact gw-bench coaching prompts.
 struct BenchIterationCallback {
     query: String,
-    max_iterations: u32,
     pre_search_context: String,
-    bench_config: BenchConfig,
-    // For fallback extraction.
     llm: OllamaClient,
     model: String,
     rt: tokio::runtime::Handle,
@@ -81,13 +75,8 @@ impl IterationCallback for BenchIterationCallback {
 
     fn on_max_iterations(&mut self, query: &str) -> Option<String> {
         info!("Max iterations reached, attempting fallback extraction");
-        let (answer, _, _) = fallback_extract(
-            &self.llm,
-            &self.model,
-            query,
-            &self.messages,
-            &self.rt,
-        );
+        let (answer, _, _) =
+            fallback_extract(&self.llm, &self.model, query, &self.messages, &self.rt);
         answer
     }
 }
@@ -108,16 +97,13 @@ pub fn run_rlm_loop_v2_with_agent(
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Create the LLM client for the conversation loop.
-    let loop_llm: Box<dyn gw_loop::LlmClient> =
-        Box::new(OllamaLlmClient::new(llm.clone()));
+    let loop_llm: Box<dyn gw_loop::LlmClient> = Box::new(OllamaLlmClient::new(llm.clone()));
 
     let system_prompt = bench_config.system_prompt();
 
     let callback = BenchIterationCallback {
         query: query.to_string(),
-        max_iterations,
         pre_search_context: pre_search_context.to_string(),
-        bench_config: bench_config.clone(),
         llm: llm.clone(),
         model: model.to_string(),
         rt: rt.clone(),
@@ -189,8 +175,18 @@ pub fn run_rlm_loop_v2_with_agent(
                 });
 
                 RlmLoopResult {
-                    status: if result.is_final { "completed" } else { "max_turns_fallback" }.into(),
-                    termination_reason: if result.is_final { "final_called" } else { "max_turns" }.into(),
+                    status: if result.is_final {
+                        "completed"
+                    } else {
+                        "max_turns_fallback"
+                    }
+                    .into(),
+                    termination_reason: if result.is_final {
+                        "final_called"
+                    } else {
+                        "max_turns"
+                    }
+                    .into(),
                     iterations_used: result.iterations as u32,
                     result_entries: entries,
                     input_tokens: result.input_tokens,
@@ -265,7 +261,11 @@ fn tree_to_records(conv_loop: &ConversationLoop) -> (Vec<ResultEntry>, Vec<Traje
                     output: Some(serde_json::Value::String(output_str)),
                 });
             }
-            _ => {}
+            EntryType::HostCall { .. }
+            | EntryType::ReplSnapshot(_)
+            | EntryType::Compaction { .. }
+            | EntryType::BranchSummary(_)
+            | EntryType::System(_) => {}
         }
     }
 

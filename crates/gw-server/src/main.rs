@@ -73,11 +73,21 @@ impl Default for KbConfig {
     }
 }
 
-fn default_kb_lance_path() -> String { "data/kb-lancedb".into() }
-fn default_kb_tantivy_path() -> String { "data/kb-tantivy".into() }
-fn default_kb_embedding_model() -> String { "nomic-ai/nomic-embed-text-v1.5".into() }
-fn default_kb_embedding_dim() -> i32 { 768 }
-fn default_kb_ollama_url() -> String { "http://localhost:11434".into() }
+fn default_kb_lance_path() -> String {
+    "data/kb-lancedb".into()
+}
+fn default_kb_tantivy_path() -> String {
+    "data/kb-tantivy".into()
+}
+fn default_kb_embedding_model() -> String {
+    "nomic-ai/nomic-embed-text-v1.5".into()
+}
+fn default_kb_embedding_dim() -> i32 {
+    768
+}
+fn default_kb_ollama_url() -> String {
+    "http://localhost:11434".into()
+}
 
 #[derive(Debug, Deserialize)]
 struct ServerConfig {
@@ -285,8 +295,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-    gw_trace::init_tracing(&config.tracing, trace_pool)
-        .expect("Failed to initialize tracing");
+    gw_trace::init_tracing(&config.tracing, trace_pool).expect("Failed to initialize tracing");
 
     if pg_pool.is_some() {
         tracing::info!("Database connected");
@@ -313,9 +322,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         {
             Ok(lance) => {
-                match gw_memory::tantivy_store::TantivyStore::open(
-                    std::path::Path::new(&config.memory.tantivy_index_path),
-                ) {
+                match gw_memory::tantivy_store::TantivyStore::open(std::path::Path::new(
+                    &config.memory.tantivy_index_path,
+                )) {
                     Ok(tantivy) => {
                         let pg_store = gw_memory::postgres::PgMemoryStore::new(pool);
                         let _memory_store =
@@ -360,9 +369,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ref pool) = session_pool {
         engine = engine.provide(pool.clone());
     }
-    let engine = engine.init(&config.plugins).map_err(|e| {
-        format!("Plugin engine init failed: {e}")
-    })?;
+    let engine = engine
+        .init(&config.plugins)
+        .map_err(|e| format!("Plugin engine init failed: {e}"))?;
     engine.before_startup();
 
     // Extract the plugin host function router so SessionManager can
@@ -374,25 +383,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create session manager with LLM factory and plugin router.
     let llm_for_factory = llm.clone();
     let llm_factory: Arc<dyn Fn() -> Box<dyn gw_loop::LlmClient> + Send + Sync> =
-        Arc::new(move || {
-            Box::new(OllamaLlmClient::new((*llm_for_factory).clone()))
-        });
+        Arc::new(move || Box::new(OllamaLlmClient::new((*llm_for_factory).clone())));
 
-    let session_mgr = Arc::new(match session_pool {
-        Some(pool) => SessionManager::with_pg(
+    let session_mgr = Arc::new(
+        SessionManager::new(
             llm_factory,
             LoopConfig::default(),
             Duration::from_secs(30 * 60),
-            pool,
+            session_pool,
         )
         .with_plugin_router(plugin_router.clone()),
-        None => SessionManager::new(
-            llm_factory,
-            LoopConfig::default(),
-            Duration::from_secs(30 * 60),
-        )
-        .with_plugin_router(plugin_router.clone()),
-    });
+    );
 
     let state = AppState {
         llm,

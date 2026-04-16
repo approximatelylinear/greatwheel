@@ -11,6 +11,17 @@ use uuid::Uuid;
 
 use crate::error::KbError;
 
+/// sqlx tuple for `fetch_new_sources` rows.
+type NewSourceRow = (
+    Uuid,
+    String,
+    Option<String>,
+    String,
+    DateTime<Utc>,
+    Option<String>,
+    i64,
+);
+
 #[derive(Debug, Clone)]
 pub struct DigestReport {
     pub since: DateTime<Utc>,
@@ -61,19 +72,8 @@ pub async fn build_digest(pool: &PgPool, since: DateTime<Utc>) -> Result<DigestR
     })
 }
 
-async fn fetch_new_sources(
-    pool: &PgPool,
-    since: DateTime<Utc>,
-) -> Result<Vec<NewSource>, KbError> {
-    let rows: Vec<(
-        Uuid,
-        String,
-        Option<String>,
-        String,
-        DateTime<Utc>,
-        Option<String>,
-        i64,
-    )> = sqlx::query_as(
+async fn fetch_new_sources(pool: &PgPool, since: DateTime<Utc>) -> Result<Vec<NewSource>, KbError> {
+    let rows: Vec<NewSourceRow> = sqlx::query_as(
         r#"
         SELECT s.source_id,
                s.title,
@@ -115,10 +115,7 @@ async fn fetch_new_sources(
         .collect())
 }
 
-async fn fetch_new_topics(
-    pool: &PgPool,
-    since: DateTime<Utc>,
-) -> Result<Vec<NewTopic>, KbError> {
+async fn fetch_new_topics(pool: &PgPool, since: DateTime<Utc>) -> Result<Vec<NewTopic>, KbError> {
     let rows: Vec<(String, String, i32, i64, DateTime<Utc>)> = sqlx::query_as(
         r#"
         SELECT t.slug,
@@ -143,13 +140,15 @@ async fn fetch_new_topics(
 
     Ok(rows
         .into_iter()
-        .map(|(slug, label, chunk_count, source_count, created_at)| NewTopic {
-            slug,
-            label,
-            chunk_count,
-            source_count,
-            created_at,
-        })
+        .map(
+            |(slug, label, chunk_count, source_count, created_at)| NewTopic {
+                slug,
+                label,
+                chunk_count,
+                source_count,
+                created_at,
+            },
+        )
         .collect())
 }
 
@@ -184,11 +183,13 @@ async fn fetch_grown_topics(
 
     Ok(rows
         .into_iter()
-        .map(|(slug, label, total_chunks, new_chunks_in_window)| GrownTopic {
-            slug,
-            label,
-            total_chunks,
-            new_chunks_in_window,
-        })
+        .map(
+            |(slug, label, total_chunks, new_chunks_in_window)| GrownTopic {
+                slug,
+                label,
+                total_chunks,
+                new_chunks_in_window,
+            },
+        )
         .collect())
 }

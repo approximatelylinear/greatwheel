@@ -50,7 +50,10 @@ const EMBEDDING_DIM: i32 = 768;
 /// directory, so we navigate up from `CARGO_MANIFEST_DIR`.
 fn workspace_path(rel: &str) -> std::path::PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let workspace = manifest.parent().and_then(|p| p.parent()).unwrap_or(manifest);
+    let workspace = manifest
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap_or(manifest);
     workspace.join(rel)
 }
 
@@ -83,11 +86,7 @@ fn preconditions_met() -> Option<(String, std::path::PathBuf, std::path::PathBuf
     Some((pg_url, lance, tantivy))
 }
 
-async fn build_stores(
-    pg_url: &str,
-    lance_path: &Path,
-    tantivy_path: &Path,
-) -> KbStores {
+async fn build_stores(pg_url: &str, lance_path: &Path, tantivy_path: &Path) -> KbStores {
     let pool = PgPoolOptions::new()
         .max_connections(4)
         .connect(pg_url)
@@ -117,9 +116,7 @@ async fn build_stores(
 
 /// Build an engine with just the KbPlugin and return the router it
 /// produces. Isolates the test from hindsight and any other plugins.
-fn engine_with_kb(
-    stores: KbStores,
-) -> Arc<gw_engine::HostFnRouter> {
+fn engine_with_kb(stores: KbStores) -> Arc<gw_engine::HostFnRouter> {
     let engine = GreatWheelEngine::new()
         .add_plugin(KbPlugin::new(stores))
         .init(&HashMap::new())
@@ -158,7 +155,9 @@ impl HostBridge for RouterBridge {
                 function: function.to_string(),
                 message: e.to_string(),
             }),
-            None => Err(gw_runtime::AgentError::UnknownFunction(function.to_string())),
+            None => Err(gw_runtime::AgentError::UnknownFunction(
+                function.to_string(),
+            )),
         }
     }
 }
@@ -272,13 +271,7 @@ FINAL(hits)
     let arr = val.as_array().expect("kb_search returned an array");
     assert!(!arr.is_empty(), "expected at least one search hit");
     let first = &arr[0];
-    for field in [
-        "chunk_id",
-        "source_id",
-        "source_title",
-        "content",
-        "score",
-    ] {
+    for field in ["chunk_id", "source_id", "source_title", "content", "score"] {
         assert!(
             first.get(field).is_some(),
             "search hit missing field: {}",
@@ -326,9 +319,12 @@ FINAL({
 "#;
     let val = run(Arc::clone(&router), code);
     assert!(val.is_object(), "multi-call script returned an object");
-    assert!(val.get("error").is_none(), "multi-call script had an error: {:?}", val);
+    assert!(
+        val.get("error").is_none(),
+        "multi-call script had an error: {:?}",
+        val
+    );
     assert!(val.get("top_hit_source").is_some());
     assert!(val.get("topic_count").is_some());
     println!("multi-call script returned: {}", val);
 }
-

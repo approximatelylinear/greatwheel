@@ -12,6 +12,24 @@ use uuid::Uuid;
 
 use crate::error::KbError;
 
+/// sqlx tuple for `load_all_topic_states` rows.
+type TopicStateRow = (Uuid, String, String, i32, Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// sqlx tuple for `fetch_topic_by_slug` rows.
+type TopicRow = (
+    Uuid,
+    String,
+    String,
+    i32,
+    DateTime<Utc>,
+    DateTime<Utc>,
+    DateTime<Utc>,
+    DateTime<Utc>,
+);
+
+/// sqlx tuple for `list_chunks_for_topic` rows.
+type ChunkRow = (Uuid, String, Option<String>, Vec<String>, String, f32);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Topic {
     pub topic_id: Uuid,
@@ -127,7 +145,7 @@ pub fn slugify(label: &str) -> String {
 
 /// Load all existing topics from Postgres into in-memory state.
 pub async fn load_all_topic_states(pool: &PgPool) -> Result<Vec<TopicState>, KbError> {
-    let rows: Vec<(Uuid, String, String, i32, Option<Vec<u8>>, Option<Vec<u8>>)> = sqlx::query_as(
+    let rows: Vec<TopicStateRow> = sqlx::query_as(
         "SELECT topic_id, label, slug, chunk_count, label_vector, vector FROM kb_topics",
     )
     .fetch_all(pool)
@@ -238,13 +256,11 @@ pub async fn mark_chunk_tagged(
     chunk_id: Uuid,
     entities: &[String],
 ) -> Result<(), KbError> {
-    sqlx::query(
-        "UPDATE kb_chunks SET tagged_at = now(), entities = $2 WHERE chunk_id = $1",
-    )
-    .bind(chunk_id)
-    .bind(entities)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE kb_chunks SET tagged_at = now(), entities = $2 WHERE chunk_id = $1")
+        .bind(chunk_id)
+        .bind(entities)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -259,10 +275,7 @@ pub struct TopicSummary {
     pub last_seen: DateTime<Utc>,
 }
 
-pub async fn list_topic_summaries(
-    pool: &PgPool,
-    limit: i64,
-) -> Result<Vec<TopicSummary>, KbError> {
+pub async fn list_topic_summaries(pool: &PgPool, limit: i64) -> Result<Vec<TopicSummary>, KbError> {
     let rows: Vec<(Uuid, String, String, i32, i64, DateTime<Utc>)> = sqlx::query_as(
         r#"
         SELECT t.topic_id,
@@ -300,18 +313,17 @@ pub async fn list_topic_summaries(
 }
 
 pub async fn fetch_topic_by_slug(pool: &PgPool, slug: &str) -> Result<Topic, KbError> {
-    let row: (Uuid, String, String, i32, DateTime<Utc>, DateTime<Utc>, DateTime<Utc>, DateTime<Utc>) =
-        sqlx::query_as(
-            r#"
+    let row: TopicRow = sqlx::query_as(
+        r#"
             SELECT topic_id, label, slug, chunk_count, first_seen, last_seen, created_at, updated_at
             FROM kb_topics
             WHERE slug = $1
             "#,
-        )
-        .bind(slug)
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| KbError::Other(format!("no topic with slug '{slug}'")))?;
+    )
+    .bind(slug)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| KbError::Other(format!("no topic with slug '{slug}'")))?;
     Ok(Topic {
         topic_id: row.0,
         label: row.1,
@@ -339,7 +351,7 @@ pub async fn list_chunks_for_topic(
     topic_id: Uuid,
     limit: i64,
 ) -> Result<Vec<TopicChunkRow>, KbError> {
-    let rows: Vec<(Uuid, String, Option<String>, Vec<String>, String, f32)> = sqlx::query_as(
+    let rows: Vec<ChunkRow> = sqlx::query_as(
         r#"
         SELECT c.chunk_id,
                s.title,

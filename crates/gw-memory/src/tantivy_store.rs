@@ -43,13 +43,11 @@ impl TantivyStore {
         let f_session_id = schema_builder.add_text_field("session_id", STRING);
         let schema = schema_builder.build();
 
-        std::fs::create_dir_all(index_path).map_err(|e| {
-            MemoryError::Tantivy(format!("failed to create index dir: {e}"))
-        })?;
+        std::fs::create_dir_all(index_path)
+            .map_err(|e| MemoryError::Tantivy(format!("failed to create index dir: {e}")))?;
 
         let index = if Index::open_in_dir(index_path).is_ok() {
-            Index::open_in_dir(index_path)
-                .map_err(|e| MemoryError::Tantivy(format!("{e}")))?
+            Index::open_in_dir(index_path).map_err(|e| MemoryError::Tantivy(format!("{e}")))?
         } else {
             Index::create_in_dir(index_path, schema)
                 .map_err(|e| MemoryError::Tantivy(format!("{e}")))?
@@ -91,9 +89,10 @@ impl TantivyStore {
         session_id: Option<&Uuid>,
     ) -> Result<(), MemoryError> {
         let org_str = org_id.to_string();
-        let mut writer = self.writer.lock().map_err(|e| {
-            MemoryError::Tantivy(format!("writer lock poisoned: {e}"))
-        })?;
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|e| MemoryError::Tantivy(format!("writer lock poisoned: {e}")))?;
 
         // Delete existing doc with this key+org — tantivy doesn't have compound
         // term delete, so we delete by key and re-check. Since keys are unique
@@ -107,21 +106,21 @@ impl TantivyStore {
             self.f_org_id => org_str,
         );
         if let Some(uid) = user_id {
-            doc.add_text(self.f_user_id, &uid.to_string());
+            doc.add_text(self.f_user_id, uid.to_string());
         }
         if let Some(aid) = agent_id {
-            doc.add_text(self.f_agent_id, &aid.to_string());
+            doc.add_text(self.f_agent_id, aid.to_string());
         }
         if let Some(sid) = session_id {
-            doc.add_text(self.f_session_id, &sid.to_string());
+            doc.add_text(self.f_session_id, sid.to_string());
         }
 
-        writer.add_document(doc).map_err(|e| {
-            MemoryError::Tantivy(format!("add_document failed: {e}"))
-        })?;
-        writer.commit().map_err(|e| {
-            MemoryError::Tantivy(format!("commit failed: {e}"))
-        })?;
+        writer
+            .add_document(doc)
+            .map_err(|e| MemoryError::Tantivy(format!("add_document failed: {e}")))?;
+        writer
+            .commit()
+            .map_err(|e| MemoryError::Tantivy(format!("commit failed: {e}")))?;
 
         Ok(())
     }
@@ -140,15 +139,13 @@ impl TantivyStore {
         let org_str = org_id.to_string();
 
         // Build a boolean query: BM25 text match AND org_id filter (AND optional scope)
-        let text_query = query_parser.parse_query(query).map_err(|e| {
-            MemoryError::Tantivy(format!("query parse error: {e}"))
-        })?;
+        let text_query = query_parser
+            .parse_query(query)
+            .map_err(|e| MemoryError::Tantivy(format!("query parse error: {e}")))?;
 
         let org_term = Term::from_field_text(self.f_org_id, &org_str);
-        let org_query = tantivy::query::TermQuery::new(
-            org_term,
-            tantivy::schema::IndexRecordOption::Basic,
-        );
+        let org_query =
+            tantivy::query::TermQuery::new(org_term, tantivy::schema::IndexRecordOption::Basic);
 
         // Optional scope filter
         let scope_query: Option<Box<dyn tantivy::query::Query>> = match scope {
@@ -194,9 +191,9 @@ impl TantivyStore {
 
         let mut results = Vec::with_capacity(top_docs.len());
         for (score, doc_address) in top_docs {
-            let doc: tantivy::TantivyDocument = searcher.doc(doc_address).map_err(|e| {
-                MemoryError::Tantivy(format!("doc retrieval failed: {e}"))
-            })?;
+            let doc: tantivy::TantivyDocument = searcher
+                .doc(doc_address)
+                .map_err(|e| MemoryError::Tantivy(format!("doc retrieval failed: {e}")))?;
             if let Some(key_value) = doc.get_first(self.f_key) {
                 if let Some(key_str) = Value::as_str(&key_value) {
                     results.push(ScoredKey {
@@ -212,33 +209,32 @@ impl TantivyStore {
 
     /// Delete all documents matching a key.
     pub fn delete(&self, key: &str) -> Result<(), MemoryError> {
-        let mut writer = self.writer.lock().map_err(|e| {
-            MemoryError::Tantivy(format!("writer lock poisoned: {e}"))
-        })?;
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|e| MemoryError::Tantivy(format!("writer lock poisoned: {e}")))?;
         writer.delete_term(Term::from_field_text(self.f_key, key));
-        writer.commit().map_err(|e| {
-            MemoryError::Tantivy(format!("commit failed: {e}"))
-        })?;
+        writer
+            .commit()
+            .map_err(|e| MemoryError::Tantivy(format!("commit failed: {e}")))?;
         Ok(())
     }
 
     /// Rebuild the tantivy index from Postgres data.
     /// Call this on startup to sync the index with the source of truth.
-    pub fn rebuild_from_rows(
-        &self,
-        rows: Vec<TantivyRow>,
-    ) -> Result<usize, MemoryError> {
-        let mut writer = self.writer.lock().map_err(|e| {
-            MemoryError::Tantivy(format!("writer lock poisoned: {e}"))
-        })?;
+    pub fn rebuild_from_rows(&self, rows: Vec<TantivyRow>) -> Result<usize, MemoryError> {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|e| MemoryError::Tantivy(format!("writer lock poisoned: {e}")))?;
 
         // Clear existing index
-        writer.delete_all_documents().map_err(|e| {
-            MemoryError::Tantivy(format!("delete_all failed: {e}"))
-        })?;
-        writer.commit().map_err(|e| {
-            MemoryError::Tantivy(format!("commit failed: {e}"))
-        })?;
+        writer
+            .delete_all_documents()
+            .map_err(|e| MemoryError::Tantivy(format!("delete_all failed: {e}")))?;
+        writer
+            .commit()
+            .map_err(|e| MemoryError::Tantivy(format!("commit failed: {e}")))?;
 
         let count = rows.len();
         for row in rows {
@@ -248,22 +244,22 @@ impl TantivyStore {
                 self.f_org_id => row.org_id.to_string(),
             );
             if let Some(uid) = &row.user_id {
-                doc.add_text(self.f_user_id, &uid.to_string());
+                doc.add_text(self.f_user_id, uid.to_string());
             }
             if let Some(aid) = &row.agent_id {
-                doc.add_text(self.f_agent_id, &aid.to_string());
+                doc.add_text(self.f_agent_id, aid.to_string());
             }
             if let Some(sid) = &row.session_id {
-                doc.add_text(self.f_session_id, &sid.to_string());
+                doc.add_text(self.f_session_id, sid.to_string());
             }
-            writer.add_document(doc).map_err(|e| {
-                MemoryError::Tantivy(format!("add_document failed: {e}"))
-            })?;
+            writer
+                .add_document(doc)
+                .map_err(|e| MemoryError::Tantivy(format!("add_document failed: {e}")))?;
         }
 
-        writer.commit().map_err(|e| {
-            MemoryError::Tantivy(format!("commit failed: {e}"))
-        })?;
+        writer
+            .commit()
+            .map_err(|e| MemoryError::Tantivy(format!("commit failed: {e}")))?;
 
         tracing::info!(count, "Tantivy index rebuilt from Postgres");
         Ok(count)

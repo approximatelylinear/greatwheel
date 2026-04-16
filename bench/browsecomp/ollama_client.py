@@ -40,7 +40,7 @@ from utils import extract_retrieved_docids_from_result
 BENCH_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BENCH_DIR))
 from fact_registry import FactRegistry
-LOCAL_SEARCHERS = {"bm25s", "lancedb-local"}  # names we handle ourselves
+LOCAL_SEARCHERS = {"bm25s", "lancedb-local", "gw-kb"}  # names we handle ourselves
 
 
 def _get_vendor_searcher_choices() -> list[str]:
@@ -188,6 +188,7 @@ class OllamaAgent:
         include_get_document: bool = False,
         snippet_max_chars: int = 2000,
         backend: str = "ollama",
+        system_prompt: str | None = None,
     ):
         self.ollama_url = ollama_url.rstrip("/")
         self.model = model
@@ -197,6 +198,7 @@ class OllamaAgent:
         self.include_get_document = include_get_document
         self.snippet_max_chars = snippet_max_chars
         self.backend = backend
+        self.system_prompt = system_prompt or SYSTEM_PROMPT
 
     def _chat(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
         """Send a chat request and return a normalized response.
@@ -360,6 +362,19 @@ class OllamaAgent:
         entity_search_path = BENCH_DIR / "entity_search.py"
         with open(entity_search_path, encoding="utf-8") as f:
             exec(f.read(), ns)  # noqa: S102
+
+        # Searchers can inject extra REPL functions (e.g. gw-kb's
+        # kb_topic/kb_topics/kb_explore). Each call gets wrapped in a
+        # counter so the per-query JSON's tool_call_counts attribute lift
+        # to specific tools, not just "more tools".
+        if hasattr(self.searcher, "repl_extras"):
+            for extra_name, extra_fn in self.searcher.repl_extras().items():
+                def _wrap(fn=extra_fn, n=extra_name):
+                    def wrapped(*args, **kwargs):
+                        tool_counts[n] = tool_counts.get(n, 0) + 1
+                        return fn(*args, **kwargs)
+                    return wrapped
+                ns[extra_name] = _wrap()
         return ns
 
     def _execute_python(self, code: str, namespace: dict) -> str:
@@ -394,7 +409,7 @@ class OllamaAgent:
         """Run the full agent loop using text-based REPL (no tool calling)."""
         formatted_query = QUERY_TEMPLATE.format(question=query)
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": formatted_query},
         ]
 
@@ -546,6 +561,9 @@ def _get_local_searcher_class(name: str):
     elif name == "lancedb-local":
         from lancedb_searcher import LanceDBSearcher
         return LanceDBSearcher
+    elif name == "gw-kb":
+        from gw_kb_searcher import GwKbSearcher
+        return GwKbSearcher
     else:
         raise ValueError(f"Unknown local searcher: {name}")
 
@@ -647,6 +665,11 @@ def main():
         default=2000,
         help="Max characters per search result snippet (default: 2000)",
     )
+    parser.add_argument(
+        "--system-prompt-file",
+        default=None,
+        help="Path to a file containing the system prompt. Overrides the default.",
+    )
 
     # Query input
     parser.add_argument(
@@ -695,6 +718,13 @@ def main():
         else:
             llm_url = args.ollama_url
 
+    # Load system prompt from file if requested
+    system_prompt: str | None = None
+    if args.system_prompt_file:
+        with open(args.system_prompt_file, encoding="utf-8") as f:
+            system_prompt = f.read()
+        print(f"Loaded system prompt from {args.system_prompt_file} ({len(system_prompt)} chars)")
+
     # Initialize agent
     agent = OllamaAgent(
         ollama_url=llm_url,
@@ -705,6 +735,7 @@ def main():
         include_get_document=args.include_get_document,
         snippet_max_chars=args.snippet_max_chars,
         backend=args.backend,
+        system_prompt=system_prompt,
     )
     print(f"Agent ready (backend={args.backend}, model={args.model}, url={llm_url}, max_turns={args.max_turns}, k={args.k})")
 

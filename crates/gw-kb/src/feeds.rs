@@ -56,11 +56,7 @@ pub struct FeedSyncReport {
 }
 
 /// Register a new feed. If `name` is `None`, derive it from the URL host.
-pub async fn add_feed(
-    pool: &PgPool,
-    url: &str,
-    name: Option<&str>,
-) -> Result<Feed, KbError> {
+pub async fn add_feed(pool: &PgPool, url: &str, name: Option<&str>) -> Result<Feed, KbError> {
     let url_trimmed = url.trim();
     if url_trimmed.is_empty() {
         return Err(KbError::Other("feed url is empty".into()));
@@ -106,7 +102,9 @@ async fn unique_slug(pool: &PgPool, base: &str) -> Result<String, KbError> {
         candidate = format!("{}-{}", base, n);
         n += 1;
         if n > 100 {
-            return Err(KbError::Other(format!("could not find unique slug for {base}")));
+            return Err(KbError::Other(format!(
+                "could not find unique slug for {base}"
+            )));
         }
     }
 }
@@ -240,7 +238,7 @@ async fn sync_one(
             continue;
         };
         if let Some(published) = entry.published {
-            if newest_seen.map_or(true, |n| published > n) {
+            if newest_seen.is_none_or(|n| published > n) {
                 newest_seen = Some(published);
             }
         }

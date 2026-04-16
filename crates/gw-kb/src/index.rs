@@ -38,7 +38,7 @@ pub struct KbLanceStore {
 
 impl KbLanceStore {
     pub async fn open(path: &str, dim: i32) -> Result<Self, KbError> {
-        let conn = connect(path).execute().await.map_err(lance_err)?;
+        let conn = connect(path).execute().await.map_err(|e| lance_err(&e))?;
         Ok(Self { conn, dim })
     }
 
@@ -70,7 +70,7 @@ impl KbLanceStore {
                     .create_table(KB_TABLE, Box::new(batches))
                     .execute()
                     .await
-                    .map_err(lance_err)
+                    .map_err(|e| lance_err(&e))
             }
         }
     }
@@ -107,7 +107,8 @@ impl KbLanceStore {
         let chunk_id_strs: Vec<String> = chunk_ids.iter().map(|u| u.to_string()).collect();
         let chunk_id_refs: Vec<&str> = chunk_id_strs.iter().map(|s| s.as_str()).collect();
         let source_str = source_id.to_string();
-        let source_repeated: Vec<&str> = (0..chunk_ids.len()).map(|_| source_str.as_str()).collect();
+        let source_repeated: Vec<&str> =
+            (0..chunk_ids.len()).map(|_| source_str.as_str()).collect();
         let content_refs: Vec<&str> = contents.iter().map(|s| s.as_str()).collect();
 
         let key_array = StringArray::from(chunk_id_refs);
@@ -117,8 +118,9 @@ impl KbLanceStore {
         let flat: Vec<f32> = vectors.iter().flat_map(|v| v.iter().copied()).collect();
         let values = Float32Array::from(flat);
         let item_field = Arc::new(Field::new("item", DataType::Float32, true));
-        let vector_array = FixedSizeListArray::try_new(item_field, self.dim, Arc::new(values), None)
-            .map_err(|e| KbError::Other(format!("arrow vector array: {e}")))?;
+        let vector_array =
+            FixedSizeListArray::try_new(item_field, self.dim, Arc::new(values), None)
+                .map_err(|e| KbError::Other(format!("arrow vector array: {e}")))?;
 
         let batch = RecordBatch::try_new(
             self.schema(),
@@ -133,7 +135,11 @@ impl KbLanceStore {
 
         let schema = self.schema();
         let batches = RecordBatchIterator::new(vec![Ok(batch)], schema);
-        table.add(Box::new(batches)).execute().await.map_err(lance_err)?;
+        table
+            .add(Box::new(batches))
+            .execute()
+            .await
+            .map_err(|e| lance_err(&e))?;
         Ok(())
     }
 
@@ -144,7 +150,7 @@ impl KbLanceStore {
             Err(_) => return Ok(()),
         };
         let filter = format!("source_id = '{}'", source_id);
-        table.delete(&filter).await.map_err(lance_err)?;
+        table.delete(&filter).await.map_err(|e| lance_err(&e))?;
         Ok(())
     }
 
@@ -161,7 +167,7 @@ impl KbLanceStore {
             .limit(k)
             .execute()
             .await
-            .map_err(lance_err)?;
+            .map_err(|e| lance_err(&e))?;
 
         let mut out = Vec::new();
         while let Some(batch) = stream
@@ -188,7 +194,7 @@ impl KbLanceStore {
     }
 }
 
-fn lance_err(e: lancedb::Error) -> KbError {
+fn lance_err(e: &lancedb::Error) -> KbError {
     KbError::Other(format!("lancedb: {e}"))
 }
 
@@ -227,7 +233,8 @@ impl KbTantivyStore {
             .map_err(|e| KbError::Other(format!("tantivy mkdir: {e}")))?;
 
         let index = if Index::open_in_dir(index_path).is_ok() {
-            Index::open_in_dir(index_path).map_err(|e| KbError::Other(format!("tantivy open: {e}")))?
+            Index::open_in_dir(index_path)
+                .map_err(|e| KbError::Other(format!("tantivy open: {e}")))?
         } else {
             Index::create_in_dir(index_path, schema)
                 .map_err(|e| KbError::Other(format!("tantivy create: {e}")))?
@@ -322,9 +329,10 @@ impl KbTantivyStore {
         qp.set_field_boost(self.f_title, 2.0);
         qp.set_field_boost(self.f_headings, 1.5);
 
-        let parsed = qp
-            .parse_query(query)
-            .map_err(|e| KbError::Other(format!("tantivy parse: {e}")))?;
+        // Use lenient parsing so special characters (apostrophes, quotes,
+        // unbalanced parens) don't crash the search — the agent sends
+        // free-form text, not tantivy query syntax.
+        let (parsed, _errors) = qp.parse_query_lenient(query);
         let top = searcher
             .search(&parsed, &TopDocs::with_limit(k))
             .map_err(|e| KbError::Other(format!("tantivy search: {e}")))?;
