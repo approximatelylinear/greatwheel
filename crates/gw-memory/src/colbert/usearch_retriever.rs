@@ -1,14 +1,13 @@
 //! Usearch first-stage retriever for ColBERT-style late interaction.
 //!
-//! Mirrors `bench/browsecomp/voyager_searcher.py`'s `search()` method but
-//! using a `usearch` HNSW index over flattened token vectors. For each
+//! Uses a `usearch` HNSW index over flattened token vectors. For each
 //! query token, we ANN-query the index for the top-N nearest passage
 //! tokens; then aggregate token hits by docid (per-query-token max,
 //! summed across query tokens) → top-K candidate docids.
 //!
 //! ## Storage layout
 //!
-//! Built once by a Python builder (`bench/browsecomp/build_usearch_index.py`).
+//! Built once by a Python builder.
 //! The on-disk artifacts are:
 //!
 //! - `index.usearch`            — usearch HNSW file (mmap'd via `view()`)

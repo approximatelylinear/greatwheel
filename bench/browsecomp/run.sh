@@ -11,9 +11,6 @@
 #   # Run with BM25 searcher (needs Java 21 + Lucene index)
 #   ./bench/browsecomp/run.sh bm25
 #
-#   # Run with LanceDB searcher (needs Ollama embeddings + built index)
-#   ./bench/browsecomp/run.sh lancedb
-#
 #   # Evaluate results
 #   ./bench/browsecomp/run.sh eval <run_dir>
 #
@@ -92,16 +89,6 @@ cmd_download_index() {
     echo "BM25 index downloaded to $VENDOR_DIR/indexes/bm25/"
 }
 
-cmd_build_lancedb() {
-    echo "=== Building LanceDB index ==="
-    uv sync --project "$SCRIPT_DIR" --extra lancedb
-    uvrun python "$SCRIPT_DIR/lancedb_searcher.py" \
-        --build-index \
-        --db-path "$DATA_DIR/lancedb" \
-        --ollama-url "$OLLAMA_URL" \
-        --embedding-model "$GW_EMBED_MODEL"
-}
-
 cmd_build_bm25s() {
     local index_path="${1:-$DATA_DIR/bm25s-index}"
 
@@ -152,50 +139,6 @@ cmd_bm25() {
         --max-turns 10
 }
 
-cmd_lancedb() {
-    local db_path="${1:-$DATA_DIR/lancedb}"
-    local output_dir="${2:-$VENDOR_DIR/runs/lancedb/ollama-$GW_MODEL}"
-
-    echo "=== Running BrowseComp-Plus with LanceDB + Ollama ($GW_MODEL) ==="
-    echo "  DB: $db_path"
-    echo "  Output: $output_dir"
-
-    uv sync --project "$SCRIPT_DIR" --extra lancedb
-    uvrun python -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-sys.path.insert(0, '$VENDOR_DIR/searcher')
-sys.path.insert(0, '$VENDOR_DIR/search_agent')
-
-from lancedb_searcher import LanceDBSearcher
-from pathlib import Path
-import argparse
-
-args = argparse.Namespace(
-    db_path='$db_path',
-    table_name='browsecomp_docs',
-    ollama_url='$OLLAMA_URL',
-    embedding_model='$GW_EMBED_MODEL',
-)
-
-searcher = LanceDBSearcher(args)
-
-from ollama_client import OllamaAgent, process_tsv
-
-agent = OllamaAgent(
-    ollama_url='$OLLAMA_URL',
-    model='$GW_MODEL',
-    searcher=searcher,
-    k=5,
-    max_turns=10,
-)
-
-tsv_path = Path('$VENDOR_DIR/topics-qrels/queries.tsv')
-output_dir = Path('$output_dir')
-process_tsv(agent, tsv_path, output_dir)
-"
-}
-
 cmd_eval() {
     local run_dir="${1:?Usage: run.sh eval <run_dir>}"
 
@@ -240,10 +183,8 @@ case "${1:-help}" in
     setup)          cmd_setup ;;
     download-index) cmd_download_index ;;
     build-bm25s)    shift; cmd_build_bm25s "$@" ;;
-    build-lancedb)  cmd_build_lancedb ;;
     bm25s)          shift; cmd_bm25s "$@" ;;
     bm25)           shift; cmd_bm25 "$@" ;;
-    lancedb)        shift; cmd_lancedb "$@" ;;
     eval)           shift; cmd_eval "$@" ;;
     quick)          shift; cmd_quick "$@" ;;
     *)
@@ -255,10 +196,8 @@ case "${1:-help}" in
         echo "  setup              Create venv, sync deps, decrypt dataset"
         echo "  download-index     Download pre-built BM25 Lucene index"
         echo "  build-bm25s [path] Build bm25s index (pure Python, no Java)"
-        echo "  build-lancedb      Build LanceDB vector index (needs Ollama)"
         echo "  bm25s [idx] [out]  Run agent with bm25s retrieval"
         echo "  bm25 [idx] [out]   Run agent with Pyserini BM25 (needs Java 21)"
-        echo "  lancedb [db] [out] Run agent with LanceDB retrieval"
         echo "  eval <run_dir>     Evaluate a run directory"
         echo "  quick [query]      Quick single-query test"
         echo ""

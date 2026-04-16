@@ -18,8 +18,8 @@
 //!   echo "Who won the Nobel Prize in Physics 2024?" | \
 //!       cargo run -p gw-memory --example colbert_search --release -- ...
 //!
-//! Designed to mirror Python's `voyager_searcher.py` + `BlobReranker` so we
-//! can compare quality and latency apples-to-apples.
+//! Mirrors the Python BlobReranker pipeline so we can compare quality
+//! and latency apples-to-apples.
 
 use std::io::{self, BufRead, Write};
 use std::sync::Arc;

@@ -558,9 +558,6 @@ def _get_local_searcher_class(name: str):
     if name == "bm25s":
         from bm25s_searcher import BM25sSearcher
         return BM25sSearcher
-    elif name == "lancedb-local":
-        from lancedb_searcher import LanceDBSearcher
-        return LanceDBSearcher
     elif name == "gw-kb":
         from gw_kb_searcher import GwKbSearcher
         return GwKbSearcher

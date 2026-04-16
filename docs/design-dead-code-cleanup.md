@@ -1,6 +1,6 @@
 # Design: Dead Code Cleanup & Code Quality
 
-**Status:** Phases 1–5 complete, 6 mostly done
+**Status:** All phases complete
 **Date:** 2026-04-16
 **Motivation:** Audit revealed orphaned crates, duplicate type definitions, copy-pasted
 helpers, superseded Python scripts, and 57 compiler/clippy warnings. Cleaning this up
@@ -21,8 +21,8 @@ full-codebase audit. Phases 1–3 have been implemented; phases 4–6 remain ope
 | 2 | Mechanical enforcement (rustfmt, clippy, workspace lints) | **Done** |
 | 3 | Code simplification across all crates | **Done** |
 | 4 | Unify duplicate message types across crates | **Done** |
-| 5 | Remove superseded Python scripts | **Partial** |
-| 6 | Housekeeping (gitignore, old runs) | **Partial** |
+| 5 | Remove superseded Python scripts | **Done** |
+| 6 | Housekeeping (gitignore, old runs) | **Done** |
 
 ### Results
 
@@ -31,8 +31,9 @@ full-codebase audit. Phases 1–3 have been implemented; phases 4–6 remain ope
 - **Tests**: 84 pass, 0 failures.
 - **Dead crates removed**: 3 (`gw-bus`, `gw-channels`, `gw-scheduler`)
 - **Duplicate types unified**: `LlmMessage` and `LlmResponse` canonical in `gw-core`
-- **Dead Python scripts removed**: 4 (`retrieval_benchmark.py`, `build_colbert_index.py`,
-  `rerank_server.py`, `test_colbert_passage.py`)
+- **Dead Python scripts removed**: 8 (`retrieval_benchmark.py`, `build_colbert_index.py`,
+  `rerank_server.py`, `test_colbert_passage.py`, `lancedb_searcher.py`,
+  `build_voyager_index.py`, `build_usearch_index.py`, `voyager_searcher.py`)
 
 ---
 
@@ -157,9 +158,7 @@ Canonical `LlmMessage` and `LlmResponse` structs now live in `gw-core/src/lib.rs
 
 ---
 
-## 5. Remove superseded Python scripts (partial)
-
-### Deleted
+## 5. Remove superseded Python scripts (done)
 
 | Dead file | Replacement | Reason |
 |-----------|-------------|--------|
@@ -167,29 +166,23 @@ Canonical `LlmMessage` and `LlmResponse` structs now live in `gw-core/src/lib.rs
 | `build_colbert_index.py` | `build_colbert_passage_index.py` | Passage-level version is newer, has resume logic |
 | `test_colbert_passage.py` | — | One-off manual test, not in any test suite |
 | `rerank_server.py` | `rerank_server_blobs.py` | Blob version is 450x faster |
+| `lancedb_searcher.py` | `searchers/lancedb_mv_searcher.py` | Old `BaseSearcher` interface superseded |
+| `build_voyager_index.py` | — | Voyager backend abandoned (108 GB index, no PQ) |
+| `build_usearch_index.py` | — | USearch backend not in active benchmarks |
+| `voyager_searcher.py` | — | Voyager backend abandoned |
 
-### Remaining (have active callers/importers)
-
-| Dead file | Blocker |
-|-----------|---------|
-| `lancedb_searcher.py` | Imported by `search_server.py`, `ollama_client.py`, `run.sh` — migrate to `searchers/` first |
-| `build_voyager_index.py` | `split()` and `title()` helpers imported by `build_passage_blob_store.py`, `voyager_searcher.py`, `build_usearch_index.py` — extract shared helpers first |
-| `build_usearch_index.py` | Imports from `build_voyager_index.py` — remove together |
-| `agents/triage.py` | Already gone (dir does not exist) |
+**Changes:**
+- Extracted `split()` and `title()` helpers to new `text_utils.py`
+- Updated `build_passage_blob_store.py` to import from `text_utils`
+- Removed LanceDB code paths from `search_server.py`, `ollama_client.py`, `run.sh`
+- Updated stale comments in `gw-memory` referencing deleted files
 
 ---
 
-## 6. Housekeeping (partial)
-
-### Done
+## 6. Housekeeping (done)
 
 | Item | Action |
 |------|--------|
 | `docs/*.aux`, `docs/*.log`, `docs/*.out` | Added to `.gitignore` |
-
-### Remaining
-
-| Item | Action |
-|------|--------|
-| `runs/` pre-April 8 directories | Consider archiving — ~2.5 GB of old experiment outputs |
-| `docs/design-episodes.md` | Unimplemented design; no code exists for it |
+| `runs/` pre-April 8 directories | Left in place (untracked, ~2.5 GB) |
+| `docs/design-episodes.md` | Left as-is — unimplemented design, no code exists |

@@ -1,14 +1,14 @@
-"""Thin HTTP server wrapping BM25s (+ optional LanceDB vector) search for gw-bench.
+"""Thin HTTP server wrapping BM25s (+ optional reranking) search for gw-bench.
 
 Usage:
     # BM25-only (default):
     uv run --project bench/browsecomp --extra bm25s python bench/browsecomp/search_server.py \
         --index-path vendor/BrowseComp-Plus/data/bm25s-index --port 8000
 
-    # Hybrid BM25 + LanceDB vector search:
+    # BM25 + blob rerank:
     uv run --project bench/browsecomp --extra bm25s python bench/browsecomp/search_server.py \
         --index-path vendor/BrowseComp-Plus/data/bm25s-index \
-        --lancedb-path vendor/BrowseComp-Plus/data/lancedb \
+        --blob-store vendor/BrowseComp-Plus/data/passage-blobs \
         --port 8000
 
 Endpoints:
@@ -33,32 +33,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 from bm25s_searcher import BM25sSearcher
 
 
-def reciprocal_rank_fusion(result_lists, k=60):
-    """Merge multiple ranked result lists using Reciprocal Rank Fusion.
-
-    Each result list is a list of dicts with at least "docid" and "text" keys.
-    Returns merged list sorted by RRF score (highest first).
-    """
-    scores = {}  # docid -> RRF score
-    docs = {}    # docid -> result dict
-
-    for results in result_lists:
-        for rank, r in enumerate(results):
-            docid = r["docid"]
-            scores[docid] = scores.get(docid, 0.0) + 1.0 / (k + rank + 1)
-            if docid not in docs:
-                docs[docid] = r
-
-    # Sort by RRF score descending
-    ranked = sorted(scores.items(), key=lambda x: -x[1])
-    return [docs[docid] for docid, _ in ranked]
-
-
 class SearchHandler(BaseHTTPRequestHandler):
     bm25_searcher: BM25sSearcher = None
-    lance_searcher = None  # Optional LanceDBSearcher
-    colbert_reranker = None  # Optional ColBERTReranker
-    blob_reranker = None  # Optional BlobReranker (precomputed ColBERT rerank)
+    colbert_reranker = None
+    blob_reranker = None
 
     def log_message(self, format, *args):
         pass  # silence request logs
@@ -70,13 +48,10 @@ class SearchHandler(BaseHTTPRequestHandler):
         if self.path == "/call/search":
             query = body.get("query", "")
             k = body.get("k", 5)
-            mode = body.get("mode", "hybrid")  # "bm25", "vector", or "hybrid"
+            mode = body.get("mode", "bm25")
 
             if mode == "blob_rerank" and self.blob_reranker is not None:
-                # BM25 top-200 → blob store MaxSim rerank → top-k
                 bm25_candidates = self.bm25_searcher.search(query, k=200)
-                # Build a text lookup from BM25 results so reranked results
-                # have snippets for the agent
                 text_by_docid = {c["docid"]: c.get("text", "") for c in bm25_candidates}
                 candidate_dicts = [{"docid": c["docid"]} for c in bm25_candidates]
                 reranked = self.blob_reranker.rerank(query, candidate_dicts)
@@ -84,32 +59,10 @@ class SearchHandler(BaseHTTPRequestHandler):
                     r["text"] = text_by_docid.get(r["docid"], "")
                 results = reranked[:k]
             elif mode == "rerank" and self.colbert_reranker is not None:
-                # BM25 top-50 → ColBERT rerank → top-k
                 bm25_candidates = self.bm25_searcher.search(query, k=50)
                 results = self.colbert_reranker.rerank(query, bm25_candidates, k=k)
-            elif mode == "vector" and self.lance_searcher is not None:
-                # Vector-only search
-                try:
-                    results = self.lance_searcher.search(query, k=k)
-                except Exception:
-                    results = []
-            elif mode == "bm25" or self.lance_searcher is None:
-                # BM25-only search
-                results = self.bm25_searcher.search(query, k=k)
             else:
-                # Hybrid: BM25 results first, then vector-unique docs
-                bm25_results = self.bm25_searcher.search(query, k=k)
-                try:
-                    vec_results = self.lance_searcher.search(query, k=k)
-                except Exception:
-                    vec_results = []
-
-                if vec_results:
-                    bm25_docids = {r["docid"] for r in bm25_results}
-                    vec_extra = [r for r in vec_results if r["docid"] not in bm25_docids]
-                    results = list(bm25_results) + vec_extra[:max(k // 2, 3)]
-                else:
-                    results = bm25_results
+                results = self.bm25_searcher.search(query, k=k)
 
             out = []
             for r in results:
@@ -123,8 +76,6 @@ class SearchHandler(BaseHTTPRequestHandler):
         elif self.path == "/call/get_document":
             docid = body.get("docid", "")
             doc = self.bm25_searcher.get_document(docid)
-            if doc is None and self.lance_searcher is not None:
-                doc = self.lance_searcher.get_document(docid)
             if doc:
                 self._json_response(200, doc["text"])
             else:
@@ -154,21 +105,6 @@ def main():
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument(
-        "--lancedb-path",
-        default=None,
-        help="Path to LanceDB database directory (enables hybrid search)",
-    )
-    parser.add_argument(
-        "--ollama-url",
-        default=os.getenv("OLLAMA_URL", "http://localhost:11434"),
-        help="Ollama URL for embeddings (used with --lancedb-path)",
-    )
-    parser.add_argument(
-        "--embedding-model",
-        default=os.getenv("GW_EMBED_MODEL", "nomic-embed-text"),
-        help="Embedding model (used with --lancedb-path)",
-    )
-    parser.add_argument(
         "--colbert-model",
         default=None,
         help="ColBERT model for reranking (e.g. lightonai/Reason-ModernColBERT-v1)",
@@ -197,17 +133,6 @@ def main():
         print(f"Loading ColBERT reranker: {args.colbert_model} ...", flush=True)
         SearchHandler.colbert_reranker = ColBERTReranker(args.colbert_model)
         mode = f"BM25 + ColBERT rerank ({args.colbert_model})"
-    elif args.lancedb_path:
-        from lancedb_searcher import LanceDBSearcher
-        lance_args = argparse.Namespace(
-            db_path=args.lancedb_path,
-            table_name="browsecomp_docs",
-            ollama_url=args.ollama_url,
-            embedding_model=args.embedding_model,
-        )
-        print(f"Loading LanceDB from {args.lancedb_path} ...", flush=True)
-        SearchHandler.lance_searcher = LanceDBSearcher(lance_args)
-        mode = "hybrid (BM25 + LanceDB vector)"
     else:
         mode = "BM25-only"
 

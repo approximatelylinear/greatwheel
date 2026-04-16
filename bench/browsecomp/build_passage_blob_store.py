@@ -44,7 +44,7 @@ import pyarrow as pa
 
 sys.path.insert(0, os.path.dirname(__file__))
 from colbert_encode import ColBERTEncoder
-from build_voyager_index import split as split_passages, title as extract_title
+from text_utils import split as split_passages, title as extract_title
 
 TABLE = "passage_blobs"
 ENCODE_BATCH = 32   # passages per encoder call
