@@ -3,7 +3,15 @@
 # Each query runs in its own gw-bench process; a panic on one query
 # does not kill the rest.
 #
-# Usage: run_per_query.sh <output-dir> <k> <max-turns> [extra gw-bench args...]
+# Usage: run_per_query.sh <output-dir> <k> <max-turns> [gw-bench args...]
+#
+# All gw-bench args (including --search-backend, --search-url, --model, etc.)
+# must be provided via the trailing args. Example:
+#
+#   run_per_query.sh runs/foo 10 12 \
+#       --search-backend http --search-url http://localhost:8000 \
+#       --search-mode bm25 --model qwen3.5:9b \
+#       --config bench/browsecomp/configs/baseline.toml
 set -u
 
 OUT_DIR="$1"
@@ -28,11 +36,6 @@ while IFS=$'\t' read -r qid qtext; do
     fi
     echo "[$n/30] q=$qid: running"
     if ! target/release/gw-bench \
-        --search-backend http \
-        --search-url http://localhost:8000 \
-        --search-mode bm25 \
-        --model qwen3.5:9b \
-        --config bench/browsecomp/configs/baseline.toml \
         --query "$qtext" \
         --query-id "$qid" \
         --output-dir "$OUT_DIR" \
@@ -47,4 +50,4 @@ done < "$TSV"
 
 echo ""
 echo "DONE: $n queries attempted, $crashes crashes"
-ls "$OUT_DIR"/run_*.json | wc -l | xargs echo "output files:"
+ls "$OUT_DIR"/run_*.json 2>/dev/null | wc -l | xargs echo "output files:"
