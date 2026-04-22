@@ -8,6 +8,7 @@ pub mod loop_event;
 pub mod plugin;
 pub mod session_tree;
 pub mod temporal;
+pub mod ui;
 
 pub use agent_bus::AgentBus;
 pub use channel::{ChannelAdapter, TaskChannelAdapter};
@@ -18,6 +19,7 @@ pub use plugin::{
     PluginManifest, PluginRegistrations, SharedState,
 };
 pub use session_tree::{EntryId, EntryType, ReplSnapshotData, SessionEntry, SessionState};
+pub use ui::{UiSurfaceId, Widget, WidgetEvent, WidgetId, WidgetKind, WidgetPayload, WidgetState};
 
 /// A chat message sent to or received from an LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]

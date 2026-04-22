@@ -1,0 +1,23 @@
+[package]
+name = "gw-ui"
+version = "0.1.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+gw-core = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }

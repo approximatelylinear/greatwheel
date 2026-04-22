@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::session_tree::EntryId;
+use crate::ui::{Widget, WidgetEvent, WidgetId};
 
 /// Events that drive the conversation loop state machine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,4 +30,12 @@ pub enum LoopEvent {
     TurnComplete,
     /// End the session.
     SessionEnd,
+    /// Agent emitted a widget to the session's UI surface. Outbound.
+    WidgetEmitted(Widget),
+    /// Agent replaced an existing widget. The old widget transitions
+    /// to `WidgetState::Superseded`. Outbound.
+    WidgetSuperseded { old: WidgetId, new: Widget },
+    /// User interacted with a widget. Inbound; will be routed into
+    /// `handle_turn` the same way `UserMessage` is once step 4 lands.
+    WidgetInteraction(WidgetEvent),
 }

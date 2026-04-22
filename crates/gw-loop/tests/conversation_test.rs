@@ -645,3 +645,48 @@ async fn test_plugin_router_dispatch_sync_and_async() {
         other => panic!("expected UnknownFunction error, got {:?}", other),
     }
 }
+
+#[tokio::test]
+async fn test_widget_interaction_runs_turn() {
+    use gw_core::{LoopEvent, UiSurfaceId, WidgetEvent, WidgetId};
+
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let repl = ReplAgent::new(vec!["FINAL".into()], Box::new(NullBridge));
+    let llm = Box::new(MockLlm::new(vec![
+        "```python\nFINAL(\"acknowledged\")\n```".into(),
+    ]));
+
+    let session_id = SessionId(Uuid::new_v4());
+    let config = LoopConfig::default();
+    let mut loop_ = ConversationLoop::new(session_id, repl, llm, config, event_tx.clone());
+
+    // Queue a WidgetInteraction then SessionEnd so `run` exits cleanly.
+    let ev = WidgetEvent {
+        widget_id: WidgetId(Uuid::new_v4()),
+        surface_id: UiSurfaceId(Uuid::new_v4()),
+        action: "submit".into(),
+        data: serde_json::json!({ "choice": "yes" }),
+    };
+    event_tx
+        .send(LoopEvent::WidgetInteraction(ev.clone()))
+        .unwrap();
+    event_tx.send(LoopEvent::SessionEnd).unwrap();
+
+    loop_.run(event_rx).await.unwrap();
+
+    // Tree should have a UserMessage entry carrying the widget-event text.
+    let entries = loop_.tree.entries();
+    let has_widget_msg = entries.iter().any(|e| {
+        matches!(
+            &e.entry_type,
+            EntryType::UserMessage(s) if s.contains("[widget-event]")
+                && s.contains("action=submit")
+        )
+    });
+    assert!(
+        has_widget_msg,
+        "tree missing widget-event user message; entries = {:?}",
+        entries
+    );
+}

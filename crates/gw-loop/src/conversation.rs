@@ -214,29 +214,11 @@ impl ConversationLoop {
 
             match event {
                 LoopEvent::UserMessage(content) => {
-                    let result = self.handle_turn(&content).await?;
-                    let _ = self.event_tx.send(LoopEvent::TurnComplete);
-                    if let Some(response) = result.response {
-                        let _ = self.event_tx.send(LoopEvent::Response {
-                            content: response,
-                            model: None,
-                        });
-                    }
+                    self.run_input_turn(&content).await?;
+                }
 
-                    // Process follow-ups.
-                    while let Some(follow_up) = self.pending_follow_ups.pop() {
-                        let result = self.handle_turn(&follow_up).await?;
-                        let _ = self.event_tx.send(LoopEvent::TurnComplete);
-                        if let Some(response) = result.response {
-                            let _ = self.event_tx.send(LoopEvent::Response {
-                                content: response,
-                                model: None,
-                            });
-                        }
-                    }
-
-                    // Check auto-compaction policy.
-                    self.check_auto_compact().await;
+                LoopEvent::WidgetInteraction(event) => {
+                    self.run_input_turn(&event.to_user_message()).await?;
                 }
 
                 LoopEvent::FollowUp(content) => {
@@ -260,9 +242,41 @@ impl ConversationLoop {
                 LoopEvent::Response { .. }
                 | LoopEvent::InputRequest(_)
                 | LoopEvent::HostCallCompleted { .. }
-                | LoopEvent::TurnComplete => {}
+                | LoopEvent::TurnComplete
+                | LoopEvent::WidgetEmitted(_)
+                | LoopEvent::WidgetSuperseded { .. } => {}
             }
         }
+    }
+
+    /// Run a single user-side input (text message or projected widget
+    /// interaction) as a turn, emit the resulting events, drain any
+    /// follow-ups the agent queued, and apply auto-compaction policy.
+    /// Used by both the `UserMessage` and `WidgetInteraction` arms of
+    /// `run` — kept as one helper so the two paths cannot drift.
+    async fn run_input_turn(&mut self, initial: &str) -> Result<(), LoopError> {
+        let result = self.handle_turn(initial).await?;
+        let _ = self.event_tx.send(LoopEvent::TurnComplete);
+        if let Some(response) = result.response {
+            let _ = self.event_tx.send(LoopEvent::Response {
+                content: response,
+                model: None,
+            });
+        }
+
+        while let Some(follow_up) = self.pending_follow_ups.pop() {
+            let result = self.handle_turn(&follow_up).await?;
+            let _ = self.event_tx.send(LoopEvent::TurnComplete);
+            if let Some(response) = result.response {
+                let _ = self.event_tx.send(LoopEvent::Response {
+                    content: response,
+                    model: None,
+                });
+            }
+        }
+
+        self.check_auto_compact().await;
+        Ok(())
     }
 
     // ─── Turn execution ─────────────────────────────────────────────
