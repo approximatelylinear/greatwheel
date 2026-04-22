@@ -20,6 +20,11 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+gw-engine = { workspace = true }
+gw-llm = { workspace = true }
+gw-loop = { workspace = true }
+gw-runtime = { workspace = true }
+ouros = { workspace = true }
 reqwest = { workspace = true }
 tower-http = { version = "0.6", features = ["cors"] }
 tracing-subscriber = { workspace = true }
@@ -27,3 +32,7 @@ tracing-subscriber = { workspace = true }
 [[example]]
 name = "echo_server"
 path = "examples/echo_server.rs"
+
+[[example]]
+name = "llm_server"
+path = "examples/llm_server.rs"

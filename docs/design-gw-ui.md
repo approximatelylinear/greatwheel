@@ -395,3 +395,11 @@ anyone builds seriously on it:
   identical to an active button. Bump opacity / cursor / border
   treatment under `.a2ui-widget.terminal` so post-click widgets
   clearly read as "done".
+- **Hydrate from `/surface` on mount.** The frontend currently only
+  applies SSE events, so refreshing the browser drops all prior
+  widgets from the UI even though they're still in the server's
+  `UiSurfaceStore`. Call `fetchSurface(sessionId)` before opening the
+  stream and seed the widget store from the snapshot. This is the
+  feature that actually demonstrates "widget lifecycle ≠ message
+  lifecycle" — durable widget state survives a frontend reload even
+  when message history doesn't.

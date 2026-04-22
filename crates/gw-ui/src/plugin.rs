@@ -1,11 +1,14 @@
 //! `gw-ui` plugin — exposes UI host functions to agents.
 //!
-//! Host functions registered (all capability-gated under `ui:write`):
-//!   - `ui.emit_widget`        — emit an A2UI or MCP-UI widget
-//!   - `ui.supersede_widget`   — replace an active widget with a new one
-//!   - `ui.resolve_widget`     — agent-driven close with a terminal value
-//!   - `ui.pin_to_canvas`      — move a widget into the canvas slot
-//!   - `ui.emit_mcp_resource`  — convenience for MCP-UI resources
+//! Host functions registered (all capability-gated under `ui:write`).
+//! Names are flat (no dots) so Python agents in ouros can call them
+//! directly by bare identifier:
+//!
+//!   - `emit_widget`        — emit an A2UI or MCP-UI widget
+//!   - `supersede_widget`   — replace an active widget with a new one
+//!   - `resolve_widget`     — agent-driven close with a terminal value
+//!   - `pin_to_canvas`      — move a widget into the canvas slot
+//!   - `emit_mcp_resource`  — convenience for MCP-UI resources
 //!
 //! The plugin owns an `Arc<UiSurfaceStore>` and publishes it via
 //! `ctx.provide` so the AG-UI adapter (step 3) can pick it up from
@@ -51,7 +54,7 @@ impl Plugin for UiPlugin {
         ctx.provide(store.clone());
 
         let s = store.clone();
-        ctx.register_host_fn_async("ui.emit_widget", Some("ui:write"), move |args, kwargs| {
+        ctx.register_host_fn_async("emit_widget", Some("ui:write"), move |args, kwargs| {
             let s = s.clone();
             async move {
                 let widget = build_widget(&args, &kwargs)?;
@@ -64,60 +67,48 @@ impl Plugin for UiPlugin {
         });
 
         let s = store.clone();
-        ctx.register_host_fn_async(
-            "ui.supersede_widget",
-            Some("ui:write"),
-            move |args, kwargs| {
-                let s = s.clone();
-                async move {
-                    let old_widget_id = WidgetId(parse_uuid(&kwargs, "old_widget_id")?);
-                    let mut new_widget = build_widget(&args, &kwargs)?;
-                    new_widget.supersedes = Some(old_widget_id);
-                    let new_id = new_widget.id;
-                    s.supersede(old_widget_id, new_widget)
-                        .await
-                        .map_err(|e| PluginError::HostFunction(e.to_string()))?;
-                    Ok(json!({ "widget_id": new_id.0.to_string() }))
-                }
-            },
-        );
+        ctx.register_host_fn_async("supersede_widget", Some("ui:write"), move |args, kwargs| {
+            let s = s.clone();
+            async move {
+                let old_widget_id = WidgetId(parse_uuid(&kwargs, "old_widget_id")?);
+                let mut new_widget = build_widget(&args, &kwargs)?;
+                new_widget.supersedes = Some(old_widget_id);
+                let new_id = new_widget.id;
+                s.supersede(old_widget_id, new_widget)
+                    .await
+                    .map_err(|e| PluginError::HostFunction(e.to_string()))?;
+                Ok(json!({ "widget_id": new_id.0.to_string() }))
+            }
+        });
 
         let s = store.clone();
-        ctx.register_host_fn_async(
-            "ui.resolve_widget",
-            Some("ui:write"),
-            move |_args, kwargs| {
-                let s = s.clone();
-                async move {
-                    let widget_id = WidgetId(parse_uuid(&kwargs, "widget_id")?);
-                    let data = kwargs.get("data").cloned().unwrap_or(Value::Null);
-                    s.resolve(widget_id, data)
-                        .await
-                        .map_err(|e| PluginError::HostFunction(e.to_string()))?;
-                    Ok(Value::Null)
-                }
-            },
-        );
+        ctx.register_host_fn_async("resolve_widget", Some("ui:write"), move |_args, kwargs| {
+            let s = s.clone();
+            async move {
+                let widget_id = WidgetId(parse_uuid(&kwargs, "widget_id")?);
+                let data = kwargs.get("data").cloned().unwrap_or(Value::Null);
+                s.resolve(widget_id, data)
+                    .await
+                    .map_err(|e| PluginError::HostFunction(e.to_string()))?;
+                Ok(Value::Null)
+            }
+        });
 
         let s = store.clone();
-        ctx.register_host_fn_async(
-            "ui.pin_to_canvas",
-            Some("ui:write"),
-            move |_args, kwargs| {
-                let s = s.clone();
-                async move {
-                    let widget_id = WidgetId(parse_uuid(&kwargs, "widget_id")?);
-                    s.pin_to_canvas(widget_id)
-                        .await
-                        .map_err(|e| PluginError::HostFunction(e.to_string()))?;
-                    Ok(Value::Null)
-                }
-            },
-        );
+        ctx.register_host_fn_async("pin_to_canvas", Some("ui:write"), move |_args, kwargs| {
+            let s = s.clone();
+            async move {
+                let widget_id = WidgetId(parse_uuid(&kwargs, "widget_id")?);
+                s.pin_to_canvas(widget_id)
+                    .await
+                    .map_err(|e| PluginError::HostFunction(e.to_string()))?;
+                Ok(Value::Null)
+            }
+        });
 
         let s = store;
         ctx.register_host_fn_async(
-            "ui.emit_mcp_resource",
+            "emit_mcp_resource",
             Some("ui:write"),
             move |_args, kwargs| {
                 let s = s.clone();
