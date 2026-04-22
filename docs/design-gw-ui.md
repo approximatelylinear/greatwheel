@@ -1,6 +1,6 @@
 # Design: Generative UX (`gw-ui`)
 
-**Status:** In progress (steps 1–5 landed)
+**Status:** All six steps landed
 **Date:** 2026-04-22
 
 ---
@@ -19,7 +19,8 @@ Steps 1 and 2 are landed. Subsequent steps follow the order in §11.
 | `WidgetInteraction` → turn delivery | Done (step 4) | `gw-loop/src/conversation.rs`, `gw-ui/src/ag_ui/adapter.rs` |
 | `supersede` / `resolve` / `pin_to_canvas` / `emit_mcp_resource` host fns | Done (step 5) | `gw-ui/src/plugin.rs` |
 | MCP-UI resource detector | Done (step 5, not yet wired) | `gw-ui/src/mcp_ui.rs` |
-| React frontend (Vite) | Step 6 | `frontend/` |
+| React frontend (Vite) | Done (step 6) | `frontend/` |
+| `echo_server` example for frontend smoke-testing | Done (step 6) | `crates/gw-ui/examples/echo_server.rs` |
 
 ---
 
@@ -321,6 +322,22 @@ value prop — server-side LLM orchestration in JS — is not useful
 here. Vite is minimal setup and the protocol work transfers
 unchanged when we later pick a real frontend.
 
+**Throwaway choices made in step 6.** To keep the reference client
+small and dependency-light:
+
+- No `@ag-ui/client` npm package — just `EventSource` + `fetch`. We
+  still speak the AG-UI wire format.
+- No `json-render` — a hand-rolled A2UI subset (Column / Row / Text /
+  Button). Swap in the real renderer when we need the full v0.9
+  catalog.
+- No `@mcp-ui/client` — a single sandboxed `<iframe>` stands in for
+  `UIResourceRenderer`. Production needs the two-level iframe + CSP
+  + postMessage bridge that library provides.
+- One fixed session per run via `echo_server` (`cargo run -p gw-ui
+  --example echo_server` prints a UUID; point the frontend at it).
+  Proper session bootstrap lives with `gw-server` integration, not
+  here.
+
 ---
 
 ## 11. Implementation Order
@@ -362,3 +379,19 @@ Each step ends at a runnable system.
 - **Permission model.** `ui:write` / `ui:read` capabilities are
   declared but not yet enforced (capability enforcement is a
   cross-cutting TODO in `HostFnRouter`).
+
+## 13. Follow-ups from Step 6 Frontend
+
+The throwaway frontend works end-to-end (chat + widget emit +
+interaction + resolve) but has rough edges worth cleaning up before
+anyone builds seriously on it:
+
+- **Widget placement by origin turn.** Widgets currently render at
+  the bottom of the chat scroll, not next to the turn that emitted
+  them. Needs `Widget.origin_entry` to be stamped on emit (agent or
+  loop side) and the frontend to group widgets by `origin_entry` /
+  turn boundary. Until then, historical widgets float out of place.
+- **Terminal-state button styling.** `.a2ui-button:disabled` looks
+  identical to an active button. Bump opacity / cursor / border
+  treatment under `.a2ui-widget.terminal` so post-click widgets
+  clearly read as "done".

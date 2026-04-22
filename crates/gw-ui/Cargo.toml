@@ -21,3 +21,9 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }
+tower-http = { version = "0.6", features = ["cors"] }
+tracing-subscriber = { workspace = true }
+
+[[example]]
+name = "echo_server"
+path = "examples/echo_server.rs"
