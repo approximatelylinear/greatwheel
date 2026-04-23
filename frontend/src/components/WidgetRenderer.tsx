@@ -7,21 +7,17 @@ import { McpUiWidget } from '../widgets/McpUiWidget';
 
 interface Props {
   widget: Widget;
-  pressedId: string | null;
 }
 
 /**
  * Thin per-widget wrapper: handles the lifecycle shell (terminal
  * banner, data-state attribute) and delegates the inline payload
- * tree to json-render's Renderer. Clicks flow up to the single
- * JSONUIProvider in App via the catalog's `interact` action.
+ * tree to json-render's Renderer. All state (pressed highlight,
+ * focused scope visibility) flows through the shared StateStore, so
+ * there are no runtime props beyond the widget itself.
  */
-export function WidgetRenderer({ widget, pressedId }: Props) {
-  const spec = useMemo(() => {
-    if (widget.kind !== 'A2ui') return null;
-    if (!('Inline' in widget.payload)) return null;
-    return toJrSpec(widget.payload.Inline, widget.id, widget.surface_id, pressedId);
-  }, [widget, pressedId]);
+export function WidgetRenderer({ widget }: Props) {
+  const spec = useMemo(() => toJrSpec(widget), [widget]);
 
   if (widget.kind === 'McpUi') return <McpUiWidget widget={widget} />;
   if (widget.kind !== 'A2ui') {

@@ -1,30 +1,29 @@
+import { useStateValue } from '@json-render/react';
 import type { Widget } from '../types';
 import { WidgetRenderer } from './WidgetRenderer';
 
-interface Props {
-  widget: Widget | null;
-  auxWidget: Widget | null;
-  pressedId: string | null;
-  auxPressedId: string | null;
-}
-
-export function CanvasPane({
-  widget,
-  auxWidget,
-  pressedId,
-  auxPressedId,
-}: Props) {
+/**
+ * Canvas reads directly from json-render state — `canvasSlot` and
+ * `canvasAuxSlot` are JSON-Pointer bindings populated by server
+ * STATE_DELTA patches (pin / pin_aux). No props needed.
+ */
+export function CanvasPane() {
+  const widgets = useStateValue<Record<string, Widget>>('/widgets') ?? {};
+  const primaryId = useStateValue<string | null>('/canvasSlot') ?? null;
+  const auxId = useStateValue<string | null>('/canvasAuxSlot') ?? null;
+  const primary = primaryId ? widgets[primaryId] ?? null : null;
+  const aux = auxId ? widgets[auxId] ?? null : null;
   return (
     <aside className="canvas-pane">
       <div className="canvas-header">Canvas</div>
-      {widget ? (
-        <WidgetRenderer widget={widget} pressedId={pressedId} />
+      {primary ? (
+        <WidgetRenderer widget={primary} />
       ) : (
         <div className="canvas-empty">No widget pinned.</div>
       )}
-      {auxWidget && (
+      {aux && (
         <div className="canvas-aux">
-          <WidgetRenderer widget={auxWidget} pressedId={auxPressedId} />
+          <WidgetRenderer widget={aux} />
         </div>
       )}
     </aside>

@@ -1,4 +1,5 @@
 import type { Spec, UIElement } from '@json-render/core';
+import type { Widget } from '../types';
 
 /**
  * Convert one of our nested A2UI widget payloads (as emitted by the
@@ -9,23 +10,20 @@ import type { Spec, UIElement } from '@json-render/core';
  *
  * Button/Card clicks are translated to an `on.press` ActionBinding
  * targeting the catalog's `interact` action. The server routes that
- * back to the agent via the existing /widget-events endpoint.
+ * back to the agent via /widget-events.
+ *
+ * Pressed highlight is a `{$state: "/pressed/<widget_id>/<button_id>"}`
+ * binding — truthy iff the server-side focus map names that button.
+ * Scope (when declared on the widget) becomes a `visible` condition
+ * on the root UIElement so json-render auto-hides widgets whose scope
+ * is not currently focused. See
+ * `docs/design-json-render-migration.md` §3.1.
  */
-/**
- * If `pressedId` is provided, the Card/Button `pressed` prop is
- * baked as a concrete boolean at translation time. If omitted, the
- * spec uses a `{$state: "/pressed/<id>"}` binding instead, so a
- * json-render StateStore drives highlight updates directly.
- */
-export function toJrSpec(
-  node: unknown,
-  widgetId: string,
-  surfaceId: string,
-  pressedId: string | null = null,
-): Spec {
-  const pressedProp = (id: string) =>
-    pressedId === null ? { $state: `/pressed/${id}` } : pressedId === id;
-
+export function toJrSpec(widget: Widget): Spec | null {
+  if (widget.kind !== 'A2ui') return null;
+  if (!('Inline' in widget.payload)) return null;
+  const widgetId = widget.id;
+  const surfaceId = widget.surface_id;
   const elements: Record<string, UIElement> = {};
   let counter = 0;
   const nextKey = () => `n${counter++}`;
@@ -61,7 +59,7 @@ export function toJrSpec(
           type: 'Button',
           props: {
             label: String(node.label ?? id),
-            pressed: pressedProp(id),
+            pressed: { $state: `/pressed/${widgetId}/${id}` },
           },
           on: {
             press: {
@@ -85,7 +83,7 @@ export function toJrSpec(
           props: {
             title: String(node.title ?? id),
             subtitle: node.subtitle != null ? String(node.subtitle) : null,
-            pressed: pressedProp(id),
+            pressed: { $state: `/pressed/${widgetId}/${id}` },
           },
           on: {
             press: {
@@ -114,6 +112,21 @@ export function toJrSpec(
     }
   };
 
-  const root = visit(node);
+  const root = visit(widget.payload.Inline);
+
+  // Scope → visibility. json-render resolves this every render against
+  // the StateStore; when `focusedScope[<kind>] !== key`, the root
+  // element (and therefore the whole widget) hides silently. The
+  // server populates focusedScope from `post_widget_event` click data.
+  if (widget.scope) {
+    elements[root] = {
+      ...elements[root],
+      visible: {
+        $state: `/focusedScope/${widget.scope.kind}`,
+        eq: widget.scope.key,
+      },
+    };
+  }
+
   return { root, elements };
 }

@@ -30,6 +30,11 @@ export interface Widget {
    *  assistant chat message instead of rendering it in the general
    *  scroll tail — for follow-up question buttons, etc. */
   follow_up?: boolean;
+  /** Agent-declared scope. When present, the json-render translator
+   *  bakes `visible: {$state: "/focusedScope/<kind>", eq: key}` onto
+   *  the widget's root element so it auto-hides when the user
+   *  navigates away. */
+  scope?: { kind: string; key: unknown } | null;
 }
 
 export interface WidgetEvent {

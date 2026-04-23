@@ -1,17 +1,14 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
+import { useStateValue } from '@json-render/react';
 import type { Widget } from '../types';
 import type { Message } from '../store/session';
 import { WidgetRenderer } from './WidgetRenderer';
 
 interface Props {
   messages: Message[];
-  widgets: Record<string, Widget>;
-  widgetOrder: string[];
-  pinnedIds: Record<string, true>;
   running: boolean;
-  pressedButtonIds: Record<string, string>;
   messageFollowUps: Record<string, string[]>;
   onSuggest: (content: string) => void;
 }
@@ -24,14 +21,17 @@ const SUGGESTIONS: string[] = [
 
 export function ChatPane({
   messages,
-  widgets,
-  widgetOrder,
-  pinnedIds,
   running,
-  pressedButtonIds,
   messageFollowUps,
   onSuggest,
 }: Props) {
+  // Widget records, order, and pinned set now live in the json-render
+  // StateStore (populated by STATE_SNAPSHOT + STATE_DELTA). Components
+  // subscribe via useStateValue; the reducer only tracks chat state.
+  const widgets = useStateValue<Record<string, Widget>>('/widgets') ?? {};
+  const widgetOrder = useStateValue<string[]>('/widgetOrder') ?? [];
+  const pinnedIds = useStateValue<Record<string, true>>('/pinnedIds') ?? {};
+
   // Widgets anchored to a message should NOT also appear in the
   // scroll tail; collect their ids and exclude.
   const anchored = new Set<string>(
@@ -71,13 +71,7 @@ export function ChatPane({
                 {messageFollowUps[m.id]!.map((wid) => {
                   const w = widgets[wid];
                   if (!w) return null;
-                  return (
-                    <WidgetRenderer
-                      key={wid}
-                      widget={w}
-                      pressedId={pressedButtonIds[w.id] ?? null}
-                    />
-                  );
+                  return <WidgetRenderer key={wid} widget={w} />;
                 })}
               </div>
             )}
@@ -89,10 +83,7 @@ export function ChatPane({
           if (!w) return null;
           return (
             <div key={id} className="widget-inline">
-              <WidgetRenderer
-                widget={w}
-                pressedId={pressedButtonIds[w.id] ?? null}
-              />
+              <WidgetRenderer widget={w} />
             </div>
           );
         })}
@@ -115,21 +106,12 @@ function normaliseNewlines(text: string): string {
  * don't) don't accidentally match.
  */
 function pullQuote(text: string): string {
-  // Word boundaries: require whitespace / opening punct / em-dash /
-  // start before the opening quote and whitespace / closing punct /
-  // end after the closing one, so possessives and contractions don't
-  // trigger matches. ≥3 chars between quotes also skips things like
-  // "s" or "ll".
   const pre = `(^|[\\s(\\[—–-])`;
   const post = `(?=[\\s.,!?;:)\\]—–-]|$)`;
   const patterns: RegExp[] = [
-    // ASCII single quotes 'like this'
     new RegExp(`${pre}'([^'\\n]{3,}?)'${post}`, 'g'),
-    // Unicode curly single quotes ‘like this’
     new RegExp(`${pre}‘([^’\\n]{3,}?)’${post}`, 'g'),
-    // ASCII double quotes "like this"
     new RegExp(`${pre}"([^"\\n]{3,}?)"${post}`, 'g'),
-    // Unicode curly double quotes “like this”
     new RegExp(`${pre}“([^”\\n]{3,}?)”${post}`, 'g'),
   ];
   let out = text;

@@ -108,10 +108,15 @@ pub async fn notification_to_patches(
             // before emitting the patch — consistent with the legacy
             // adapter path.
             let _ = store.get_widget(*widget_id).await?;
+            // Nested shape `{widget_id: {button_id: true}}` so json-render
+            // `{$state: "/pressed/<widget>/<button>"}` bindings resolve
+            // to a plain boolean. Replacing the inner map (rather than
+            // adding a key) auto-clears any previously-pressed button
+            // for the same widget.
             Some(vec![json!({
                 "op": "replace",
                 "path": format!("/pressed/{}", widget_id.0),
-                "value": button_id,
+                "value": { button_id: true },
             })])
         }
     }
@@ -274,6 +279,6 @@ mod tests {
         assert_eq!(patches.len(), 1);
         assert_eq!(patches[0]["op"], "replace");
         assert_eq!(patches[0]["path"], format!("/pressed/{}", id.0));
-        assert_eq!(patches[0]["value"], "ch-5");
+        assert_eq!(patches[0]["value"], json!({"ch-5": true}));
     }
 }

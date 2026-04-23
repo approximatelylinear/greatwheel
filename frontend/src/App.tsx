@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createStateStore, type StateStore } from '@json-render/core';
 import { JSONUIProvider } from '@json-render/react';
-import { fetchSurface, postMessage, postWidgetEvent } from './api/client';
+import { postMessage, postWidgetEvent } from './api/client';
 import { openStream } from './api/sse';
 import { useSessionStore } from './store/session';
 import { ChatPane } from './components/ChatPane';
@@ -36,13 +36,13 @@ export function App() {
   const [sessionId] = useState(resolveSessionId);
   const [debug] = useState(debugEnabled);
   const [streamError, setStreamError] = useState<string | null>(null);
-  const { state, hydrate, appendUser, markRunning, pressButton, ingest: sessionIngest } =
+  const { state, appendUser, markRunning, ingest: sessionIngest } =
     useSessionStore();
 
-  // json-render StateStore seeded with the canonical shape. Populated
-  // by STATE_SNAPSHOT + STATE_DELTA events via stateBridge. Phase 3a:
-  // coexists with the session reducer — reducer still drives
-  // components; this store is the migration target for phase 3b.
+  // Single json-render StateStore for the whole app. Populated by
+  // STATE_SNAPSHOT + STATE_DELTA events via the stateBridge helper;
+  // all widget/canvas/pressed/focusedScope consumers bind to it
+  // through useStateValue rather than reducer props.
   const storeRef = useRef<StateStore | null>(null);
   if (!storeRef.current) {
     storeRef.current = createStateStore(INITIAL_CANONICAL_STATE);
@@ -59,42 +59,17 @@ export function App() {
 
   useEffect(() => {
     if (!sessionId) return;
-    let closed = false;
-    let close: (() => void) | null = null;
-    // Hydrate durable widget state from the server before subscribing
-    // to the live event stream. Survives browser refresh — the session
-    // messages are ephemeral but widgets live in UiSurfaceStore.
-    fetchSurface(sessionId)
-      .then((snapshot) => {
-        if (closed) return;
-        hydrate(snapshot);
-      })
-      .catch((e) => setStreamError(String(e)))
-      .finally(() => {
-        if (closed) return;
-        close = openStream(
-          sessionId,
-          (ev) => ingest(ev),
-          (e) => setStreamError(String(e)),
-        );
-      });
-    return () => {
-      closed = true;
-      close?.();
-    };
-    // hydrate/sessionIngest are stable across renders (useReducer dispatch).
+    // STATE_SNAPSHOT on subscribe hydrates the store; no separate
+    // /surface fetch needed.
+    const close = openStream(
+      sessionId,
+      (ev) => ingest(ev),
+      (e) => setStreamError(String(e)),
+    );
+    return close;
+    // sessionIngest is stable (useReducer dispatch).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
-
-  const canvasWidget = useMemo(() => {
-    if (!state.canvasSlot) return null;
-    return state.widgets[state.canvasSlot] ?? null;
-  }, [state.canvasSlot, state.widgets]);
-
-  const canvasAuxWidget = useMemo(() => {
-    if (!state.canvasAuxSlot) return null;
-    return state.widgets[state.canvasAuxSlot] ?? null;
-  }, [state.canvasAuxSlot, state.widgets]);
 
   if (!sessionId) {
     return (
@@ -119,20 +94,19 @@ export function App() {
     }
   };
 
-  // Single interact handler for every widget in the app. json-render
-  // resolves `on.press` bindings against this handler; the catalog
-  // translator bakes widget_id/surface_id into each binding's params
-  // so we can route each click to the right backend session.
+  // Single interact handler for every widget. The catalog translator
+  // bakes widget_id / surface_id into each `on.press` ActionBinding,
+  // so this handler routes to the right backend session. Local
+  // pressed-state is no longer mirrored here — the server's
+  // STATE_DELTA writes `/pressed/<widget_id>` and the store re-emits
+  // to all $state bindings automatically.
   const handlers = useMemo(
     () => ({
       interact: async (params: Record<string, unknown>) => {
-        const widgetId = String(params.widgetId);
-        const buttonId = String(params.buttonId);
-        pressButton(widgetId, buttonId);
         markRunning();
         try {
           await postWidgetEvent(sessionId, {
-            widget_id: widgetId,
+            widget_id: String(params.widgetId),
             surface_id: String(params.surfaceId),
             action: String(params.action),
             data: params.data,
@@ -142,7 +116,7 @@ export function App() {
         }
       },
     }),
-    [sessionId, pressButton, markRunning],
+    [sessionId, markRunning],
   );
 
   return (
@@ -159,26 +133,11 @@ export function App() {
         <main className="app-main">
           <ChatPane
             messages={state.messages}
-            widgets={state.widgets}
-            widgetOrder={state.widgetOrder}
-            pinnedIds={state.pinnedIds}
             running={state.running}
-            pressedButtonIds={state.pressedButtonIds}
             messageFollowUps={state.messageFollowUps}
             onSuggest={onSend}
           />
-          <CanvasPane
-            widget={canvasWidget}
-            auxWidget={canvasAuxWidget}
-            pressedId={
-              canvasWidget ? state.pressedButtonIds[canvasWidget.id] ?? null : null
-            }
-            auxPressedId={
-              canvasAuxWidget
-                ? state.pressedButtonIds[canvasAuxWidget.id] ?? null
-                : null
-            }
-          />
+          <CanvasPane />
         </main>
       </JSONUIProvider>
       {debug && <DebugPane traces={state.codeTraces} />}
