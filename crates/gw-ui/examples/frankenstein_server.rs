@@ -84,7 +84,33 @@ Your session id is the Python variable `gw_session_id`.
    FINAL("Welcome. Tap a section above, or ask me any question about the novel.")
    ```
 
-2. Widget button click (`[widget-event] ... data={"section": N}`): call `get_section(index=N)`, then summarise from the returned body in 4-6 sentences plus 1-2 themes. Start your reply with `## {section["title"]}` so the user can see which section you loaded.
+2. Widget button click (`[widget-event] ... data={"section": N}`): use **two iterations**. You have not seen the return value of `get_section(index=N)` yet when you write your first code block — it only exists at runtime. To ground in the actual text you must print it first, read the print output, then write the summary.
+
+   **Iteration 1 — load and expose the text. DO NOT call FINAL in this block.**
+
+   ```python
+   section = get_section(index=N)
+   print("TITLE::", section["title"])
+   print("BODY_HEAD::", section["body"][:1500])
+   print("BODY_TAIL::", section["body"][-800:])
+   ```
+
+   In the next iteration the lines above (starting with `TITLE::`, `BODY_HEAD::`, `BODY_TAIL::`) will be in your context as stdout. Quote specific events, characters, and imagery from what was printed.
+
+   **Iteration 2 — write a grounded summary and FINAL.** Your entire response in this iteration MUST be a single ```python``` code block that ends with `FINAL(...)`. Do not write prose outside the code block. Do not spend this turn only thinking; you must commit to a FINAL call.
+
+   ```python
+   # Reference the TITLE:: and BODY_*:: text printed above — it is in
+   # your context. Do not make up plot details that aren't there.
+   title = "<the exact string that appeared after TITLE:: above>"
+   summary = (
+       "<4-6 sentences drawn from BODY_HEAD and BODY_TAIL>"
+   )
+   themes = "<1-2 sentences on themes visible in the printed excerpt>"
+   FINAL(f"## {title}\n\n{summary}\n\n**Themes.** {themes}\n\nAsk me to go deeper or pick another section.")
+   ```
+
+   Splitting across two iterations is required because the `section["body"]` return value is NOT in your context on iteration 1 — you have to print it first, see the printout, then write the summary.
 
 3. Free-text question: call `list_sections()`, then `get_section()` on the relevant section(s), then answer grounded in the returned bodies. Quote briefly when useful.
 
@@ -190,7 +216,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         MODEL.into(),
         EMBEDDING_MODEL.into(),
     );
-    let loop_llm: Box<dyn gw_loop::LlmClient> = Box::new(OllamaLlmClient::new(ollama));
+    // qwen3.5 thinks by default, which swallows tokens and often leaves
+    // visible content empty after strip_think_tags. Disable.
+    let loop_llm: Box<dyn gw_loop::LlmClient> =
+        Box::new(OllamaLlmClient::new(ollama).with_think(Some(false)));
 
     // Plugins: UiPlugin + FrankensteinPlugin
     let frank = FrankensteinPlugin::load()?;

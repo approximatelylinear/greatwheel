@@ -101,7 +101,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         MODEL.into(),
         EMBEDDING_MODEL.into(),
     );
-    let loop_llm: Box<dyn gw_loop::LlmClient> = Box::new(OllamaLlmClient::new(ollama));
+    let loop_llm: Box<dyn gw_loop::LlmClient> =
+        Box::new(OllamaLlmClient::new(ollama).with_think(Some(false)));
 
     // ── Plugins: UiPlugin owns the UiSurfaceStore; pull it back out
     // of SharedState so the AG-UI adapter can share it.
