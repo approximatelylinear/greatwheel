@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createStateStore, type StateStore } from '@json-render/core';
 import { JSONUIProvider } from '@json-render/react';
 import { fetchSurface, postMessage, postWidgetEvent } from './api/client';
 import { openStream } from './api/sse';
@@ -8,6 +9,10 @@ import { CanvasPane } from './components/CanvasPane';
 import { DebugPane } from './components/DebugPane';
 import { MessageInput } from './components/MessageInput';
 import { registry } from './jr/registry';
+import {
+  INITIAL_CANONICAL_STATE,
+  applyAgUiEventToStore,
+} from './jr/stateBridge';
 
 /**
  * Session ID source: ?session=<uuid> in the URL, else VITE_SESSION_ID,
@@ -31,7 +36,26 @@ export function App() {
   const [sessionId] = useState(resolveSessionId);
   const [debug] = useState(debugEnabled);
   const [streamError, setStreamError] = useState<string | null>(null);
-  const { state, hydrate, appendUser, markRunning, pressButton, ingest } = useSessionStore();
+  const { state, hydrate, appendUser, markRunning, pressButton, ingest: sessionIngest } =
+    useSessionStore();
+
+  // json-render StateStore seeded with the canonical shape. Populated
+  // by STATE_SNAPSHOT + STATE_DELTA events via stateBridge. Phase 3a:
+  // coexists with the session reducer — reducer still drives
+  // components; this store is the migration target for phase 3b.
+  const storeRef = useRef<StateStore | null>(null);
+  if (!storeRef.current) {
+    storeRef.current = createStateStore(INITIAL_CANONICAL_STATE);
+  }
+  const store = storeRef.current;
+
+  const ingest = useCallback(
+    (ev: Parameters<typeof sessionIngest>[0]) => {
+      sessionIngest(ev);
+      applyAgUiEventToStore(store, ev);
+    },
+    [sessionIngest, store],
+  );
 
   useEffect(() => {
     if (!sessionId) return;
@@ -58,7 +82,7 @@ export function App() {
       closed = true;
       close?.();
     };
-    // hydrate/ingest are stable across renders (from useReducer dispatch).
+    // hydrate/sessionIngest are stable across renders (useReducer dispatch).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
@@ -131,7 +155,7 @@ export function App() {
         {streamError && <span className="app-error">{streamError}</span>}
         <span className="app-mark" title={`session ${sessionId}`}>greatwheel</span>
       </header>
-      <JSONUIProvider registry={registry} handlers={handlers}>
+      <JSONUIProvider registry={registry} store={store} handlers={handlers}>
         <main className="app-main">
           <ChatPane
             messages={state.messages}
