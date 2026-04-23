@@ -20,6 +20,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+dotenvy = "0.15"
 gw-engine = { workspace = true }
 gw-llm = { workspace = true }
 gw-loop = { workspace = true }

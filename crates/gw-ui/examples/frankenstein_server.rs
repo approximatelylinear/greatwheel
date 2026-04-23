@@ -35,13 +35,26 @@ use tokio::sync::mpsc;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
-const MODEL: &str = "qwen3.5:9b";
+/// Model string for the Ollama path.
+const OLLAMA_MODEL: &str = "qwen3.5:9b";
 const OLLAMA_URL: &str = "http://localhost:11434";
 const EMBEDDING_MODEL: &str = "nomic-embed-text-v1.5";
+
+/// Default model string for the OpenAI path — override with `OPENAI_MODEL=...`.
+const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4";
 
 const FRANKENSTEIN_JSON: &str = include_str!("data/frankenstein.json");
 
 const SYSTEM_PROMPT: &str = r###"You are a literary guide to Mary Shelley's *Frankenstein; or, The Modern Prometheus* (1818). You help the user explore the novel.
+
+**Output format (CRITICAL):** Every response you produce MUST be a single fenced Python code block, i.e. starts with ```python on its own line and ends with ``` on its own line. Do NOT use OpenAI tool-calling syntax (no `to=<fn>` / JSON blobs / function_call / tool_calls). The harness only executes Python in fenced code blocks; anything else is ignored.
+
+Inside the code block, call the host functions as ordinary Python functions. Example skeleton:
+
+```python
+x = get_section(index=5)
+FINAL(f"Loaded {x['title']}")
+```
 
 The full text is accessible through host functions:
   - list_sections() -> list of {"index": int, "title": str}
@@ -202,6 +215,9 @@ impl Plugin for FrankensteinPlugin {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load .env for OPENAI_API_KEY etc. Silent if missing.
+    let _ = dotenvy::dotenv();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -209,17 +225,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    // LLM
-    let ollama = OllamaClient::new(
-        OLLAMA_URL.into(),
-        OLLAMA_URL.into(),
-        MODEL.into(),
-        EMBEDDING_MODEL.into(),
-    );
-    // qwen3.5 thinks by default, which swallows tokens and often leaves
-    // visible content empty after strip_think_tags. Disable.
+    // LLM: prefer OpenAI if an API key is present, else fall back to Ollama.
+    let (client, model_label) = if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_OPENAI_MODEL.into());
+        let label = format!("openai:{model}");
+        (OllamaClient::new_openai(key, model), label)
+    } else {
+        let ollama = OllamaClient::new(
+            OLLAMA_URL.into(),
+            OLLAMA_URL.into(),
+            OLLAMA_MODEL.into(),
+            EMBEDDING_MODEL.into(),
+        );
+        (ollama, format!("ollama:{OLLAMA_MODEL}"))
+    };
+    // qwen3.5 thinks by default; `with_think(Some(false))` applies cleanly
+    // in both paths (OpenAI backend ignores it).
     let loop_llm: Box<dyn gw_loop::LlmClient> =
-        Box::new(OllamaLlmClient::new(ollama).with_think(Some(false)));
+        Box::new(OllamaLlmClient::new(client).with_think(Some(false)));
 
     // Plugins: UiPlugin + FrankensteinPlugin
     let frank = FrankensteinPlugin::load()?;
@@ -321,7 +344,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = adapter.router().layer(CorsLayer::permissive());
     let listener = TcpListener::bind("127.0.0.1:8787").await?;
     println!("frankenstein server listening on http://127.0.0.1:8787");
-    println!("model: {MODEL}");
+    println!("model: {model_label}");
     println!("session_id: {}", session_id.0);
     println!("open http://localhost:5173/?session={}", session_id.0);
 

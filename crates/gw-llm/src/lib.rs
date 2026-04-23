@@ -23,8 +23,10 @@ fn parse_embedding(value: &serde_json::Value) -> Vec<f32> {
 pub enum LlmBackend {
     /// Ollama native API (/api/chat, /api/embed).
     Ollama,
-    /// OpenAI-compatible API (/v1/chat/completions) — SGLang, vLLM, etc.
+    /// OpenAI-compatible local server (/v1/chat/completions) — SGLang, vLLM, etc.
     Sglang,
+    /// OpenAI's hosted API (/v1/chat/completions with Bearer auth).
+    OpenAi,
 }
 
 impl std::fmt::Display for LlmBackend {
@@ -32,6 +34,7 @@ impl std::fmt::Display for LlmBackend {
         match self {
             LlmBackend::Ollama => write!(f, "ollama"),
             LlmBackend::Sglang => write!(f, "sglang"),
+            LlmBackend::OpenAi => write!(f, "openai"),
         }
     }
 }
@@ -41,9 +44,10 @@ impl std::str::FromStr for LlmBackend {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "ollama" => Ok(LlmBackend::Ollama),
-            "sglang" | "vllm" | "openai" => Ok(LlmBackend::Sglang),
+            "sglang" | "vllm" => Ok(LlmBackend::Sglang),
+            "openai" => Ok(LlmBackend::OpenAi),
             _ => Err(format!(
-                "unknown LLM backend: {s} (expected: ollama, sglang)"
+                "unknown LLM backend: {s} (expected: ollama, sglang, openai)"
             )),
         }
     }
@@ -60,6 +64,10 @@ pub struct OllamaClient {
     pub default_model: String,
     pub embedding_model: String,
     pub backend: LlmBackend,
+    /// Bearer token sent as `Authorization: Bearer <api_key>` on chat
+    /// requests. Only used when set; Ollama and local SGLang/vLLM
+    /// servers typically leave this `None`.
+    api_key: Option<String>,
     client: reqwest::Client,
 }
 
@@ -87,6 +95,7 @@ impl OllamaClient {
         backend: LlmBackend,
     ) -> Self {
         let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(300))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
@@ -96,15 +105,40 @@ impl OllamaClient {
             default_model,
             embedding_model,
             backend,
+            api_key: None,
             client,
         }
+    }
+
+    /// Convenience constructor for OpenAI's hosted API. Defaults to
+    /// `https://api.openai.com` and `text-embedding-3-small` for
+    /// embeddings. The api_key is sent as a Bearer token.
+    pub fn new_openai(api_key: String, default_model: String) -> Self {
+        let mut c = Self::with_backend(
+            "https://api.openai.com".into(),
+            "https://api.openai.com".into(),
+            default_model,
+            "text-embedding-3-small".into(),
+            LlmBackend::OpenAi,
+        );
+        c.api_key = Some(api_key);
+        c
+    }
+
+    /// Attach a Bearer API key to chat requests. Returns self for
+    /// chaining.
+    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.api_key = Some(api_key.into());
+        self
     }
 
     /// Returns the chat endpoint URL based on the active backend.
     fn chat_url(&self) -> String {
         match self.backend {
             LlmBackend::Ollama => format!("{}/api/chat", self.proxy_url),
-            LlmBackend::Sglang => format!("{}/v1/chat/completions", self.proxy_url),
+            LlmBackend::Sglang | LlmBackend::OpenAi => {
+                format!("{}/v1/chat/completions", self.proxy_url)
+            }
         }
     }
 
@@ -117,6 +151,7 @@ impl OllamaClient {
     ) -> Result<CompletionResponse, Box<dyn std::error::Error + Send + Sync>> {
         let think = match self.backend {
             LlmBackend::Sglang => Some(false), // SGLang + Qwen3.5: disable thinking by default
+            LlmBackend::OpenAi => None,        // OpenAI doesn't have a think parameter
             _ => None,
         };
         self.chat_with_options(messages, model, think).await
@@ -160,10 +195,17 @@ impl OllamaClient {
                         "enable_thinking": think_val,
                     });
                 }
+                LlmBackend::OpenAi => {
+                    // OpenAI models don't have a think toggle; ignore.
+                }
             }
         }
 
-        let resp = self.client.post(self.chat_url()).json(&body).send().await?;
+        let mut req = self.client.post(self.chat_url()).json(&body);
+        if let Some(key) = &self.api_key {
+            req = req.bearer_auth(key);
+        }
+        let resp = req.send().await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -184,7 +226,7 @@ impl OllamaClient {
                 let output = json["eval_count"].as_u64().map(|n| n as u32);
                 (content, input, output)
             }
-            LlmBackend::Sglang => {
+            LlmBackend::Sglang | LlmBackend::OpenAi => {
                 let content = json["choices"]
                     .as_array()
                     .and_then(|c| c.first())

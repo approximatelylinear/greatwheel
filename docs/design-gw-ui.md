@@ -427,20 +427,18 @@ demo work:
   accidental. A first-class fix: plumb `CallContext` through
   `HostFnRouter::dispatch` so the UI host fns can default
   `session_id` / `surface_id` from context when the agent omits them.
-- **FINAL() multi-part construction truncation.** Earlier
-  investigation turned up a different bug first: `ReplAgent::execute`
-  returned cumulative `is_final` from prior calls because it never
-  reset `self.final_value`, which made `handle_turn` short-circuit
-  every turn after the first. Fixed by resetting `final_value` at
-  the top of `execute`. Separately, qwen3.5:9b on Ollama still
-  struggles to produce grounded summaries in a two-iteration rLM
-  pattern even with `think=false` — iteration 2 often comes back
-  with tokens that all vanish after `strip_think_tags`, so no
-  visible response reaches the user. The plumbing (the new
-  `OllamaLlmClient::with_think(Some(false))` constructor) is in;
-  follow-up work is understanding whether Ollama honours `think=false`
-  for qwen3.5 or whether a larger/different model is needed for
-  reliable grounded summarization under the rLM loop.
+- ~~**FINAL() multi-part construction truncation.**~~ **Root cause
+  identified and fixed.** `ReplAgent::execute` returned cumulative
+  `is_final` from prior calls because it never reset
+  `self.final_value`, making `handle_turn` short-circuit every turn
+  after the first. Fixed in `fix(gw-runtime)`. Separately, qwen3.5:9b
+  couldn't produce grounded summaries under the two-iteration rLM
+  pattern even with `think=false` — likely a model-capability issue,
+  not a prompt or plumbing one. Switched the Frankenstein demo to use
+  OpenAI (`gpt-5.4`) via a new `LlmBackend::OpenAi` variant in
+  `gw-llm`; iteration 2 produces correctly-quoted, grounded Chapter 3
+  summaries reliably. Running against local Ollama still works as a
+  fallback when `OPENAI_API_KEY` isn't set.
 - ~~**Observability: show the agent's actual code.**~~ **Done.**
   `LoopEvent::CodeExecuted { code, stdout, is_final, error }` fires
   after every code block, projects to AG-UI
