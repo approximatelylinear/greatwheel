@@ -311,6 +311,14 @@ impl ReplAgent {
     pub fn execute(&mut self, code: &str) -> Result<ReplExecResult, AgentError> {
         let mut print_buf = CollectStringPrint::new();
 
+        // Reset per-call FINAL tracking. `self.final_value` is cumulative
+        // agent state for snapshot purposes, but `ReplExecResult::is_final`
+        // is per-block: "did THIS code block call FINAL()?" — which is
+        // what `ConversationLoop::handle_turn` relies on. Without this
+        // reset, turn 2+ see `is_final=true` forever because turn 1 left
+        // a final_value set.
+        self.final_value = None;
+
         let mut progress = self
             .session
             .execute_interactive(code, &mut print_buf)
