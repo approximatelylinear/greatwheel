@@ -131,5 +131,6 @@ fn sample_widget(session_id: SessionId, surface_id: UiSurfaceId) -> Widget {
         resolution: None,
         multi_use: false,
         follow_up: false,
+        scope: None,
     }
 }

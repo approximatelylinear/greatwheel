@@ -190,6 +190,7 @@ mod tests {
             resolution: None,
             multi_use: false,
             follow_up: false,
+            scope: None,
         }
     }
 

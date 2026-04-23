@@ -81,6 +81,18 @@ pub enum WidgetPayload {
     Reference { uri: String, csp: Option<String> },
 }
 
+/// Agent-declared scope a widget belongs to. Used by the AG-UI
+/// translator to emit `visible` conditions so widgets scoped to a
+/// non-focused key hide automatically. `kind` is a free-form tag the
+/// agent picks (e.g. `"section"`, `"character"`); `key` is the
+/// specific value within that kind (e.g. section index, character
+/// name). See `docs/design-json-render-migration.md` §3.1.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WidgetScope {
+    pub kind: String,
+    pub key: serde_json::Value,
+}
+
 /// A widget emitted by an agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Widget {
@@ -116,6 +128,13 @@ pub struct Widget {
     /// widget. Defaults to `false`.
     #[serde(default)]
     pub follow_up: bool,
+    /// Optional scope declaration — when present, the AG-UI translator
+    /// bakes `visible: {$state: "/focusedScope/<kind>", eq: key}` onto
+    /// this widget's root element so it auto-hides when the user
+    /// navigates away. Backend stores it verbatim; resolution is a
+    /// wire concern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<WidgetScope>,
 }
 
 /// A user interaction with a widget. Produced by the frontend, consumed by

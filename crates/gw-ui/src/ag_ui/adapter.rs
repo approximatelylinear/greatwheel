@@ -282,6 +282,7 @@ fn empty_snapshot(session_id: SessionId) -> UiSurfaceSnapshot {
             session_id,
             widget_order: Vec::new(),
             canvas_slot: None,
+            canvas_aux_slot: None,
         },
         widgets: Vec::new(),
     }
@@ -309,6 +310,7 @@ mod tests {
             resolution: None,
             multi_use: false,
             follow_up: false,
+            scope: None,
         }
     }
 

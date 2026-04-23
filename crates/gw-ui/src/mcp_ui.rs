@@ -58,7 +58,8 @@ pub fn detect(result: &Value, session_id: SessionId, surface_id: UiSurfaceId) ->
         resolved_at: None,
         resolution: None,
         multi_use: false,
-            follow_up: false,
+        follow_up: false,
+        scope: None,
     })
 }
 

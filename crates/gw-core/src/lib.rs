@@ -19,7 +19,9 @@ pub use plugin::{
     PluginManifest, PluginRegistrations, SharedState,
 };
 pub use session_tree::{EntryId, EntryType, ReplSnapshotData, SessionEntry, SessionState};
-pub use ui::{UiSurfaceId, Widget, WidgetEvent, WidgetId, WidgetKind, WidgetPayload, WidgetState};
+pub use ui::{
+    UiSurfaceId, Widget, WidgetEvent, WidgetId, WidgetKind, WidgetPayload, WidgetScope, WidgetState,
+};
 
 /// A chat message sent to or received from an LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]

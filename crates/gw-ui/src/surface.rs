@@ -20,8 +20,13 @@ pub struct UiSurface {
     pub session_id: SessionId,
     /// Widgets in insertion order.
     pub widget_order: Vec<WidgetId>,
-    /// Widget pinned to the canvas slot, if any.
+    /// Widget pinned to the primary canvas slot (top), if any.
     pub canvas_slot: Option<WidgetId>,
+    /// Widget pinned below the primary canvas slot (auxiliary /
+    /// contextual), if any. Typical use: primary = navigation picker,
+    /// auxiliary = information scoped to the current selection.
+    #[serde(default)]
+    pub canvas_aux_slot: Option<WidgetId>,
 }
 
 /// A snapshot of a surface and its widgets — returned to the frontend
@@ -62,8 +67,13 @@ pub enum UiNotification {
     Expired {
         id: WidgetId,
     },
-    /// A widget was moved into the surface's `canvas_slot`.
+    /// A widget was moved into the surface's primary `canvas_slot`.
     Pinned {
+        id: WidgetId,
+    },
+    /// A widget was moved into the surface's `canvas_aux_slot` (the
+    /// auxiliary region below the primary canvas pin).
+    AuxPinned {
         id: WidgetId,
     },
     /// The agent declared that a specific button within a widget is
@@ -117,6 +127,7 @@ impl UiSurfaceStore {
                     session_id: widget.session_id,
                     widget_order: Vec::new(),
                     canvas_slot: None,
+                    canvas_aux_slot: None,
                 });
             surface.widget_order.push(widget.id);
             inner.widgets.insert(widget.id, widget.clone());
@@ -158,6 +169,7 @@ impl UiSurfaceStore {
                         session_id: new.session_id,
                         widget_order: Vec::new(),
                         canvas_slot: None,
+                        canvas_aux_slot: None,
                     });
                 surface.widget_order.push(new.id);
             }
@@ -213,6 +225,26 @@ impl UiSurfaceStore {
         Ok(transitioned)
     }
 
+    /// Pin a widget into its surface's auxiliary (below) canvas slot.
+    /// Same shape as `pin_to_canvas`; writes `canvas_aux_slot`.
+    pub async fn pin_below_canvas(&self, id: WidgetId) -> Result<(), UiError> {
+        {
+            let mut inner = self.inner.write().await;
+            let session_id = inner
+                .widgets
+                .get(&id)
+                .ok_or(UiError::WidgetNotFound(id))?
+                .session_id;
+            let surface = inner
+                .surfaces
+                .get_mut(&session_id)
+                .ok_or(UiError::SurfaceNotFound(session_id))?;
+            surface.canvas_aux_slot = Some(id);
+        }
+        let _ = self.tx.send(UiNotification::AuxPinned { id });
+        Ok(())
+    }
+
     /// Pin a widget into its surface's canvas slot. The widget must
     /// exist; state is not restricted (you can pin a terminal widget
     /// to show its final state on the canvas).
@@ -262,6 +294,20 @@ impl UiSurfaceStore {
         Ok(UiSurfaceSnapshot { surface, widgets })
     }
 
+    /// Return the primary `canvas_slot` widget id for a session, if
+    /// any. Used by host functions that want to act on "the pinned
+    /// widget" without the agent having to remember its id across
+    /// turns (REPL assignments don't persist; `set_variable` does,
+    /// but that's only called at agent construction).
+    pub async fn primary_pin(&self, session_id: SessionId) -> Option<WidgetId> {
+        self.inner
+            .read()
+            .await
+            .surfaces
+            .get(&session_id)
+            .and_then(|s| s.canvas_slot)
+    }
+
     /// Direct widget lookup — mainly for tests and diagnostics.
     pub async fn get_widget(&self, id: WidgetId) -> Option<Widget> {
         self.inner.read().await.widgets.get(&id).cloned()
@@ -295,6 +341,7 @@ mod tests {
             resolution: None,
             multi_use: false,
             follow_up: false,
+            scope: None,
         }
     }
 

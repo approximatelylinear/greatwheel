@@ -8,6 +8,7 @@
 //!   - `supersede_widget`   — replace an active widget with a new one
 //!   - `resolve_widget`     — agent-driven close with a terminal value
 //!   - `pin_to_canvas`      — move a widget into the canvas slot
+//!   - `pin_below_canvas`   — move a widget into the auxiliary slot
 //!   - `highlight_button`   — mark a button as focused (UI hint only)
 //!   - `emit_mcp_resource`  — convenience for MCP-UI resources
 //!
@@ -21,7 +22,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use gw_core::{
     EntryId, Plugin, PluginContext, PluginError, PluginManifest, SessionId, UiSurfaceId, Widget,
-    WidgetId, WidgetKind, WidgetPayload, WidgetState,
+    WidgetId, WidgetKind, WidgetPayload, WidgetScope, WidgetState,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -43,6 +44,7 @@ impl Plugin for UiPlugin {
                 "host_fn:ui.supersede_widget".into(),
                 "host_fn:ui.resolve_widget".into(),
                 "host_fn:ui.pin_to_canvas".into(),
+                "host_fn:ui.pin_below_canvas".into(),
                 "host_fn:ui.highlight_button".into(),
                 "host_fn:ui.emit_mcp_resource".into(),
             ],
@@ -110,20 +112,53 @@ impl Plugin for UiPlugin {
 
         let s = store.clone();
         ctx.register_host_fn_async(
-            "highlight_button",
+            "pin_below_canvas",
             Some("ui:write"),
             move |_args, kwargs| {
                 let s = s.clone();
                 async move {
                     let widget_id = WidgetId(parse_uuid(&kwargs, "widget_id")?);
+                    s.pin_below_canvas(widget_id)
+                        .await
+                        .map_err(|e| PluginError::HostFunction(e.to_string()))?;
+                    Ok(Value::Null)
+                }
+            },
+        );
+
+        let s = store.clone();
+        ctx.register_host_fn_async(
+            "highlight_button",
+            Some("ui:write"),
+            move |_args, kwargs| {
+                let s = s.clone();
+                async move {
                     let button_id = kwargs
                         .get("button_id")
                         .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            PluginError::HostFunction("button_id required".into())
-                        })?
+                        .ok_or_else(|| PluginError::HostFunction("button_id required".into()))?
                         .to_string();
-                    s.highlight_button(widget_id, button_id);
+                    // Resolve widget: explicit widget_id wins; otherwise
+                    // fall back to the session's primary canvas pin.
+                    let widget_id = if let Some(uid) = optional_uuid(&kwargs, "widget_id")? {
+                        Some(WidgetId(uid))
+                    } else if let Some(sid) = optional_uuid(&kwargs, "session_id")? {
+                        s.primary_pin(SessionId(sid)).await
+                    } else {
+                        return Err(PluginError::HostFunction(
+                            "either widget_id or session_id is required".into(),
+                        ));
+                    };
+                    // Graceful degradation: if no widget is resolvable
+                    // (e.g. session hasn't pinned a picker yet), skip
+                    // the highlight rather than erroring. The rest of
+                    // the agent's code block can still run.
+                    match widget_id {
+                        Some(wid) => s.highlight_button(wid, button_id),
+                        None => tracing::debug!(
+                            "highlight_button: no canvas pin for session — skipping"
+                        ),
+                    }
                     Ok(Value::Null)
                 }
             },
@@ -166,6 +201,7 @@ fn build_mcp_widget(kwargs: &HashMap<String, Value>) -> Result<Widget, PluginErr
     let csp = kwargs.get("csp").and_then(|v| v.as_str()).map(String::from);
     let multi_use = parse_multi_use(kwargs);
     let follow_up = parse_follow_up(kwargs);
+    let scope = parse_scope(kwargs)?;
 
     Ok(Widget {
         id: WidgetId::new(),
@@ -181,6 +217,7 @@ fn build_mcp_widget(kwargs: &HashMap<String, Value>) -> Result<Widget, PluginErr
         resolution: None,
         multi_use,
         follow_up,
+        scope,
     })
 }
 
@@ -203,6 +240,7 @@ fn build_widget(_args: &[Value], kwargs: &HashMap<String, Value>) -> Result<Widg
     let supersedes = optional_uuid(kwargs, "supersedes")?.map(WidgetId);
     let multi_use = parse_multi_use(kwargs);
     let follow_up = parse_follow_up(kwargs);
+    let scope = parse_scope(kwargs)?;
 
     Ok(Widget {
         id: WidgetId::new(),
@@ -218,6 +256,7 @@ fn build_widget(_args: &[Value], kwargs: &HashMap<String, Value>) -> Result<Widg
         resolution: None,
         multi_use,
         follow_up,
+        scope,
     })
 }
 
@@ -231,6 +270,31 @@ fn parse_follow_up(kwargs: &HashMap<String, Value>) -> bool {
 
 fn parse_bool(kwargs: &HashMap<String, Value>, key: &str) -> bool {
     kwargs.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+/// Accept `scope={"kind": "...", "key": <any-json>}` from an agent call.
+/// Missing is fine; ill-formed is an error rather than silent drop so
+/// the agent learns the right shape instead of its scope being lost.
+fn parse_scope(kwargs: &HashMap<String, Value>) -> Result<Option<WidgetScope>, PluginError> {
+    let Some(raw) = kwargs.get("scope") else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(None);
+    }
+    let obj = raw
+        .as_object()
+        .ok_or_else(|| PluginError::HostFunction("scope must be an object".into()))?;
+    let kind = obj
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| PluginError::HostFunction("scope.kind must be a string".into()))?
+        .to_string();
+    let key = obj
+        .get("key")
+        .cloned()
+        .ok_or_else(|| PluginError::HostFunction("scope.key required".into()))?;
+    Ok(Some(WidgetScope { kind, key }))
 }
 
 fn parse_uuid(kwargs: &HashMap<String, Value>, key: &str) -> Result<Uuid, PluginError> {
@@ -315,6 +379,33 @@ mod tests {
         assert!(matches!(w.kind, WidgetKind::A2ui));
         assert!(matches!(w.payload, WidgetPayload::Inline(_)));
         assert_eq!(w.state, WidgetState::Active);
+        assert!(w.scope.is_none());
+    }
+
+    #[test]
+    fn build_widget_with_scope() {
+        let kwargs = kw(&[
+            ("session_id", Value::String(Uuid::new_v4().to_string())),
+            ("kind", Value::String("a2ui".into())),
+            ("payload", json!({"type": "Column"})),
+            ("scope", json!({"kind": "section", "key": 4})),
+        ]);
+        let w = build_widget(&[], &kwargs).unwrap();
+        let scope = w.scope.expect("scope");
+        assert_eq!(scope.kind, "section");
+        assert_eq!(scope.key, json!(4));
+    }
+
+    #[test]
+    fn build_widget_rejects_malformed_scope() {
+        let kwargs = kw(&[
+            ("session_id", Value::String(Uuid::new_v4().to_string())),
+            ("kind", Value::String("a2ui".into())),
+            ("payload", json!({"type": "Column"})),
+            // Missing `key`.
+            ("scope", json!({"kind": "section"})),
+        ]);
+        assert!(build_widget(&[], &kwargs).is_err());
     }
 
     #[test]
