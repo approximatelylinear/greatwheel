@@ -129,5 +129,6 @@ fn sample_widget(session_id: SessionId, surface_id: UiSurfaceId) -> Widget {
         created_at: Utc::now(),
         resolved_at: None,
         resolution: None,
+        multi_use: false,
     }
 }

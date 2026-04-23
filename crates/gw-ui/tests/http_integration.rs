@@ -55,6 +55,7 @@ fn active_widget(session: SessionId, surface: UiSurfaceId) -> Widget {
         created_at: Utc::now(),
         resolved_at: None,
         resolution: None,
+        multi_use: false,
     }
 }
 
@@ -176,6 +177,69 @@ async fn post_widget_event_resolves_and_forwards() {
     assert_eq!(
         stored.resolution.unwrap(),
         serde_json::json!({ "choice": "yes" })
+    );
+}
+
+#[tokio::test]
+async fn post_widget_event_does_not_resolve_multi_use_widget() {
+    let server = start_server().await;
+    let sid = SessionId(Uuid::new_v4());
+    let surface = UiSurfaceId::new();
+    let (tx, mut rx) = mpsc::unbounded_channel::<LoopEvent>();
+    server.adapter.register_session(sid, tx).await;
+
+    let mut widget = active_widget(sid, surface);
+    widget.multi_use = true;
+    let widget_id = widget.id;
+    server.store.emit(widget).await.unwrap();
+
+    let body = serde_json::json!({
+        "widget_id": widget_id.0,
+        "surface_id": surface.0,
+        "action": "submit",
+        "data": { "choice": "a" },
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("{}/sessions/{}/widget-events", server.base, sid.0))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+
+    // Interaction forwarded.
+    let event = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(event, LoopEvent::WidgetInteraction(_)));
+
+    // Widget stays Active — no resolution, no state change.
+    let stored = server.store.get_widget(widget_id).await.unwrap();
+    assert_eq!(stored.state, WidgetState::Active);
+    assert!(stored.resolution.is_none());
+
+    // Further clicks keep going through without resolving.
+    let resp2 = reqwest::Client::new()
+        .post(format!("{}/sessions/{}/widget-events", server.base, sid.0))
+        .json(&serde_json::json!({
+            "widget_id": widget_id.0,
+            "surface_id": surface.0,
+            "action": "submit",
+            "data": { "choice": "b" },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), reqwest::StatusCode::ACCEPTED);
+    let ev2 = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(ev2, LoopEvent::WidgetInteraction(_)));
+    assert_eq!(
+        server.store.get_widget(widget_id).await.unwrap().state,
+        WidgetState::Active
     );
 }
 

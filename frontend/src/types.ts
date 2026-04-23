@@ -24,6 +24,8 @@ export interface Widget {
   created_at: string;
   resolved_at?: string | null;
   resolution?: unknown;
+  /** When true, the adapter never auto-resolves on click. */
+  multi_use?: boolean;
 }
 
 export interface WidgetEvent {

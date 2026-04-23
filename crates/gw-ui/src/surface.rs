@@ -274,6 +274,7 @@ mod tests {
             created_at: Utc::now(),
             resolved_at: None,
             resolution: None,
+            multi_use: false,
         }
     }
 

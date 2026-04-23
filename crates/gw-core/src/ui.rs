@@ -100,6 +100,15 @@ pub struct Widget {
     pub resolved_at: Option<DateTime<Utc>>,
     /// Terminal value when `state == Resolved`.
     pub resolution: Option<serde_json::Value>,
+    /// If `true`, the adapter does **not** auto-resolve this widget on
+    /// user interaction — clicks become pure events and the widget
+    /// stays `Active` until the agent explicitly resolves / expires /
+    /// supersedes it. Useful for persistent "tool palette" widgets
+    /// (chapter pickers, model selectors) that are meant to be used
+    /// many times. Defaults to `false` for backward compatibility with
+    /// existing form-style widgets.
+    #[serde(default)]
+    pub multi_use: bool,
 }
 
 /// A user interaction with a widget. Produced by the frontend, consumed by

@@ -256,16 +256,26 @@ does not own.
 
 ### 8a. Widget event resolution
 
-When a `POST /sessions/:id/widget-events` arrives, the adapter calls
-`store.resolve(widget_id, data)` *before* forwarding
-`LoopEvent::WidgetInteraction` to the conversation loop. This keeps
-widget state ownership in the adapter layer — the loop never touches
-the store — and ensures the SSE stream sees the `Resolved` state
-delta immediately rather than after the agent's turn completes. If
-the widget is no longer `Active` (superseded, expired, or already
-resolved), the resolve error is logged and the interaction still
-forwards to the agent; the agent may choose how to react to
-late/duplicate clicks.
+When a `POST /sessions/:id/widget-events` arrives, the adapter checks
+the widget's `multi_use` flag:
+
+- **`multi_use: false` (default)** — the adapter calls
+  `store.resolve(widget_id, data)` *before* forwarding
+  `LoopEvent::WidgetInteraction`. The widget transitions to
+  `Resolved` and the SSE stream broadcasts a `resolve` state delta
+  immediately, so the frontend disables the widget before the agent's
+  turn even runs. Right for one-shot forms / confirm dialogs.
+- **`multi_use: true`** — the adapter skips the resolve and the
+  click is a pure event. The widget stays `Active` so users can keep
+  interacting. Right for persistent tool palettes: chapter pickers,
+  model selectors, tab bars. The agent can still resolve / expire /
+  supersede manually.
+
+Widget state ownership stays in the adapter layer — the loop never
+touches the store. If the widget is no longer `Active` (superseded,
+expired, or already resolved in the non-multi-use case), the resolve
+error is logged and the interaction still forwards; the agent may
+react to late/duplicate clicks.
 
 ## 9. MCP-UI Relay
 

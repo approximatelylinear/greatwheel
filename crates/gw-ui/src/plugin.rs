@@ -141,6 +141,7 @@ fn build_mcp_widget(kwargs: &HashMap<String, Value>) -> Result<Widget, PluginErr
         .ok_or_else(|| PluginError::HostFunction("uri required".into()))?
         .to_string();
     let csp = kwargs.get("csp").and_then(|v| v.as_str()).map(String::from);
+    let multi_use = parse_multi_use(kwargs);
 
     Ok(Widget {
         id: WidgetId::new(),
@@ -154,6 +155,7 @@ fn build_mcp_widget(kwargs: &HashMap<String, Value>) -> Result<Widget, PluginErr
         created_at: Utc::now(),
         resolved_at: None,
         resolution: None,
+        multi_use,
     })
 }
 
@@ -174,6 +176,7 @@ fn build_widget(_args: &[Value], kwargs: &HashMap<String, Value>) -> Result<Widg
     let payload = parse_payload(kwargs)?;
     let origin_entry = optional_uuid(kwargs, "origin_entry")?.map(EntryId);
     let supersedes = optional_uuid(kwargs, "supersedes")?.map(WidgetId);
+    let multi_use = parse_multi_use(kwargs);
 
     Ok(Widget {
         id: WidgetId::new(),
@@ -187,7 +190,15 @@ fn build_widget(_args: &[Value], kwargs: &HashMap<String, Value>) -> Result<Widg
         created_at: Utc::now(),
         resolved_at: None,
         resolution: None,
+        multi_use,
     })
+}
+
+fn parse_multi_use(kwargs: &HashMap<String, Value>) -> bool {
+    kwargs
+        .get("multi_use")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 fn parse_uuid(kwargs: &HashMap<String, Value>, key: &str) -> Result<Uuid, PluginError> {

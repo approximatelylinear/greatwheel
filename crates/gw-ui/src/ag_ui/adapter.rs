@@ -219,16 +219,26 @@ async fn post_widget_event(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let sid = parse_sid(&session_id)?;
 
-    // Resolve the widget in the store first. Best-effort: a widget that
-    // is already terminal (superseded, expired, or resolved by another
+    // Resolve the widget in the store first — unless it's `multi_use`,
+    // in which case clicks are pure events and the widget stays
+    // `Active` for further interaction. Best-effort: a widget that is
+    // already terminal (superseded, expired, or resolved by another
     // interaction in flight) should still forward the interaction to
     // the agent, but we log the anomaly.
-    if let Err(e) = state.store.resolve(body.widget_id, body.data.clone()).await {
-        warn!(
-            widget_id = ?body.widget_id,
-            error = %e,
-            "ag-ui widget event for non-active widget; forwarding interaction anyway"
-        );
+    let multi_use = state
+        .store
+        .get_widget(body.widget_id)
+        .await
+        .map(|w| w.multi_use)
+        .unwrap_or(false);
+    if !multi_use {
+        if let Err(e) = state.store.resolve(body.widget_id, body.data.clone()).await {
+            warn!(
+                widget_id = ?body.widget_id,
+                error = %e,
+                "ag-ui widget event for non-active widget; forwarding interaction anyway"
+            );
+        }
     }
 
     let inbound = state.inbound.lock().await;
@@ -297,6 +307,7 @@ mod tests {
             created_at: Utc::now(),
             resolved_at: None,
             resolution: None,
+            multi_use: false,
         }
     }
 

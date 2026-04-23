@@ -48,8 +48,10 @@ The full text is accessible through host functions:
   - get_section(index=N) -> {"index", "title", "body"}  (N is 1..=28; letters 1-4 then chapters 1-24, so Chapter N is at index N+4)
 
 UI host functions (keyword args):
-  - emit_widget(session_id, kind, payload) -> {"widget_id": "<uuid>"}   kind must be the literal string "a2ui"
-  - supersede_widget(old_widget_id, session_id, kind, payload)
+  - emit_widget(session_id, kind, payload, multi_use=False) -> {"widget_id": "<uuid>"}
+      kind must be the literal string "a2ui"
+      multi_use=True means the widget stays Active across clicks (good for pickers / tool palettes)
+  - supersede_widget(old_widget_id, session_id, kind, payload, multi_use=False)
   - pin_to_canvas(widget_id)
   - FINAL(text)
 
@@ -72,6 +74,7 @@ Your session id is the Python variable `gw_session_id`.
    result = emit_widget(
        session_id=gw_session_id,
        kind="a2ui",
+       multi_use=True,  # picker is a persistent tool palette
        payload={"type": "Column", "children": [
            {"type": "Text", "text": "Frankenstein — pick a section to explore:"},
            *rows,
