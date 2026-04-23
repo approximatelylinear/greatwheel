@@ -182,6 +182,15 @@ pub(crate) struct BenchConfig {
     pub nudge_reminder_start: usize,
     /// Max answer length before it's rejected as a refusal
     pub max_answer_length: usize,
+
+    // --- S5-lite: coverage pre-search ---
+    /// When true, pre-search returns the top-N from each of the N sub-queries
+    /// (round-robin, one hit per sub-query before a second) and skips PRF +
+    /// round-2 refinement. Enforces sub-fact coverage in the top-k.
+    pub presearch_coverage: bool,
+    /// Per-sub-query depth when presearch_coverage is true. Total budget is
+    /// roughly n_presearch_queries × presearch_coverage_per_query.
+    pub presearch_coverage_per_query: usize,
 }
 
 impl Default for BenchConfig {
@@ -211,6 +220,8 @@ impl Default for BenchConfig {
             max_search_calls: 20,
             bridge_timeout_secs: 150,
             repl_output_max_chars: 8000,
+            presearch_coverage: false,
+            presearch_coverage_per_query: 2,
             fallback_history_max_chars: 15000,
             fallback_msg_max_chars: 2000,
             nudge_reminder_start: 3,
@@ -1339,6 +1350,7 @@ fn pre_search(
     backend: &SearchBackend,
     k: u32,
     rt: &tokio::runtime::Handle,
+    bench_config: &BenchConfig,
 ) -> (Vec<serde_json::Value>, String, u32, u32) {
     // Ask LLM to extract diverse keyword queries — one per sub-fact in the question
     let extract_prompt = format!(
@@ -1387,6 +1399,45 @@ fn pre_search(
 
     info!(queries = ?queries, "Pre-search queries");
     let mut total_queries = queries.len();
+
+    // S5-lite: coverage pre-search — take top-N from each sub-query in
+    // round-robin (rank r across all queries before rank r+1), skip PRF +
+    // round-2. Forces sub-fact coverage in the top-k.
+    if bench_config.presearch_coverage {
+        let per_q = bench_config.presearch_coverage_per_query.max(1);
+        let mut per_query_hits: Vec<Vec<SearchHit>> = Vec::with_capacity(queries.len());
+        for search_query in &queries {
+            per_query_hits.push(backend_search(backend, search_query, per_q, rt));
+        }
+        let preview_chars = bench_config.context_snippet_chars;
+        'rr: for rank in 0..per_q {
+            for hits in &per_query_hits {
+                let Some(hit) = hits.get(rank) else { continue };
+                if !seen_docids.insert(hit.docid.clone()) {
+                    continue;
+                }
+                let snippet = hit.snippet.as_deref().unwrap_or("");
+                let preview: String = snippet.chars().take(preview_chars).collect();
+                context_text.push_str(&format!("docid={}: {}\n", hit.docid, preview));
+                all_hits.push(serde_json::json!({
+                    "docid": hit.docid,
+                    "snippet": snippet,
+                }));
+                if all_hits.len() >= queries.len() * per_q {
+                    break 'rr;
+                }
+            }
+        }
+        info!(
+            n_hits = all_hits.len(),
+            n_queries = queries.len(),
+            "Coverage pre-search complete (round-robin, no PRF, no round-2)"
+        );
+        let span = tracing::Span::current();
+        span.record("gw.hits", all_hits.len() as u64);
+        span.record("gw.queries", total_queries as u64);
+        return (all_hits, context_text, input_tokens, output_tokens);
+    }
 
     for search_query in &queries {
         let hits = backend_search(backend, search_query, std::cmp::min(k as usize, 5), rt);
@@ -2268,7 +2319,7 @@ fn run_single_query(
     // Pre-search: decompose query into sub-facts and run diverse searches
     let pre_search_start = std::time::Instant::now();
     let (context_hits, context_text, pre_input, pre_output) =
-        pre_search(llm, &cli.model, query_text, &pre_search_backend, cli.k, rt);
+        pre_search(llm, &cli.model, query_text, &pre_search_backend, cli.k, rt, bench_config);
     let pre_search_ms = pre_search_start.elapsed().as_millis() as u64;
 
     // Classify expected answer type (cheap — one short LLM call)

@@ -1,0 +1,46 @@
+# S5-lite: coverage pre-search.
+# 5 sub-queries × top-2 each (round-robin, dedup), skip PRF + round-2.
+# Budget = 10 context docs, one slice per sub-fact.
+
+system_prompt_path = ""
+
+# --- Pre-search ---
+n_presearch_queries = 5
+presearch_k = 5
+prf_top_n = 5
+prf_term_count = 5
+prf_min_word_len = 4
+prf_max_word_len = 20
+prf_k = 3
+round2_keep_max = 15
+round2_new_queries = 3
+round2_k = 5
+round1_preview_limit = 25
+round1_preview_chars = 200
+context_snippet_chars = 300
+
+# S5-lite flags
+presearch_coverage = true
+presearch_coverage_per_query = 2
+
+# --- BM25 boost weights ---
+bm25_phrase_boost = 4.0
+bm25_slop_boost = 2.0
+bm25_slop = 2
+bm25_and_boost = 1.5
+bm25_or_boost = 1.0
+
+# --- rLM loop ---
+query_timeout_secs = 180
+max_llm_calls = 25
+max_search_calls = 20
+bridge_timeout_secs = 150
+
+# --- Output truncation ---
+repl_output_max_chars = 8000
+fallback_history_max_chars = 15000
+fallback_msg_max_chars = 2000
+
+# --- Iteration prompts ---
+nudge_reminder_start = 3
+max_answer_length = 100
