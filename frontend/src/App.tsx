@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { WidgetEvent } from './types';
+import { JSONUIProvider } from '@json-render/react';
 import { fetchSurface, postMessage, postWidgetEvent } from './api/client';
 import { openStream } from './api/sse';
 import { useSessionStore } from './store/session';
@@ -7,6 +7,7 @@ import { ChatPane } from './components/ChatPane';
 import { CanvasPane } from './components/CanvasPane';
 import { DebugPane } from './components/DebugPane';
 import { MessageInput } from './components/MessageInput';
+import { registry } from './jr/registry';
 
 /**
  * Session ID source: ?session=<uuid> in the URL, else VITE_SESSION_ID,
@@ -66,6 +67,11 @@ export function App() {
     return state.widgets[state.canvasSlot] ?? null;
   }, [state.canvasSlot, state.widgets]);
 
+  const canvasAuxWidget = useMemo(() => {
+    if (!state.canvasAuxSlot) return null;
+    return state.widgets[state.canvasAuxSlot] ?? null;
+  }, [state.canvasAuxSlot, state.widgets]);
+
   if (!sessionId) {
     return (
       <div className="no-session">
@@ -89,15 +95,31 @@ export function App() {
     }
   };
 
-  const onInteract = async (ev: WidgetEvent, buttonId: string) => {
-    pressButton(ev.widget_id, buttonId);
-    markRunning();
-    try {
-      await postWidgetEvent(sessionId, ev);
-    } catch (e) {
-      setStreamError(String(e));
-    }
-  };
+  // Single interact handler for every widget in the app. json-render
+  // resolves `on.press` bindings against this handler; the catalog
+  // translator bakes widget_id/surface_id into each binding's params
+  // so we can route each click to the right backend session.
+  const handlers = useMemo(
+    () => ({
+      interact: async (params: Record<string, unknown>) => {
+        const widgetId = String(params.widgetId);
+        const buttonId = String(params.buttonId);
+        pressButton(widgetId, buttonId);
+        markRunning();
+        try {
+          await postWidgetEvent(sessionId, {
+            widget_id: widgetId,
+            surface_id: String(params.surfaceId),
+            action: String(params.action),
+            data: params.data,
+          });
+        } catch (e) {
+          setStreamError(String(e));
+        }
+      },
+    }),
+    [sessionId, pressButton, markRunning],
+  );
 
   return (
     <div className="app">
@@ -109,25 +131,32 @@ export function App() {
         {streamError && <span className="app-error">{streamError}</span>}
         <span className="app-mark" title={`session ${sessionId}`}>greatwheel</span>
       </header>
-      <main className="app-main">
-        <ChatPane
-          messages={state.messages}
-          widgets={state.widgets}
-          widgetOrder={state.widgetOrder}
-          canvasSlot={state.canvasSlot}
-          running={state.running}
-          pressedButtonIds={state.pressedButtonIds}
-          messageFollowUps={state.messageFollowUps}
-          onInteract={onInteract}
-        />
-        <CanvasPane
-          widget={canvasWidget}
-          pressedId={
-            canvasWidget ? state.pressedButtonIds[canvasWidget.id] ?? null : null
-          }
-          onInteract={onInteract}
-        />
-      </main>
+      <JSONUIProvider registry={registry} handlers={handlers}>
+        <main className="app-main">
+          <ChatPane
+            messages={state.messages}
+            widgets={state.widgets}
+            widgetOrder={state.widgetOrder}
+            pinnedIds={state.pinnedIds}
+            running={state.running}
+            pressedButtonIds={state.pressedButtonIds}
+            messageFollowUps={state.messageFollowUps}
+            onSuggest={onSend}
+          />
+          <CanvasPane
+            widget={canvasWidget}
+            auxWidget={canvasAuxWidget}
+            pressedId={
+              canvasWidget ? state.pressedButtonIds[canvasWidget.id] ?? null : null
+            }
+            auxPressedId={
+              canvasAuxWidget
+                ? state.pressedButtonIds[canvasAuxWidget.id] ?? null
+                : null
+            }
+          />
+        </main>
+      </JSONUIProvider>
       {debug && <DebugPane traces={state.codeTraces} />}
       <footer className="app-footer">
         <MessageInput onSend={onSend} disabled={state.running} />

@@ -278,6 +278,43 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
   font: 12px/1.4 var(--font-mono); overflow-x: auto;
 }
 
+/* Card: title + optional subtitle, full-width clickable. Used for
+   things like character profiles, list items, richer pickers. */
+.a2ui-card {
+  display: block; width: 100%; text-align: left;
+  padding: 8px 12px;
+  background: var(--surface-hi);
+  border: 1px solid var(--border-hi);
+  border-radius: var(--radius-md);
+  cursor: pointer; color: var(--fg);
+  font: inherit; font-family: var(--font-ui);
+  transition: all 150ms ease;
+}
+.a2ui-card:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--surface);
+  transform: translateY(-1px);
+}
+.a2ui-card:disabled { cursor: default; opacity: 0.55; }
+.a2ui-card.pressed {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: white;
+  box-shadow:
+    0 0 0 3px var(--accent-ring),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+.a2ui-card-title {
+  font-weight: 600; font-size: 13.5px;
+  letter-spacing: -0.005em;
+}
+.a2ui-card-sub {
+  margin-top: 2px; font-size: 12px;
+  color: var(--muted-strong); font-weight: 400;
+}
+.a2ui-card.pressed .a2ui-card-sub { color: rgba(255, 255, 255, 0.82); }
+.a2ui-widget.terminal .a2ui-card.pressed { text-decoration: none; }
+
 /* ─── Message-anchored follow-ups ────────────────────────────── */
 
 .message-followups {
@@ -332,6 +369,29 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
   padding: 5px 10px; font-size: 12.5px; min-width: 0;
 }
 
+/* Auxiliary canvas slot: information scoped to the current focus
+   of the primary pin (e.g. characters in the selected chapter). */
+.canvas-aux {
+  margin-top: 18px; padding-top: 18px;
+  border-top: 1px dashed var(--border);
+  animation: rise-in 280ms cubic-bezier(0.2, 0.8, 0.25, 1) both;
+}
+.canvas-aux .a2ui-widget {
+  background: transparent; border: none; padding: 0;
+}
+.canvas-aux .a2ui-column > .a2ui-text:first-child {
+  font-family: var(--font-ui); font-size: 10.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.14em;
+  color: var(--muted); padding: 0 0 8px;
+  border-bottom: none; margin-bottom: 0;
+}
+.canvas-aux .a2ui-card {
+  background: var(--bg-soft); border-color: var(--border);
+}
+.canvas-aux .a2ui-card:hover:not(:disabled) {
+  background: var(--surface);
+}
+
 .mcp-ui-iframe {
   width: 100%; min-height: 300px;
   border: 1px solid var(--border); border-radius: var(--radius-md);
@@ -376,6 +436,59 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
 .message-input button:disabled {
   background: var(--surface-hi); color: var(--muted);
   border-color: var(--border); cursor: not-allowed;
+}
+
+/* ─── Empty state (pre-interaction welcome) ──────────────────── */
+
+.empty-state {
+  max-width: 580px; margin: 48px auto 24px; padding: 0 16px;
+  animation: rise-in 320ms cubic-bezier(0.2, 0.8, 0.25, 1) both;
+}
+.empty-state h1 {
+  font-family: var(--font-serif);
+  font-size: 28px; font-weight: 500; line-height: 1.25;
+  letter-spacing: -0.015em; color: var(--fg);
+  margin: 0 0 18px;
+}
+.empty-state h1 em {
+  font-style: italic; color: var(--warm);
+  text-decoration-thickness: 1px;
+}
+.empty-state p {
+  font-family: var(--font-serif);
+  font-size: 15.75px; line-height: 1.65;
+  color: var(--fg-dim);
+  margin: 0 0 32px;
+}
+.empty-suggestions-label {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.16em;
+  color: var(--muted); font-weight: 600;
+  margin-bottom: 10px;
+}
+.empty-suggestions-list {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.empty-suggestion {
+  padding: 11px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--fg-dim);
+  text-align: left; cursor: pointer;
+  font: 14px/1.4 var(--font-ui);
+  transition: all 180ms ease;
+}
+.empty-suggestion:hover {
+  border-color: var(--accent);
+  background: var(--surface-hi);
+  color: var(--fg);
+  transform: translateX(3px);
+}
+.empty-suggestion::before {
+  content: "→";
+  color: var(--accent);
+  margin-right: 10px;
+  opacity: 0.7;
 }
 
 /* ─── No-session state ───────────────────────────────────────── */

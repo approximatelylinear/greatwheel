@@ -12,6 +12,7 @@ export interface SessionState {
   widgets: Record<string, Widget>;
   widgetOrder: string[];
   canvasSlot: string | null;
+  canvasAuxSlot: string | null;
   running: boolean;
   codeTraces: CodeTrace[];
   /** Per-widget "currently selected" button id. Set on user click OR
@@ -26,6 +27,21 @@ export interface SessionState {
   /** Follow-up widgets received before their anchor message existed.
    *  Drained onto the next assistant message. */
   pendingFollowUps: string[];
+  /** Widget ids that have ever been pinned to a canvas slot (primary
+   *  or auxiliary). Once pinned, a widget never renders in the chat
+   *  scroll tail even after it's been superseded out of the slot —
+   *  it either lives in canvas or is gone. */
+  pinnedIds: Record<string, true>;
+  /** Section-scoped widget memoisation. A widget whose Cards/Buttons
+   *  all carry `data.section = N` is considered "scoped" to section
+   *  N; we index `N → widget_id`. When a button bearing
+   *  `data.section = N` is pressed, we auto-swap the indexed widget
+   *  into `canvasAuxSlot` — so navigating back to a previously-viewed
+   *  section restores its characters widget without the agent having
+   *  to re-emit and re-pin it. Tactical workaround for the missing
+   *  "widgets are children of a section" data model; see
+   *  docs/design-gw-ui.md §14 follow-up. */
+  sectionScopedWidgets: Record<number, string>;
 }
 
 type Action =
@@ -39,6 +55,7 @@ type Action =
   | { type: 'widget-resolved'; widget_id: string; data: unknown }
   | { type: 'widget-expired'; widget_id: string }
   | { type: 'widget-pinned'; widget_id: string }
+  | { type: 'widget-aux-pinned'; widget_id: string }
   | { type: 'button-pressed'; widget_id: string; button_id: string }
   | { type: 'code-trace'; trace: CodeTrace };
 
@@ -49,23 +66,89 @@ const initial: SessionState = {
   widgets: {},
   widgetOrder: [],
   canvasSlot: null,
+  canvasAuxSlot: null,
   running: false,
   codeTraces: [],
   pressedButtonIds: {},
   messageFollowUps: {},
   pendingFollowUps: [],
+  pinnedIds: {},
+  sectionScopedWidgets: {},
 };
+
+/** Collect all distinct `data.section` values from Cards/Buttons in
+ *  a widget payload tree. */
+function collectSections(node: unknown, out: Set<number> = new Set()): Set<number> {
+  if (!node || typeof node !== 'object') return out;
+  const n = node as Record<string, unknown>;
+  if (n.type === 'Button' || n.type === 'Card') {
+    const data = n.data as { section?: unknown } | undefined;
+    if (data && typeof data.section === 'number') out.add(data.section);
+  }
+  const children = n.children;
+  if (Array.isArray(children)) {
+    for (const c of children) collectSections(c, out);
+  }
+  return out;
+}
+
+/** Return the section index a widget is "scoped" to, or null. A
+ *  widget qualifies when all its Card/Button `data.section` values
+ *  point to the SAME section (excludes pickers which reference
+ *  many sections). */
+function sectionScopeOf(widget: Widget): number | null {
+  if (!('Inline' in widget.payload)) return null;
+  const sections = collectSections(widget.payload.Inline);
+  if (sections.size !== 1) return null;
+  return [...sections][0]!;
+}
+
+/** Walk a widget payload to find the Card/Button with a given id
+ *  and return its `data.section`, if any. Lets us learn "what
+ *  section does this pressed button refer to?" without committing
+ *  to a particular id convention (e.g. `sec-{N}`). */
+function findButtonSection(widget: Widget, buttonId: string): number | null {
+  if (!('Inline' in widget.payload)) return null;
+  let found: number | null = null;
+  (function walk(node: unknown) {
+    if (found != null || !node || typeof node !== 'object') return;
+    const n = node as Record<string, unknown>;
+    if ((n.type === 'Button' || n.type === 'Card') && n.id === buttonId) {
+      const data = n.data as { section?: unknown } | undefined;
+      if (data && typeof data.section === 'number') found = data.section;
+      return;
+    }
+    const children = n.children;
+    if (Array.isArray(children)) for (const c of children) walk(c);
+  })(widget.payload.Inline);
+  return found;
+}
 
 function reducer(state: SessionState, action: Action): SessionState {
   switch (action.type) {
     case 'hydrate': {
       const widgets: Record<string, Widget> = {};
       for (const w of action.snapshot.widgets) widgets[w.id] = w;
+      const pinnedIds: Record<string, true> = {};
+      if (action.snapshot.surface.canvas_slot) {
+        pinnedIds[action.snapshot.surface.canvas_slot] = true;
+      }
+      if (action.snapshot.surface.canvas_aux_slot) {
+        pinnedIds[action.snapshot.surface.canvas_aux_slot] = true;
+      }
+      const sectionScopedWidgets: Record<number, string> = {};
+      for (const w of action.snapshot.widgets) {
+        const n = sectionScopeOf(w);
+        if (n != null) sectionScopedWidgets[n] = w.id;
+      }
       return {
         ...state,
         widgets,
         widgetOrder: [...action.snapshot.surface.widget_order],
         canvasSlot: action.snapshot.surface.canvas_slot,
+        canvasAuxSlot: action.snapshot.surface.canvas_aux_slot ?? null,
+        pinnedIds,
+        sectionScopedWidgets,
       };
     }
     case 'append-user':
@@ -120,10 +203,16 @@ function reducer(state: SessionState, action: Action): SessionState {
     case 'widget-emitted': {
       const w = action.widget;
       if (state.widgets[w.id]) return state;
+      const scope = sectionScopeOf(w);
+      const sectionScopedWidgets =
+        scope != null
+          ? { ...state.sectionScopedWidgets, [scope]: w.id }
+          : state.sectionScopedWidgets;
       const baseState = {
         ...state,
         widgets: { ...state.widgets, [w.id]: w },
         widgetOrder: [...state.widgetOrder, w.id],
+        sectionScopedWidgets,
       };
       if (!w.follow_up) return baseState;
       // Anchor follow-up widgets to a message.
@@ -190,15 +279,44 @@ function reducer(state: SessionState, action: Action): SessionState {
       };
     }
     case 'widget-pinned':
-      return { ...state, canvasSlot: action.widget_id };
-    case 'button-pressed':
       return {
         ...state,
-        pressedButtonIds: {
-          ...state.pressedButtonIds,
-          [action.widget_id]: action.button_id,
-        },
+        canvasSlot: action.widget_id,
+        pinnedIds: { ...state.pinnedIds, [action.widget_id]: true },
       };
+    case 'widget-aux-pinned':
+      return {
+        ...state,
+        canvasAuxSlot: action.widget_id,
+        pinnedIds: { ...state.pinnedIds, [action.widget_id]: true },
+      };
+    case 'button-pressed': {
+      const pressedButtonIds = {
+        ...state.pressedButtonIds,
+        [action.widget_id]: action.button_id,
+      };
+      // If the pressed button is section-scoped (its data.section is
+      // set) and we've previously indexed a section-scoped widget for
+      // that section, auto-swap the aux canvas slot to it. Lets you
+      // re-navigate to a past chapter and have its characters widget
+      // reappear without the agent re-emitting.
+      const widget = state.widgets[action.widget_id];
+      if (widget) {
+        const sectionIdx = findButtonSection(widget, action.button_id);
+        if (sectionIdx != null) {
+          const scopedId = state.sectionScopedWidgets[sectionIdx];
+          if (scopedId && scopedId !== state.canvasAuxSlot) {
+            return {
+              ...state,
+              pressedButtonIds,
+              canvasAuxSlot: scopedId,
+              pinnedIds: { ...state.pinnedIds, [scopedId]: true },
+            };
+          }
+        }
+      }
+      return { ...state, pressedButtonIds };
+    }
     case 'code-trace': {
       const nextTraces = [...state.codeTraces, action.trace];
       if (nextTraces.length > MAX_TRACES) {
@@ -242,6 +360,8 @@ function agUiToAction(ev: AgUiEvent): Action {
           return { type: 'widget-expired', widget_id: ev.patch.widget_id };
         case 'pin':
           return { type: 'widget-pinned', widget_id: ev.patch.widget_id };
+        case 'pin_aux':
+          return { type: 'widget-aux-pinned', widget_id: ev.patch.widget_id };
         case 'highlight':
           return {
             type: 'button-pressed',

@@ -44,6 +44,7 @@ export interface UiSurface {
   session_id: string;
   widget_order: string[];
   canvas_slot: string | null;
+  canvas_aux_slot?: string | null;
 }
 
 export interface UiSurfaceSnapshot {
@@ -80,4 +81,5 @@ export type StateDeltaPatch =
   | { kind: 'resolve'; widget_id: string; data: unknown }
   | { kind: 'expire'; widget_id: string }
   | { kind: 'pin'; widget_id: string }
+  | { kind: 'pin_aux'; widget_id: string }
   | { kind: 'highlight'; widget_id: string; button_id: string };

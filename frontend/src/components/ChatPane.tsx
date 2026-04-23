@@ -1,7 +1,7 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
-import type { Widget, WidgetEvent } from '../types';
+import type { Widget } from '../types';
 import type { Message } from '../store/session';
 import { WidgetRenderer } from './WidgetRenderer';
 
@@ -9,22 +9,28 @@ interface Props {
   messages: Message[];
   widgets: Record<string, Widget>;
   widgetOrder: string[];
-  canvasSlot: string | null;
+  pinnedIds: Record<string, true>;
   running: boolean;
   pressedButtonIds: Record<string, string>;
   messageFollowUps: Record<string, string[]>;
-  onInteract: (ev: WidgetEvent, buttonId: string) => void;
+  onSuggest: (content: string) => void;
 }
+
+const SUGGESTIONS: string[] = [
+  'Summarize Chapter 5',
+  'Who is Robert Walton?',
+  'What themes run through the novel?',
+];
 
 export function ChatPane({
   messages,
   widgets,
   widgetOrder,
-  canvasSlot,
+  pinnedIds,
   running,
   pressedButtonIds,
   messageFollowUps,
-  onInteract,
+  onSuggest,
 }: Props) {
   // Widgets anchored to a message should NOT also appear in the
   // scroll tail; collect their ids and exclude.
@@ -32,11 +38,16 @@ export function ChatPane({
     Object.values(messageFollowUps).flat(),
   );
   const inlineIds = widgetOrder.filter(
-    (id) => id !== canvasSlot && !anchored.has(id),
+    (id) => !pinnedIds[id] && !anchored.has(id),
   );
   const showTyping = running;
+  // Empty state: pre-interaction landing. Hides as soon as anything
+  // (message, typing indicator, inline widget) appears.
+  const isEmpty =
+    messages.length === 0 && !running && inlineIds.length === 0;
   return (
     <div className="chat-pane">
+      {isEmpty && <EmptyState onSuggest={onSuggest} />}
       <div className="messages">
         {messages.map((m) => (
           <div key={m.id}>
@@ -65,7 +76,6 @@ export function ChatPane({
                       key={wid}
                       widget={w}
                       pressedId={pressedButtonIds[w.id] ?? null}
-                      onInteract={onInteract}
                     />
                   );
                 })}
@@ -82,7 +92,6 @@ export function ChatPane({
               <WidgetRenderer
                 widget={w}
                 pressedId={pressedButtonIds[w.id] ?? null}
-                onInteract={onInteract}
               />
             </div>
           );
@@ -128,6 +137,35 @@ function pullQuote(text: string): string {
     out = out.replace(re, '$1<q class="pull-quote">$2</q>');
   }
   return out;
+}
+
+function EmptyState({ onSuggest }: { onSuggest: (content: string) => void }) {
+  return (
+    <div className="empty-state">
+      <h1>An agent reading <em>Frankenstein</em> with you.</h1>
+      <p>
+        Ask about the novel in plain language. Pick a chapter from the
+        list on the right and you'll get a summary grounded in the
+        actual text — with follow-up questions and the characters who
+        appear in that section ready to click.
+      </p>
+      <div className="empty-suggestions">
+        <div className="empty-suggestions-label">Try asking</div>
+        <div className="empty-suggestions-list">
+          {SUGGESTIONS.map((s) => (
+            <button
+              key={s}
+              type="button"
+              className="empty-suggestion"
+              onClick={() => onSuggest(s)}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function TypingBubble() {
