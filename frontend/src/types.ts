@@ -60,7 +60,17 @@ export type AgUiEvent =
   | { type: 'RUN_ERROR'; message: string; run_id?: string }
   | { type: 'INPUT_REQUEST'; prompt: string }
   | { type: 'UI_EVENT'; surface_id: string; widget: Widget }
-  | { type: 'STATE_DELTA'; surface_id: string; patch: StateDeltaPatch }
+  /** Full canonical state snapshot, emitted once on SSE subscribe.
+   *  Phase 2: ignored by the session reducer (we still hydrate from
+   *  `/surface`); phase 3 will consume it and drop the /surface fetch. */
+  | { type: 'STATE_SNAPSHOT'; surface_id: string; state: unknown }
+  /** Vanilla AG-UI JSON-Patch delta. Phase 2: ignored — we still read
+   *  from UI_PATCH (the legacy shape below). Phase 3 switches to this
+   *  and deletes UI_PATCH. */
+  | { type: 'STATE_DELTA'; surface_id: string; patches: unknown[] }
+  /** Legacy domain-shaped patch (supersede / resolve / expire / pin /
+   *  pin_aux / highlight). Phase 3 removes this. */
+  | { type: 'UI_PATCH'; surface_id: string; patch: StateDeltaPatch }
   | {
       type: 'DEBUG_CODE_EXEC';
       code: string;

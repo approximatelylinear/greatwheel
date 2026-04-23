@@ -33,7 +33,7 @@ pub fn loop_event_to_ag_ui(event: &LoopEvent) -> Option<AgUiEvent> {
             surface_id: w.surface_id.0.to_string(),
             widget: serde_json::to_value(w).ok()?,
         }),
-        LoopEvent::WidgetSuperseded { old, new } => Some(AgUiEvent::StateDelta {
+        LoopEvent::WidgetSuperseded { old, new } => Some(AgUiEvent::UiPatch {
             surface_id: new.surface_id.0.to_string(),
             patch: serde_json::json!({
                 "kind": "supersede",
@@ -84,7 +84,7 @@ pub async fn notification_to_ag_ui(
             let surface_id = new.surface_id.0.to_string();
             Some((
                 session_id,
-                AgUiEvent::StateDelta {
+                AgUiEvent::UiPatch {
                     surface_id,
                     patch: serde_json::json!({
                         "kind": "supersede",
@@ -98,7 +98,7 @@ pub async fn notification_to_ag_ui(
             let w = store.get_widget(id).await?;
             Some((
                 w.session_id,
-                AgUiEvent::StateDelta {
+                AgUiEvent::UiPatch {
                     surface_id: w.surface_id.0.to_string(),
                     patch: serde_json::json!({
                         "kind": "resolve",
@@ -112,7 +112,7 @@ pub async fn notification_to_ag_ui(
             let w = store.get_widget(id).await?;
             Some((
                 w.session_id,
-                AgUiEvent::StateDelta {
+                AgUiEvent::UiPatch {
                     surface_id: w.surface_id.0.to_string(),
                     patch: serde_json::json!({
                         "kind": "expire",
@@ -125,7 +125,7 @@ pub async fn notification_to_ag_ui(
             let w = store.get_widget(id).await?;
             Some((
                 w.session_id,
-                AgUiEvent::StateDelta {
+                AgUiEvent::UiPatch {
                     surface_id: w.surface_id.0.to_string(),
                     patch: serde_json::json!({
                         "kind": "pin",
@@ -138,7 +138,7 @@ pub async fn notification_to_ag_ui(
             let w = store.get_widget(id).await?;
             Some((
                 w.session_id,
-                AgUiEvent::StateDelta {
+                AgUiEvent::UiPatch {
                     surface_id: w.surface_id.0.to_string(),
                     patch: serde_json::json!({
                         "kind": "pin_aux",
@@ -154,7 +154,7 @@ pub async fn notification_to_ag_ui(
             let w = store.get_widget(widget_id).await?;
             Some((
                 w.session_id,
-                AgUiEvent::StateDelta {
+                AgUiEvent::UiPatch {
                     surface_id: w.surface_id.0.to_string(),
                     patch: serde_json::json!({
                         "kind": "highlight",
@@ -258,7 +258,7 @@ mod tests {
         };
         let ag = loop_event_to_ag_ui(&ev).unwrap();
         match ag {
-            AgUiEvent::StateDelta { patch, .. } => {
+            AgUiEvent::UiPatch { patch, .. } => {
                 assert_eq!(patch["kind"], "supersede");
                 assert_eq!(patch["old"], serde_json::json!(old_id.0));
             }
@@ -309,7 +309,7 @@ mod tests {
         let (got_sid, ev) = notification_to_ag_ui(&store, notif).await.unwrap();
         assert_eq!(got_sid, session_id);
         match ev {
-            AgUiEvent::StateDelta { patch, .. } => {
+            AgUiEvent::UiPatch { patch, .. } => {
                 assert_eq!(patch["kind"], "resolve");
                 assert_eq!(patch["widget_id"], serde_json::json!(id.0));
             }

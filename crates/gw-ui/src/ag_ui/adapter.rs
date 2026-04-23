@@ -36,6 +36,9 @@ use crate::surface::{UiSurfaceSnapshot, UiSurfaceStore};
 
 use super::codec::{loop_event_to_ag_ui, notification_to_ag_ui};
 use super::events::{AgUiEvent, PostMessageBody};
+use super::state::{
+    canonical_state, notification_session, notification_surface, notification_to_patches,
+};
 
 /// Inbound sink type: one per registered session. The frontend's HTTP
 /// POSTs are translated to `LoopEvent`s and pushed through this channel
@@ -76,12 +79,30 @@ impl AgUiAdapter {
             loop {
                 match rx.recv().await {
                     Ok(notif) => {
-                        let Some((session_id, ev)) = notification_to_ag_ui(&st.store, notif).await
-                        else {
+                        // Emit the new JSON-Patch STATE_DELTA (vanilla
+                        // AG-UI) and the legacy UI_PATCH (for the
+                        // current frontend reducer) in parallel. Phase 3
+                        // will delete the legacy leg.
+                        let Some(session_id) = notification_session(&st.store, &notif).await else {
                             continue;
                         };
+                        let surface_id = notification_surface(&st.store, &notif)
+                            .await
+                            .unwrap_or_default();
+                        let patches = notification_to_patches(&st.store, &notif).await;
+                        let legacy = notification_to_ag_ui(&st.store, notif).await;
+
                         let sessions = st.sessions.lock().await;
-                        if let Some(tx) = sessions.get(&session_id) {
+                        let Some(tx) = sessions.get(&session_id) else {
+                            continue;
+                        };
+                        if let Some(patches) = patches {
+                            let _ = tx.send(AgUiEvent::StateDelta {
+                                surface_id: surface_id.clone(),
+                                patches,
+                            });
+                        }
+                        if let Some((_, ev)) = legacy {
                             let _ = tx.send(ev);
                         }
                     }
@@ -182,11 +203,28 @@ async fn sse_handler(
     let rx = tx.subscribe();
     debug!(session_id = %sid.0, "ag-ui sse subscribed");
 
-    let stream = BroadcastStream::new(rx).filter_map(|msg| match msg {
+    // Build a STATE_SNAPSHOT so a vanilla AG-UI client can render
+    // without a separate /surface fetch. Emitted as the first event
+    // on the stream, ahead of any live deltas.
+    let snapshot_event = match state.store.snapshot(sid).await {
+        Ok(snap) => Some(AgUiEvent::StateSnapshot {
+            surface_id: snap.surface.id.0.to_string(),
+            state: canonical_state(&snap),
+        }),
+        Err(_) => None,
+    };
+    let snapshot_stream = futures::stream::iter(snapshot_event.into_iter().map(|ev| {
+        Event::default()
+            .json_data(&ev)
+            .map_err(|_| axum::Error::new("serialise STATE_SNAPSHOT"))
+    }));
+
+    let live_stream = BroadcastStream::new(rx).filter_map(|msg| match msg {
         Ok(ev) => Event::default().json_data(&ev).ok().map(Ok),
         Err(_lagged) => None,
     });
 
+    let stream = snapshot_stream.chain(live_stream);
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
@@ -358,11 +396,25 @@ mod tests {
         let w = active_widget(sid, UiSurfaceId::new());
         store.emit(w).await.unwrap();
 
-        let ev = tokio::time::timeout(std::time::Duration::from_millis(200), sub.recv())
+        // Phase 2 dual-emit: every store notification produces a
+        // vanilla-AG-UI STATE_DELTA first and the legacy UI_EVENT /
+        // UI_PATCH second. Collect both and confirm the set.
+        let first = tokio::time::timeout(std::time::Duration::from_millis(200), sub.recv())
             .await
             .unwrap()
             .unwrap();
-        assert!(matches!(ev, AgUiEvent::UiEvent { .. }));
+        let second = tokio::time::timeout(std::time::Duration::from_millis(200), sub.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(first, AgUiEvent::StateDelta { .. }),
+            "expected STATE_DELTA first, got {first:?}"
+        );
+        assert!(
+            matches!(second, AgUiEvent::UiEvent { .. }),
+            "expected UI_EVENT second, got {second:?}"
+        );
     }
 
     #[tokio::test]

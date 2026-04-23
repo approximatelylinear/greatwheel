@@ -336,11 +336,14 @@ export function useSessionStore() {
     markRunning: () => dispatch({ type: 'mark-running' }),
     pressButton: (widgetId: string, buttonId: string) =>
       dispatch({ type: 'button-pressed', widget_id: widgetId, button_id: buttonId }),
-    ingest: (ev: AgUiEvent) => dispatch(agUiToAction(ev)),
+    ingest: (ev: AgUiEvent) => {
+      const action = agUiToAction(ev);
+      if (action) dispatch(action);
+    },
   };
 }
 
-function agUiToAction(ev: AgUiEvent): Action {
+function agUiToAction(ev: AgUiEvent): Action | null {
   switch (ev.type) {
     case 'TEXT_MESSAGE_CONTENT':
       return { type: 'assistant-chunk', message_id: ev.message_id, delta: ev.delta };
@@ -361,7 +364,12 @@ function agUiToAction(ev: AgUiEvent): Action {
       return { type: 'assistant-chunk', message_id: crypto.randomUUID(), delta: ev.prompt };
     case 'UI_EVENT':
       return { type: 'widget-emitted', widget: ev.widget };
+    case 'STATE_SNAPSHOT':
     case 'STATE_DELTA':
+      // Phase 2: ignore. We still hydrate from /surface and consume
+      // UI_PATCH for live updates. Phase 3 will flip both on.
+      return null;
+    case 'UI_PATCH':
       switch (ev.patch.kind) {
         case 'supersede':
           return { type: 'widget-superseded', old: ev.patch.old, new_widget: ev.patch.new };

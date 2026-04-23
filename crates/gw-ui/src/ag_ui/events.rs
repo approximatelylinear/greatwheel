@@ -40,8 +40,27 @@ pub enum AgUiEvent {
         surface_id: String,
         widget: serde_json::Value,
     },
-    /// A partial state update on the surface (supersede, resolve, expire).
+    /// Full canonical state snapshot. Emitted once per session on SSE
+    /// subscribe so clients can initialise their state store without
+    /// a separate `/surface` fetch. Body matches the shape a standard
+    /// AG-UI client expects: `state.widgets`, `state.widgetOrder`,
+    /// `state.canvasSlot`, etc.
+    StateSnapshot {
+        surface_id: String,
+        state: serde_json::Value,
+    },
+    /// Standard AG-UI JSON-Patch delta against the canonical state
+    /// (RFC 6902). Phase 2 emits these alongside `UiPatch`; phase 3
+    /// will delete `UiPatch`.
     StateDelta {
+        surface_id: String,
+        patches: Vec<serde_json::Value>,
+    },
+    /// Legacy domain-shaped state patch — our original `{kind, ...}`
+    /// body (supersede / resolve / expire / pin / pin_aux / highlight).
+    /// Kept during the phase 2 transition for the existing frontend
+    /// reducer; removed in phase 3.
+    UiPatch {
         surface_id: String,
         patch: serde_json::Value,
     },
