@@ -423,12 +423,12 @@ demo work:
   Unclear whether this is in gw-bench's FINAL extractor, gw-loop's
   `TurnResult` assembly, or the Python REPL trace. Worth a focused
   repro + test.
-- **Observability: show the agent's actual code.** When the agent
-  misbehaves (wrong section, missing widget emit, short reply), we
-  currently have no way to see the Python it wrote short of digging
-  into session-tree entries. A simple debug SSE event (or an admin
-  endpoint) that streams each `EntryType::CodeExecution` would make
-  prompt iteration much faster.
+- ~~**Observability: show the agent's actual code.**~~ **Done.**
+  `LoopEvent::CodeExecuted { code, stdout, is_final, error }` fires
+  after every code block, projects to AG-UI
+  `DEBUG_CODE_EXEC`, and the React frontend surfaces them in a
+  collapsible pane behind `?debug=1`. Prompt iteration is now a
+  first-class loop.
 - **Prompt tuning for tool-calling agents.** qwen3.5:9b in the rLM
   loop has a tendency to (a) parrot earlier FINAL strings on
   subsequent turns and (b) summarise from memory rather than calling

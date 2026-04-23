@@ -36,6 +36,17 @@ pub fn loop_event_to_ag_ui(event: &LoopEvent) -> Option<AgUiEvent> {
                 "new": new,
             }),
         }),
+        LoopEvent::CodeExecuted {
+            code,
+            stdout,
+            is_final,
+            error,
+        } => Some(AgUiEvent::DebugCodeExec {
+            code: code.clone(),
+            stdout: stdout.clone(),
+            is_final: *is_final,
+            error: error.clone(),
+        }),
         // Not projected outbound: inbound-only variants and internal
         // state transitions that don't need frontend awareness.
         LoopEvent::UserMessage(_)
@@ -201,6 +212,24 @@ mod tests {
     fn user_message_has_no_outbound_projection() {
         let ev = LoopEvent::UserMessage("hi".into());
         assert!(loop_event_to_ag_ui(&ev).is_none());
+    }
+
+    #[test]
+    fn code_executed_maps_to_debug_code_exec() {
+        let ev = LoopEvent::CodeExecuted {
+            code: "FINAL(\"hi\")".into(),
+            stdout: "".into(),
+            is_final: true,
+            error: None,
+        };
+        let ag = loop_event_to_ag_ui(&ev).unwrap();
+        match ag {
+            AgUiEvent::DebugCodeExec { code, is_final, .. } => {
+                assert_eq!(code, "FINAL(\"hi\")");
+                assert!(is_final);
+            }
+            other => panic!("expected DebugCodeExec, got {:?}", other),
+        }
     }
 
     #[tokio::test]

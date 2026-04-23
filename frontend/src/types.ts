@@ -51,7 +51,23 @@ export type AgUiEvent =
   | { type: 'RUN_FINISHED'; run_id?: string }
   | { type: 'INPUT_REQUEST'; prompt: string }
   | { type: 'UI_EVENT'; surface_id: string; widget: Widget }
-  | { type: 'STATE_DELTA'; surface_id: string; patch: StateDeltaPatch };
+  | { type: 'STATE_DELTA'; surface_id: string; patch: StateDeltaPatch }
+  | {
+      type: 'DEBUG_CODE_EXEC';
+      code: string;
+      stdout: string;
+      is_final: boolean;
+      error?: string;
+    };
+
+export interface CodeTrace {
+  id: string;
+  code: string;
+  stdout: string;
+  is_final: boolean;
+  error?: string;
+  at: number;
+}
 
 export type StateDeltaPatch =
   | { kind: 'supersede'; old: string; new: Widget }

@@ -244,7 +244,8 @@ impl ConversationLoop {
                 | LoopEvent::HostCallCompleted { .. }
                 | LoopEvent::TurnComplete
                 | LoopEvent::WidgetEmitted(_)
-                | LoopEvent::WidgetSuperseded { .. } => {}
+                | LoopEvent::WidgetSuperseded { .. }
+                | LoopEvent::CodeExecuted { .. } => {}
             }
         }
     }
@@ -403,6 +404,13 @@ impl ConversationLoop {
                                 result: exec_result.value.clone(),
                             });
 
+                            let _ = self.event_tx.send(LoopEvent::CodeExecuted {
+                                code: block.clone(),
+                                stdout: exec_result.stdout.clone(),
+                                is_final: exec_result.is_final,
+                                error: None,
+                            });
+
                             if exec_result.is_final {
                                 let answer = exec_result
                                     .final_value
@@ -434,6 +442,12 @@ impl ConversationLoop {
                                 code: block.clone(),
                                 stdout: String::new(),
                                 result: serde_json::json!({"error": e.to_string()}),
+                            });
+                            let _ = self.event_tx.send(LoopEvent::CodeExecuted {
+                                code: block.clone(),
+                                stdout: String::new(),
+                                is_final: false,
+                                error: Some(e.to_string()),
                             });
                         }
                     }

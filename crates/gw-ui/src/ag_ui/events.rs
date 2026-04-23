@@ -33,6 +33,17 @@ pub enum AgUiEvent {
         surface_id: String,
         patch: serde_json::Value,
     },
+    /// Diagnostic: a code block the agent just ran, with its stdout and
+    /// terminal-ness. Greatwheel-specific (not in AG-UI's standard
+    /// vocabulary); named with a `DEBUG_` prefix so a spec-strict
+    /// client can drop it safely.
+    DebugCodeExec {
+        code: String,
+        stdout: String,
+        is_final: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 /// Body of `POST /sessions/:id/messages`.

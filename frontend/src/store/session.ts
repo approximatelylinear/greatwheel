@@ -1,5 +1,5 @@
 import { useReducer } from 'react';
-import type { AgUiEvent, Widget } from '../types';
+import type { AgUiEvent, CodeTrace, Widget } from '../types';
 
 export interface Message {
   id: string;
@@ -13,6 +13,7 @@ export interface SessionState {
   widgetOrder: string[];
   canvasSlot: string | null;
   running: boolean;
+  codeTraces: CodeTrace[];
 }
 
 type Action =
@@ -23,7 +24,10 @@ type Action =
   | { type: 'widget-superseded'; old: string; new_widget: Widget }
   | { type: 'widget-resolved'; widget_id: string; data: unknown }
   | { type: 'widget-expired'; widget_id: string }
-  | { type: 'widget-pinned'; widget_id: string };
+  | { type: 'widget-pinned'; widget_id: string }
+  | { type: 'code-trace'; trace: CodeTrace };
+
+const MAX_TRACES = 50;
 
 const initial: SessionState = {
   messages: [],
@@ -31,6 +35,7 @@ const initial: SessionState = {
   widgetOrder: [],
   canvasSlot: null,
   running: false,
+  codeTraces: [],
 };
 
 function reducer(state: SessionState, action: Action): SessionState {
@@ -103,6 +108,11 @@ function reducer(state: SessionState, action: Action): SessionState {
     }
     case 'widget-pinned':
       return { ...state, canvasSlot: action.widget_id };
+    case 'code-trace': {
+      const next = [...state.codeTraces, action.trace];
+      if (next.length > MAX_TRACES) next.splice(0, next.length - MAX_TRACES);
+      return { ...state, codeTraces: next };
+    }
   }
 }
 
@@ -136,5 +146,17 @@ function agUiToAction(ev: AgUiEvent): Action {
         case 'pin':
           return { type: 'widget-pinned', widget_id: ev.patch.widget_id };
       }
+    case 'DEBUG_CODE_EXEC':
+      return {
+        type: 'code-trace',
+        trace: {
+          id: crypto.randomUUID(),
+          code: ev.code,
+          stdout: ev.stdout,
+          is_final: ev.is_final,
+          error: ev.error,
+          at: Date.now(),
+        },
+      };
   }
 }

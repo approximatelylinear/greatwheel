@@ -5,6 +5,7 @@ import { openStream } from './api/sse';
 import { useSessionStore } from './store/session';
 import { ChatPane } from './components/ChatPane';
 import { CanvasPane } from './components/CanvasPane';
+import { DebugPane } from './components/DebugPane';
 import { MessageInput } from './components/MessageInput';
 
 /**
@@ -20,8 +21,14 @@ function resolveSessionId(): string {
   return fromEnv;
 }
 
+function debugEnabled(): boolean {
+  const url = new URL(window.location.href);
+  return url.searchParams.get('debug') === '1';
+}
+
 export function App() {
   const [sessionId] = useState(resolveSessionId);
+  const [debug] = useState(debugEnabled);
   const [streamError, setStreamError] = useState<string | null>(null);
   const { state, appendUser, ingest } = useSessionStore();
 
@@ -91,6 +98,7 @@ export function App() {
         />
         <CanvasPane widget={canvasWidget} onInteract={onInteract} />
       </main>
+      {debug && <DebugPane traces={state.codeTraces} />}
       <footer className="app-footer">
         <MessageInput onSend={onSend} disabled={state.running} />
       </footer>

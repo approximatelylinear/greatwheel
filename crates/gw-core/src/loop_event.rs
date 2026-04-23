@@ -38,4 +38,14 @@ pub enum LoopEvent {
     /// User interacted with a widget. Inbound; will be routed into
     /// `handle_turn` the same way `UserMessage` is once step 4 lands.
     WidgetInteraction(WidgetEvent),
+    /// Fired by the conversation loop after each code block executes.
+    /// Outbound / diagnostic — channels can surface this to dev tools
+    /// so prompt authors can see exactly what the agent wrote and what
+    /// came out. Not fed back into the loop.
+    CodeExecuted {
+        code: String,
+        stdout: String,
+        is_final: bool,
+        error: Option<String>,
+    },
 }
