@@ -61,11 +61,19 @@ The full text is accessible through host functions:
   - get_section(index=N) -> {"index", "title", "body"}  (N is 1..=28; letters 1-4 then chapters 1-24, so Chapter N is at index N+4)
 
 UI host functions (keyword args):
-  - emit_widget(session_id, kind, payload, multi_use=False) -> {"widget_id": "<uuid>"}
+  - emit_widget(session_id, kind, payload, multi_use=False, follow_up=False) -> {"widget_id": "<uuid>"}
       kind must be the literal string "a2ui"
       multi_use=True means the widget stays Active across clicks (good for pickers / tool palettes)
-  - supersede_widget(old_widget_id, session_id, kind, payload, multi_use=False)
+      follow_up=True anchors the widget to the nearest assistant chat message instead
+        of rendering it in the scroll tail — use for follow-up question buttons below
+        an answer.
+  - supersede_widget(old_widget_id, session_id, kind, payload, multi_use=False, follow_up=False)
   - pin_to_canvas(widget_id)
+  - highlight_button(widget_id, button_id)
+      UI hint: marks a specific button inside a widget as the currently-focused one.
+      Call this EVERY time you decide to load a section, so the picker shows the user
+      which section you're discussing — even when they reached it via a free-text
+      question instead of clicking.
   - FINAL(text)
 
 Your session id is the Python variable `gw_session_id`.
@@ -93,16 +101,23 @@ Your session id is the Python variable `gw_session_id`.
            *rows,
        ]},
    )
-   pin_to_canvas(widget_id=result["widget_id"])
+   picker_widget_id = result["widget_id"]   # remember; you'll reuse this on every later turn
+   pin_to_canvas(widget_id=picker_widget_id)
    FINAL("Welcome. Tap a section above, or ask me any question about the novel.")
    ```
 
+   (The REPL keeps `picker_widget_id` defined across turns, so you can use it later without re-emitting the widget.)
+
 2. Widget button click (`[widget-event] ... data={"section": N}`): use **two iterations**. You have not seen the return value of `get_section(index=N)` yet when you write your first code block — it only exists at runtime. To ground in the actual text you must print it first, read the print output, then write the summary.
 
-   **Iteration 1 — load and expose the text. DO NOT call FINAL in this block.**
+   **Iteration 1 — load, highlight the matching button, and expose the text. DO NOT call FINAL in this block.**
 
    ```python
    section = get_section(index=N)
+   # Light up the section's button in the picker — whether the user
+   # clicked it or reached it by asking a question. picker_widget_id
+   # was saved when you emitted the picker on the first turn.
+   highlight_button(widget_id=picker_widget_id, button_id=f"sec-{N}")
    print("TITLE::", section["title"])
    print("BODY_HEAD::", section["body"][:1500])
    print("BODY_TAIL::", section["body"][-800:])
@@ -110,7 +125,7 @@ Your session id is the Python variable `gw_session_id`.
 
    In the next iteration the lines above (starting with `TITLE::`, `BODY_HEAD::`, `BODY_TAIL::`) will be in your context as stdout. Quote specific events, characters, and imagery from what was printed.
 
-   **Iteration 2 — write a grounded summary and FINAL.** Your entire response in this iteration MUST be a single ```python``` code block that ends with `FINAL(...)`. Do not write prose outside the code block. Do not spend this turn only thinking; you must commit to a FINAL call.
+   **Iteration 2 — write a grounded summary, emit 2-3 follow-up question buttons, and FINAL.** Your entire response in this iteration MUST be a single ```python``` code block that ends with `FINAL(...)`. Do not write prose outside the code block.
 
    ```python
    # Reference the TITLE:: and BODY_*:: text printed above — it is in
@@ -120,12 +135,35 @@ Your session id is the Python variable `gw_session_id`.
        "<4-6 sentences drawn from BODY_HEAD and BODY_TAIL>"
    )
    themes = "<1-2 sentences on themes visible in the printed excerpt>"
-   FINAL(f"## {title}\n\n{summary}\n\n**Themes.** {themes}\n\nAsk me to go deeper or pick another section.")
+
+   # Before FINAL, emit a small follow-up widget with 2-3 question
+   # buttons the user might want to click next. Use follow_up=True so
+   # it anchors to this message in the UI. Each button's `data` should
+   # be a natural-language question in `{"ask": "..."}` form — when
+   # clicked, the harness delivers it as `[widget-event] ... data=...`
+   # and you can respond to it on a later turn.
+   emit_widget(
+       session_id=gw_session_id,
+       kind="a2ui",
+       follow_up=True,
+       payload={"type": "Column", "children": [
+           {"type": "Text", "text": "Go deeper:"},
+           {"type": "Row", "children": [
+               {"type": "Button", "id": "fup-1", "label": "<short question 1>",
+                "action": "submit", "data": {"ask": "<full question 1>"}},
+               {"type": "Button", "id": "fup-2", "label": "<short question 2>",
+                "action": "submit", "data": {"ask": "<full question 2>"}},
+               # optional third
+           ]},
+       ]},
+   )
+
+   FINAL(f"## {title}\n\n{summary}\n\n**Themes.** {themes}")
    ```
 
    Splitting across two iterations is required because the `section["body"]` return value is NOT in your context on iteration 1 — you have to print it first, see the printout, then write the summary.
 
-3. Free-text question: call `list_sections()`, then `get_section()` on the relevant section(s), then answer grounded in the returned bodies. Quote briefly when useful.
+3. Free-text question (e.g. "what happens in chapter 5?"): figure out the section index(es), call `get_section(index=N)` on the relevant one, `highlight_button(widget_id=picker_widget_id, button_id=f"sec-{N}")` so the UI tracks which section you're on, print enough of the body in iteration 1, then answer in iteration 2 grounded in the printed text.
 
 4. Always end each turn with exactly one `FINAL(text)` call.
 "###;
@@ -298,6 +336,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "supersede_widget".into(),
         "resolve_widget".into(),
         "pin_to_canvas".into(),
+        "highlight_button".into(),
         "emit_mcp_resource".into(),
         "list_sections".into(),
         "get_section".into(),

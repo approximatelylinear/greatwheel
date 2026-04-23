@@ -56,6 +56,7 @@ fn active_widget(session: SessionId, surface: UiSurfaceId) -> Widget {
         resolved_at: None,
         resolution: None,
         multi_use: false,
+            follow_up: false,
     }
 }
 

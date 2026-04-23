@@ -26,6 +26,10 @@ export interface Widget {
   resolution?: unknown;
   /** When true, the adapter never auto-resolves on click. */
   multi_use?: boolean;
+  /** When true, the frontend anchors this widget to the nearest
+   *  assistant chat message instead of rendering it in the general
+   *  scroll tail — for follow-up question buttons, etc. */
+  follow_up?: boolean;
 }
 
 export interface WidgetEvent {
@@ -75,4 +79,5 @@ export type StateDeltaPatch =
   | { kind: 'supersede'; old: string; new: Widget }
   | { kind: 'resolve'; widget_id: string; data: unknown }
   | { kind: 'expire'; widget_id: string }
-  | { kind: 'pin'; widget_id: string };
+  | { kind: 'pin'; widget_id: string }
+  | { kind: 'highlight'; widget_id: string; button_id: string };

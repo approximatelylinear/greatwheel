@@ -308,6 +308,7 @@ mod tests {
             resolved_at: None,
             resolution: None,
             multi_use: false,
+            follow_up: false,
         }
     }
 

@@ -129,6 +129,23 @@ pub async fn notification_to_ag_ui(
                 },
             ))
         }
+        UiNotification::ButtonHighlighted {
+            widget_id,
+            button_id,
+        } => {
+            let w = store.get_widget(widget_id).await?;
+            Some((
+                w.session_id,
+                AgUiEvent::StateDelta {
+                    surface_id: w.surface_id.0.to_string(),
+                    patch: serde_json::json!({
+                        "kind": "highlight",
+                        "widget_id": widget_id.0,
+                        "button_id": button_id,
+                    }),
+                },
+            ))
+        }
     }
 }
 
@@ -154,6 +171,7 @@ mod tests {
             resolved_at: None,
             resolution: None,
             multi_use: false,
+            follow_up: false,
         }
     }
 

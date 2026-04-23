@@ -109,6 +109,13 @@ pub struct Widget {
     /// existing form-style widgets.
     #[serde(default)]
     pub multi_use: bool,
+    /// If `true`, the frontend attaches this widget to the nearest
+    /// assistant chat message (typically for follow-up question
+    /// buttons) rather than rendering it in the general chat scroll
+    /// tail. Pure frontend convention; backend treats it as any other
+    /// widget. Defaults to `false`.
+    #[serde(default)]
+    pub follow_up: bool,
 }
 
 /// A user interaction with a widget. Produced by the frontend, consumed by

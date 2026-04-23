@@ -33,8 +33,66 @@ html, body, #root { margin: 0; height: 100%; background: var(--bg); color: var(-
 .message-assistant { background: var(--assistant); border: 1px solid var(--border); max-width: 90%; }
 .message-role { font-size: 10px; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
 .message-content { white-space: pre-wrap; }
+.message-user .message-content { white-space: pre-wrap; }
+
+/* Markdown inside assistant messages */
+.message-assistant .message-content { white-space: normal; }
+.message-assistant .message-content > :first-child { margin-top: 0; }
+.message-assistant .message-content > :last-child { margin-bottom: 0; }
+.message-assistant .message-content h1,
+.message-assistant .message-content h2,
+.message-assistant .message-content h3 {
+  margin: 10px 0 6px; line-height: 1.25; font-weight: 600;
+}
+.message-assistant .message-content h1 { font-size: 20px; }
+.message-assistant .message-content h2 { font-size: 17px; }
+.message-assistant .message-content h3 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.message-assistant .message-content p { margin: 6px 0; }
+.message-assistant .message-content strong { color: #fff; }
+.message-assistant .message-content em { color: #d6dde8; }
+.message-assistant .message-content code {
+  background: #0c0e12; padding: 1px 5px; border-radius: 3px;
+  font-family: ui-monospace, monospace; font-size: 12.5px;
+}
+.message-assistant .message-content pre {
+  background: #0c0e12; border: 1px solid var(--border); padding: 8px 10px;
+  border-radius: 6px; overflow-x: auto; margin: 8px 0;
+}
+.message-assistant .message-content pre code { background: none; padding: 0; }
+.message-assistant .message-content ul,
+.message-assistant .message-content ol { margin: 6px 0 6px 20px; padding: 0; }
+.message-assistant .message-content li { margin: 2px 0; }
+.message-assistant .message-content blockquote {
+  margin: 6px 0; padding: 4px 10px;
+  border-left: 3px solid var(--border); color: var(--muted);
+}
+.message-assistant .message-content a { color: var(--accent); }
+
+/* Typing indicator */
+.message-typing { max-width: 80px; }
+.typing-dots { display: inline-flex; gap: 4px; padding: 6px 0; }
+.typing-dots span {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--muted);
+  animation: typing-bounce 1.2s ease-in-out infinite;
+}
+.typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.30s; }
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30%           { transform: translateY(-4px); opacity: 1; }
+}
 
 .widget-inline { margin: 4px 0; }
+.message-followups {
+  margin: 6px 0 14px 12px;
+  padding: 0 0 0 10px;
+  border-left: 2px solid var(--border);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.message-followups .a2ui-widget {
+  padding: 8px 10px; background: transparent; border-color: rgba(109, 160, 255, 0.2);
+}
+.message-followups .a2ui-button { font-size: 12.5px; padding: 4px 10px; }
 .a2ui-widget { padding: 12px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border); }
 .a2ui-widget.terminal { opacity: 0.7; }
 .widget-terminal-banner { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
@@ -46,7 +104,14 @@ html, body, #root { margin: 0; height: 100%; background: var(--bg); color: var(-
   color: var(--fg); border-radius: 6px; cursor: pointer; font: inherit;
 }
 .a2ui-button:hover:not(:disabled) { border-color: var(--accent); }
-.a2ui-button:disabled { cursor: not-allowed; }
+.a2ui-button:disabled { cursor: not-allowed; opacity: 0.55; }
+.a2ui-button.pressed {
+  background: var(--accent); border-color: var(--accent); color: white;
+  box-shadow: 0 0 0 2px rgba(109, 160, 255, 0.25);
+}
+.a2ui-button.pressed:disabled { opacity: 0.8; }
+.a2ui-widget.terminal .a2ui-button { text-decoration: line-through; }
+.a2ui-widget.terminal .a2ui-button.pressed { text-decoration: none; }
 .a2ui-unknown { background: #1a1d24; padding: 8px; border-radius: 4px; font-size: 12px; overflow-x: auto; }
 .widget-error { color: var(--error); font-size: 12px; }
 

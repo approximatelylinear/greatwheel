@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { WidgetEvent } from './types';
-import { postMessage, postWidgetEvent } from './api/client';
+import { fetchSurface, postMessage, postWidgetEvent } from './api/client';
 import { openStream } from './api/sse';
 import { useSessionStore } from './store/session';
 import { ChatPane } from './components/ChatPane';
@@ -30,17 +30,34 @@ export function App() {
   const [sessionId] = useState(resolveSessionId);
   const [debug] = useState(debugEnabled);
   const [streamError, setStreamError] = useState<string | null>(null);
-  const { state, appendUser, ingest } = useSessionStore();
+  const { state, hydrate, appendUser, markRunning, pressButton, ingest } = useSessionStore();
 
   useEffect(() => {
     if (!sessionId) return;
-    const close = openStream(
-      sessionId,
-      (ev) => ingest(ev),
-      (e) => setStreamError(String(e)),
-    );
-    return close;
-    // ingest is stable across renders (from useReducer dispatch).
+    let closed = false;
+    let close: (() => void) | null = null;
+    // Hydrate durable widget state from the server before subscribing
+    // to the live event stream. Survives browser refresh — the session
+    // messages are ephemeral but widgets live in UiSurfaceStore.
+    fetchSurface(sessionId)
+      .then((snapshot) => {
+        if (closed) return;
+        hydrate(snapshot);
+      })
+      .catch((e) => setStreamError(String(e)))
+      .finally(() => {
+        if (closed) return;
+        close = openStream(
+          sessionId,
+          (ev) => ingest(ev),
+          (e) => setStreamError(String(e)),
+        );
+      });
+    return () => {
+      closed = true;
+      close?.();
+    };
+    // hydrate/ingest are stable across renders (from useReducer dispatch).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
@@ -72,7 +89,9 @@ export function App() {
     }
   };
 
-  const onInteract = async (ev: WidgetEvent) => {
+  const onInteract = async (ev: WidgetEvent, buttonId: string) => {
+    pressButton(ev.widget_id, buttonId);
+    markRunning();
     try {
       await postWidgetEvent(sessionId, ev);
     } catch (e) {
@@ -85,7 +104,6 @@ export function App() {
       <header className="app-header">
         <span className="app-title">greatwheel</span>
         <span className="app-session">session {sessionId.slice(0, 8)}</span>
-        {state.running && <span className="app-running">…working</span>}
         {streamError && <span className="app-error">{streamError}</span>}
       </header>
       <main className="app-main">
@@ -94,9 +112,18 @@ export function App() {
           widgets={state.widgets}
           widgetOrder={state.widgetOrder}
           canvasSlot={state.canvasSlot}
+          running={state.running}
+          pressedButtonIds={state.pressedButtonIds}
+          messageFollowUps={state.messageFollowUps}
           onInteract={onInteract}
         />
-        <CanvasPane widget={canvasWidget} onInteract={onInteract} />
+        <CanvasPane
+          widget={canvasWidget}
+          pressedId={
+            canvasWidget ? state.pressedButtonIds[canvasWidget.id] ?? null : null
+          }
+          onInteract={onInteract}
+        />
       </main>
       {debug && <DebugPane traces={state.codeTraces} />}
       <footer className="app-footer">

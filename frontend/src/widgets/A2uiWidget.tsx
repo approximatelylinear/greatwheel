@@ -2,16 +2,17 @@ import type { Widget, WidgetEvent } from '../types';
 
 interface Props {
   widget: Widget;
-  onInteract: (ev: WidgetEvent) => void;
+  pressedId: string | null;
+  onInteract: (ev: WidgetEvent, buttonId: string) => void;
 }
 
 /**
  * Minimal A2UI-compatible subset: Column | Row | Text | Button.
- * Richer components (Slider, TextInput, Image, etc.) are left to a
- * proper json-render integration. This renderer is intentionally a
- * throwaway.
+ * `pressedId` is sourced from the session store so both user clicks
+ * and agent-driven inferences (e.g. the agent calling `get_section`
+ * in response to a free-text question) can highlight the same button.
  */
-export function A2uiWidget({ widget, onInteract }: Props) {
+export function A2uiWidget({ widget, pressedId, onInteract }: Props) {
   if (!('Inline' in widget.payload)) {
     return <div className="widget-error">A2UI widget missing inline payload</div>;
   }
@@ -28,6 +29,7 @@ export function A2uiWidget({ widget, onInteract }: Props) {
         node={widget.payload.Inline}
         widget={widget}
         disabled={terminal}
+        pressedId={pressedId}
         onInteract={onInteract}
       />
     </div>
@@ -38,10 +40,11 @@ interface ComponentProps {
   node: unknown;
   widget: Widget;
   disabled: boolean;
-  onInteract: (ev: WidgetEvent) => void;
+  pressedId: string | null;
+  onInteract: (ev: WidgetEvent, buttonId: string) => void;
 }
 
-function Component({ node, widget, disabled, onInteract }: ComponentProps) {
+function Component({ node, widget, disabled, pressedId, onInteract }: ComponentProps) {
   if (!node || typeof node !== 'object') return <span>{String(node)}</span>;
   const n = node as Record<string, unknown>;
   switch (n.type) {
@@ -56,6 +59,7 @@ function Component({ node, widget, disabled, onInteract }: ComponentProps) {
               node={c}
               widget={widget}
               disabled={disabled}
+              pressedId={pressedId}
               onInteract={onInteract}
             />
           ))}
@@ -69,17 +73,21 @@ function Component({ node, widget, disabled, onInteract }: ComponentProps) {
       const label = String(n.label ?? id);
       const action = String(n.action ?? 'click');
       const data = (n.data as unknown) ?? { id };
+      const isPressed = pressedId === id;
       return (
         <button
-          className="a2ui-button"
+          className={`a2ui-button${isPressed ? ' pressed' : ''}`}
           disabled={disabled}
           onClick={() =>
-            onInteract({
-              widget_id: widget.id,
-              surface_id: widget.surface_id,
-              action,
-              data,
-            })
+            onInteract(
+              {
+                widget_id: widget.id,
+                surface_id: widget.surface_id,
+                action,
+                data,
+              },
+              id,
+            )
           }
         >
           {label}

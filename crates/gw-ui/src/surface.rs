@@ -66,6 +66,14 @@ pub enum UiNotification {
     Pinned {
         id: WidgetId,
     },
+    /// The agent declared that a specific button within a widget is
+    /// the "currently focused" one. Transient UI hint; not persisted
+    /// in the store — just broadcast for the frontend to mirror in
+    /// its local pressed-state map.
+    ButtonHighlighted {
+        widget_id: WidgetId,
+        button_id: String,
+    },
 }
 
 /// In-memory widget store. Concurrent-safe via an interior `RwLock`.
@@ -226,6 +234,17 @@ impl UiSurfaceStore {
         Ok(())
     }
 
+    /// Broadcast an agent-declared highlight for a specific button
+    /// inside a widget. Transient: no store mutation, frontend applies
+    /// to its local pressed-state map. The widget doesn't have to
+    /// exist — we forward the hint regardless.
+    pub fn highlight_button(&self, widget_id: WidgetId, button_id: String) {
+        let _ = self.tx.send(UiNotification::ButtonHighlighted {
+            widget_id,
+            button_id,
+        });
+    }
+
     /// Snapshot the full surface for a session, widgets in insertion
     /// order. Used by the AG-UI adapter on frontend reconnect.
     pub async fn snapshot(&self, session: SessionId) -> Result<UiSurfaceSnapshot, UiError> {
@@ -275,6 +294,7 @@ mod tests {
             resolved_at: None,
             resolution: None,
             multi_use: false,
+            follow_up: false,
         }
     }
 

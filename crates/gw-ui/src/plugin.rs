@@ -8,6 +8,7 @@
 //!   - `supersede_widget`   — replace an active widget with a new one
 //!   - `resolve_widget`     — agent-driven close with a terminal value
 //!   - `pin_to_canvas`      — move a widget into the canvas slot
+//!   - `highlight_button`   — mark a button as focused (UI hint only)
 //!   - `emit_mcp_resource`  — convenience for MCP-UI resources
 //!
 //! The plugin owns an `Arc<UiSurfaceStore>` and publishes it via
@@ -42,6 +43,7 @@ impl Plugin for UiPlugin {
                 "host_fn:ui.supersede_widget".into(),
                 "host_fn:ui.resolve_widget".into(),
                 "host_fn:ui.pin_to_canvas".into(),
+                "host_fn:ui.highlight_button".into(),
                 "host_fn:ui.emit_mcp_resource".into(),
             ],
             requires: vec![],
@@ -106,6 +108,27 @@ impl Plugin for UiPlugin {
             }
         });
 
+        let s = store.clone();
+        ctx.register_host_fn_async(
+            "highlight_button",
+            Some("ui:write"),
+            move |_args, kwargs| {
+                let s = s.clone();
+                async move {
+                    let widget_id = WidgetId(parse_uuid(&kwargs, "widget_id")?);
+                    let button_id = kwargs
+                        .get("button_id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            PluginError::HostFunction("button_id required".into())
+                        })?
+                        .to_string();
+                    s.highlight_button(widget_id, button_id);
+                    Ok(Value::Null)
+                }
+            },
+        );
+
         let s = store;
         ctx.register_host_fn_async(
             "emit_mcp_resource",
@@ -142,6 +165,7 @@ fn build_mcp_widget(kwargs: &HashMap<String, Value>) -> Result<Widget, PluginErr
         .to_string();
     let csp = kwargs.get("csp").and_then(|v| v.as_str()).map(String::from);
     let multi_use = parse_multi_use(kwargs);
+    let follow_up = parse_follow_up(kwargs);
 
     Ok(Widget {
         id: WidgetId::new(),
@@ -156,6 +180,7 @@ fn build_mcp_widget(kwargs: &HashMap<String, Value>) -> Result<Widget, PluginErr
         resolved_at: None,
         resolution: None,
         multi_use,
+        follow_up,
     })
 }
 
@@ -177,6 +202,7 @@ fn build_widget(_args: &[Value], kwargs: &HashMap<String, Value>) -> Result<Widg
     let origin_entry = optional_uuid(kwargs, "origin_entry")?.map(EntryId);
     let supersedes = optional_uuid(kwargs, "supersedes")?.map(WidgetId);
     let multi_use = parse_multi_use(kwargs);
+    let follow_up = parse_follow_up(kwargs);
 
     Ok(Widget {
         id: WidgetId::new(),
@@ -191,14 +217,20 @@ fn build_widget(_args: &[Value], kwargs: &HashMap<String, Value>) -> Result<Widg
         resolved_at: None,
         resolution: None,
         multi_use,
+        follow_up,
     })
 }
 
 fn parse_multi_use(kwargs: &HashMap<String, Value>) -> bool {
-    kwargs
-        .get("multi_use")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+    parse_bool(kwargs, "multi_use")
+}
+
+fn parse_follow_up(kwargs: &HashMap<String, Value>) -> bool {
+    parse_bool(kwargs, "follow_up")
+}
+
+fn parse_bool(kwargs: &HashMap<String, Value>, key: &str) -> bool {
+    kwargs.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
 fn parse_uuid(kwargs: &HashMap<String, Value>, key: &str) -> Result<Uuid, PluginError> {
