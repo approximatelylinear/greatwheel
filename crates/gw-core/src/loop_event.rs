@@ -26,8 +26,20 @@ pub enum LoopEvent {
     SwitchBranch(EntryId),
     /// Trigger context compaction.
     Compact,
+    /// A new turn is starting (user input has arrived, the agent is
+    /// about to run). Outbound-only — channels map this to AG-UI
+    /// `RUN_STARTED`. Fired before `handle_turn` so clients can show
+    /// an immediate "thinking" indicator without waiting for the
+    /// first real event.
+    TurnStarted,
     /// The current turn is complete.
     TurnComplete,
+    /// The current turn failed. Carries the human-readable error so
+    /// channels can surface it to the user. Outbound-only; channels
+    /// map this to AG-UI `RUN_ERROR`. The loop still propagates the
+    /// underlying `LoopError` upward — this variant is for telemetry,
+    /// not control flow.
+    TurnError { message: String },
     /// End the session.
     SessionEnd,
     /// Agent emitted a widget to the session's UI surface. Outbound.

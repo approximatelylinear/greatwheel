@@ -55,7 +55,9 @@ export interface UiSurfaceSnapshot {
 // AG-UI outbound event shapes — the codec on the server emits these.
 export type AgUiEvent =
   | { type: 'TEXT_MESSAGE_CONTENT'; message_id: string; delta: string }
+  | { type: 'RUN_STARTED'; run_id?: string }
   | { type: 'RUN_FINISHED'; run_id?: string }
+  | { type: 'RUN_ERROR'; message: string; run_id?: string }
   | { type: 'INPUT_REQUEST'; prompt: string }
   | { type: 'UI_EVENT'; surface_id: string; widget: Widget }
   | { type: 'STATE_DELTA'; surface_id: string; patch: StateDeltaPatch }

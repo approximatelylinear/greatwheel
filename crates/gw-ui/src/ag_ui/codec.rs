@@ -20,7 +20,12 @@ pub fn loop_event_to_ag_ui(event: &LoopEvent) -> Option<AgUiEvent> {
             message_id: Uuid::new_v4().to_string(),
             delta: content.clone(),
         }),
+        LoopEvent::TurnStarted => Some(AgUiEvent::RunStarted { run_id: None }),
         LoopEvent::TurnComplete => Some(AgUiEvent::RunFinished { run_id: None }),
+        LoopEvent::TurnError { message } => Some(AgUiEvent::RunError {
+            message: message.clone(),
+            run_id: None,
+        }),
         LoopEvent::InputRequest(prompt) => Some(AgUiEvent::InputRequest {
             prompt: prompt.clone(),
         }),
@@ -129,6 +134,19 @@ pub async fn notification_to_ag_ui(
                 },
             ))
         }
+        UiNotification::AuxPinned { id } => {
+            let w = store.get_widget(id).await?;
+            Some((
+                w.session_id,
+                AgUiEvent::StateDelta {
+                    surface_id: w.surface_id.0.to_string(),
+                    patch: serde_json::json!({
+                        "kind": "pin_aux",
+                        "widget_id": id.0,
+                    }),
+                },
+            ))
+        }
         UiNotification::ButtonHighlighted {
             widget_id,
             button_id,
@@ -189,12 +207,32 @@ mod tests {
     }
 
     #[test]
+    fn turn_started_maps_to_run_started() {
+        let ev = LoopEvent::TurnStarted;
+        assert!(matches!(
+            loop_event_to_ag_ui(&ev),
+            Some(AgUiEvent::RunStarted { .. })
+        ));
+    }
+
+    #[test]
     fn turn_complete_maps_to_run_finished() {
         let ev = LoopEvent::TurnComplete;
         assert!(matches!(
             loop_event_to_ag_ui(&ev),
             Some(AgUiEvent::RunFinished { .. })
         ));
+    }
+
+    #[test]
+    fn turn_error_maps_to_run_error_with_message() {
+        let ev = LoopEvent::TurnError {
+            message: "boom".into(),
+        };
+        match loop_event_to_ag_ui(&ev).unwrap() {
+            AgUiEvent::RunError { message, .. } => assert_eq!(message, "boom"),
+            other => panic!("expected RunError, got {:?}", other),
+        }
     }
 
     #[test]

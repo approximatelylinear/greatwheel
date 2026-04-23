@@ -242,7 +242,9 @@ impl ConversationLoop {
                 LoopEvent::Response { .. }
                 | LoopEvent::InputRequest(_)
                 | LoopEvent::HostCallCompleted { .. }
+                | LoopEvent::TurnStarted
                 | LoopEvent::TurnComplete
+                | LoopEvent::TurnError { .. }
                 | LoopEvent::WidgetEmitted(_)
                 | LoopEvent::WidgetSuperseded { .. }
                 | LoopEvent::CodeExecuted { .. } => {}
@@ -256,7 +258,16 @@ impl ConversationLoop {
     /// Used by both the `UserMessage` and `WidgetInteraction` arms of
     /// `run` — kept as one helper so the two paths cannot drift.
     async fn run_input_turn(&mut self, initial: &str) -> Result<(), LoopError> {
-        let result = self.handle_turn(initial).await?;
+        let _ = self.event_tx.send(LoopEvent::TurnStarted);
+        let result = match self.handle_turn(initial).await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = self.event_tx.send(LoopEvent::TurnError {
+                    message: e.to_string(),
+                });
+                return Err(e);
+            }
+        };
         let _ = self.event_tx.send(LoopEvent::TurnComplete);
         if let Some(response) = result.response {
             let _ = self.event_tx.send(LoopEvent::Response {
@@ -266,7 +277,16 @@ impl ConversationLoop {
         }
 
         while let Some(follow_up) = self.pending_follow_ups.pop() {
-            let result = self.handle_turn(&follow_up).await?;
+            let _ = self.event_tx.send(LoopEvent::TurnStarted);
+            let result = match self.handle_turn(&follow_up).await {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = self.event_tx.send(LoopEvent::TurnError {
+                        message: e.to_string(),
+                    });
+                    return Err(e);
+                }
+            };
             let _ = self.event_tx.send(LoopEvent::TurnComplete);
             if let Some(response) = result.response {
                 let _ = self.event_tx.send(LoopEvent::Response {

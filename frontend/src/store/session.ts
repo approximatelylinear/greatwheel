@@ -344,8 +344,19 @@ function agUiToAction(ev: AgUiEvent): Action {
   switch (ev.type) {
     case 'TEXT_MESSAGE_CONTENT':
       return { type: 'assistant-chunk', message_id: ev.message_id, delta: ev.delta };
+    case 'RUN_STARTED':
+      return { type: 'mark-running' };
     case 'RUN_FINISHED':
       return { type: 'run-finished' };
+    case 'RUN_ERROR':
+      // Reuse assistant-chunk so the error appears in the scroll tail as a
+      // system-style note. A later phase should give errors their own
+      // surface; for now this matches how INPUT_REQUEST is rendered.
+      return {
+        type: 'assistant-chunk',
+        message_id: crypto.randomUUID(),
+        delta: `⚠ ${ev.message}`,
+      };
     case 'INPUT_REQUEST':
       return { type: 'assistant-chunk', message_id: crypto.randomUUID(), delta: ev.prompt };
     case 'UI_EVENT':

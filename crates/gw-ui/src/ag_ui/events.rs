@@ -16,8 +16,20 @@ use serde::{Deserialize, Serialize};
 pub enum AgUiEvent {
     /// Streaming delta of assistant-authored text.
     TextMessageContent { message_id: String, delta: String },
+    /// A new run has started (maps from `LoopEvent::TurnStarted`).
+    RunStarted {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+    },
     /// The current run has finished (maps from `LoopEvent::TurnComplete`).
     RunFinished {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+    },
+    /// The current run failed (maps from `LoopEvent::TurnError`). Carries
+    /// a human-readable message so clients can surface the failure.
+    RunError {
+        message: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         run_id: Option<String>,
     },
