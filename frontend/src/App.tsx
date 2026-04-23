@@ -102,9 +102,12 @@ export function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <span className="app-title">greatwheel</span>
-        <span className="app-session">session {sessionId.slice(0, 8)}</span>
+        <div className="app-brand">
+          <span className="app-title">Frankenstein</span>
+          <span className="app-subtitle">a conversational reading companion</span>
+        </div>
         {streamError && <span className="app-error">{streamError}</span>}
+        <span className="app-mark" title={`session ${sessionId}`}>greatwheel</span>
       </header>
       <main className="app-main">
         <ChatPane

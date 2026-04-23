@@ -21,8 +21,8 @@ export function A2uiWidget({ widget, pressedId, onInteract }: Props) {
     <div className={`a2ui-widget ${terminal ? 'terminal' : ''}`} data-state={widget.state}>
       {terminal && (
         <div className="widget-terminal-banner">
-          {widget.state}
-          {widget.resolution != null && <>: <code>{JSON.stringify(widget.resolution)}</code></>}
+          <span className="checkmark" aria-hidden="true">✓</span>
+          <span>{terminalLabel(widget.state)}</span>
         </div>
       )}
       <Component
@@ -34,6 +34,15 @@ export function A2uiWidget({ widget, pressedId, onInteract }: Props) {
       />
     </div>
   );
+}
+
+function terminalLabel(state: Widget['state']): string {
+  switch (state) {
+    case 'Resolved': return 'Answered';
+    case 'Superseded': return 'Replaced';
+    case 'Expired': return 'Expired';
+    default: return String(state);
+  }
 }
 
 interface ComponentProps {

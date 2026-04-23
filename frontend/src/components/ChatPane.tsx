@@ -1,5 +1,6 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import rehypeRaw from 'rehype-raw';
 import type { Widget, WidgetEvent } from '../types';
 import type { Message } from '../store/session';
 import { WidgetRenderer } from './WidgetRenderer';
@@ -43,8 +44,11 @@ export function ChatPane({
               <div className="message-role">{m.role}</div>
               <div className="message-content">
                 {m.role === 'assistant' ? (
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                    {normaliseNewlines(m.content)}
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    rehypePlugins={[rehypeRaw]}
+                  >
+                    {pullQuote(normaliseNewlines(m.content))}
                   </ReactMarkdown>
                 ) : (
                   m.content
@@ -90,6 +94,40 @@ export function ChatPane({
 
 function normaliseNewlines(text: string): string {
   return text.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+}
+
+/**
+ * Wrap 'single-quoted' spans in a <q class="pull-quote"> tag so the
+ * markdown renderer (with rehype-raw) can style them as literary pull-
+ * quotes. Handles both ASCII straight quotes ('…') and Unicode curly
+ * quotes (‘…’). We require whitespace / punctuation / start
+ * before the opening quote and whitespace / punctuation / end after
+ * the closing quote, so possessives and contractions (Victor's,
+ * don't) don't accidentally match.
+ */
+function pullQuote(text: string): string {
+  // Word boundaries: require whitespace / opening punct / em-dash /
+  // start before the opening quote and whitespace / closing punct /
+  // end after the closing one, so possessives and contractions don't
+  // trigger matches. ≥3 chars between quotes also skips things like
+  // "s" or "ll".
+  const pre = `(^|[\\s(\\[—–-])`;
+  const post = `(?=[\\s.,!?;:)\\]—–-]|$)`;
+  const patterns: RegExp[] = [
+    // ASCII single quotes 'like this'
+    new RegExp(`${pre}'([^'\\n]{3,}?)'${post}`, 'g'),
+    // Unicode curly single quotes ‘like this’
+    new RegExp(`${pre}‘([^’\\n]{3,}?)’${post}`, 'g'),
+    // ASCII double quotes "like this"
+    new RegExp(`${pre}"([^"\\n]{3,}?)"${post}`, 'g'),
+    // Unicode curly double quotes “like this”
+    new RegExp(`${pre}“([^”\\n]{3,}?)”${post}`, 'g'),
+  ];
+  let out = text;
+  for (const re of patterns) {
+    out = out.replace(re, '$1<q class="pull-quote">$2</q>');
+  }
+  return out;
 }
 
 function TypingBubble() {

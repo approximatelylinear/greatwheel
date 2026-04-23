@@ -82,28 +82,40 @@ Your session id is the Python variable `gw_session_id`.
 
 **Behaviour**
 
-1. First user turn (greeting): show a chapter picker pinned to the canvas. Group buttons in rows of 7.
+1. First user turn (greeting): show a chapter picker pinned to the canvas. No section is active yet — **do NOT call `highlight_button` in this turn.** The picker should come up with nothing lit.
 
    ```python
    sections = list_sections()
-   buttons = [
-       {"type": "Button", "id": f"sec-{s['index']}", "label": s["title"],
-        "action": "submit", "data": {"section": s["index"]}}
-       for s in sections
-   ]
-   rows = [{"type": "Row", "children": buttons[i:i+7]} for i in range(0, len(buttons), 7)]
+   def button(s):
+       return {"type": "Button", "id": f"sec-{s['index']}", "label": s["title"],
+               "action": "submit", "data": {"section": s["index"]}}
+
+   # Group: letters (indexes 1-4) and chapters (5-28). Each group has
+   # a small label header above a wrapping Row of buttons. The Row's
+   # flex-wrap in the renderer handles overflow.
+   letters = [button(s) for s in sections if s["title"].startswith("Letter")]
+   chapters = [button(s) for s in sections if s["title"].startswith("Chapter")]
+   # Use shorter labels for chapter buttons to reduce visual weight —
+   # e.g. "1" instead of "Chapter 1" (the "Chapters" heading gives the
+   # context).
+   for b in chapters:
+       b["label"] = b["label"].replace("Chapter ", "")
+
    result = emit_widget(
        session_id=gw_session_id,
        kind="a2ui",
        multi_use=True,  # picker is a persistent tool palette
        payload={"type": "Column", "children": [
-           {"type": "Text", "text": "Frankenstein — pick a section to explore:"},
-           *rows,
+           {"type": "Text", "text": "Frankenstein"},
+           {"type": "Text", "text": "Letters"},
+           {"type": "Row", "children": letters},
+           {"type": "Text", "text": "Chapters"},
+           {"type": "Row", "children": chapters},
        ]},
    )
    picker_widget_id = result["widget_id"]   # remember; you'll reuse this on every later turn
    pin_to_canvas(widget_id=picker_widget_id)
-   FINAL("Welcome. Tap a section above, or ask me any question about the novel.")
+   FINAL("Welcome. Pick a section above — or ask me any question about the novel.")
    ```
 
    (The REPL keeps `picker_widget_id` defined across turns, so you can use it later without re-emitting the widget.)
