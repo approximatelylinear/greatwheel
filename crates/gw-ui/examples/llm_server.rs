@@ -193,18 +193,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::thread::Builder::new()
         .name("gw-loop".into())
         .spawn(move || {
-            tracing::info!("gw-loop thread starting");
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .worker_threads(2)
                 .build()
                 .expect("failed to build loop runtime");
             rt.block_on(async move {
-                tracing::info!("conversation loop about to run");
                 if let Err(e) = conv_loop.run(loop_rx).await {
                     tracing::error!(error = %e, "conversation loop exited");
-                } else {
-                    tracing::info!("conversation loop exited cleanly");
                 }
             });
         })?;

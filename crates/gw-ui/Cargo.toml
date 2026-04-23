@@ -36,3 +36,7 @@ path = "examples/echo_server.rs"
 [[example]]
 name = "llm_server"
 path = "examples/llm_server.rs"
+
+[[example]]
+name = "frankenstein_server"
+path = "examples/frankenstein_server.rs"

@@ -24,6 +24,8 @@ Thumbs.db
 
 # Data volumes (Docker)
 data/
+# ...but check in static example corpora
+!crates/gw-ui/examples/data/
 
 # LanceDB local data
 lance_data/

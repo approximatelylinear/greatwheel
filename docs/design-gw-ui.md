@@ -403,3 +403,36 @@ anyone builds seriously on it:
   feature that actually demonstrates "widget lifecycle ≠ message
   lifecycle" — durable widget state survives a frontend reload even
   when message history doesn't.
+
+## 14. Follow-ups from the Frankenstein Demo
+
+The `frankenstein_server` example (corpus + picker + summarise) works
+end-to-end but exposed a few rough edges worth fixing before serious
+demo work:
+
+- **Agent-visible session id is fragile.** The example injects
+  `gw_session_id` as a Python variable via `ReplAgent::set_variable`
+  and the system prompt begs the agent to pass it as a kwarg on every
+  `emit_widget`/`supersede_widget` call. This works but feels
+  accidental. A first-class fix: plumb `CallContext` through
+  `HostFnRouter::dispatch` so the UI host fns can default
+  `session_id` / `surface_id` from context when the agent omits them.
+- **FINAL() multi-part construction truncation.** qwen3.5:9b
+  occasionally writes `FINAL("## " + section["title"] + "\n\n" +
+  summary)` and we extract only part of the concatenated string.
+  Unclear whether this is in gw-bench's FINAL extractor, gw-loop's
+  `TurnResult` assembly, or the Python REPL trace. Worth a focused
+  repro + test.
+- **Observability: show the agent's actual code.** When the agent
+  misbehaves (wrong section, missing widget emit, short reply), we
+  currently have no way to see the Python it wrote short of digging
+  into session-tree entries. A simple debug SSE event (or an admin
+  endpoint) that streams each `EntryType::CodeExecution` would make
+  prompt iteration much faster.
+- **Prompt tuning for tool-calling agents.** qwen3.5:9b in the rLM
+  loop has a tendency to (a) parrot earlier FINAL strings on
+  subsequent turns and (b) summarise from memory rather than calling
+  `get_section` first. The current prompt with an explicit grounding
+  rule and an index map is the minimum that worked; anything shorter
+  regressed. Likely needs a few worked-example turns or a
+  system-message refresh per turn.
