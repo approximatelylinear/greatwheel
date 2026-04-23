@@ -93,12 +93,13 @@ State shape I'd commit to:
 
 ```
 {
-  widgets: { [id]: Widget },       // full widget records
-  widgetOrder: string[],            // scroll-tail ordering
+  widgets: { [id]: Widget },        // full widget records
+  widgetOrder: string[],             // scroll-tail ordering
   canvasSlot: string | null,
   canvasAuxSlot: string | null,
-  pinnedIds: { [id]: true },        // ever-pinned set
-  pressed: { [widgetId]: buttonId } // agent + user both write here
+  pinnedIds: { [id]: true },         // ever-pinned set
+  pressed: { [widgetId]: buttonId }, // agent + user both write here
+  focusedScope: { [kind]: key }      // see §3.1 "Widget scope"
 }
 ```
 
@@ -106,6 +107,48 @@ State shape I'd commit to:
 exist only because our widget→message anchoring is a UI convention,
 not protocol state. (Candidate for later: first-class `anchor`
 field on Widget; see §14's "First-class widget scoping / linkage".)
+
+### 3.1 Widget scope → visibility
+
+The current demo has an implicit parent-child relationship: the
+characters widget for chapter N belongs to chapter N. Today we infer
+this on the frontend by inspecting Card `data.section` values, and
+the agent is asked (via prompt discipline) to re-emit on navigation.
+§14 of `design-gw-ui.md` flagged the fragility.
+
+json-render has no named "widget scope" concept, but its built-in
+`visible` condition on every UIElement is a natural fit:
+
+```json
+{"type": "Column", "props": {...}, "visible": {"$state": "/focusedScope/section", "eq": 4}}
+```
+
+Resolution:
+
+- **New field `Widget.scope: Option<WidgetScope>`** where
+  `WidgetScope = { kind: String, key: serde_json::Value }`. The agent
+  declares a widget's scope once at emission time; stays loosely
+  typed like the rest of our Widget JSON (tighter enums can come
+  later if we need them across demos).
+- **Translator emits a `visible` condition** on the widget's root
+  UIElement: `{$state: "/focusedScope/<kind>", eq: <key>}`. Widgets
+  scoped to a kind+key other than the current focus simply don't
+  render — json-render's visibility resolver handles the rest.
+- **Server infers `focusedScope` from button clicks.** When a
+  `WidgetEvent` arrives whose `data` contains `{scope: {kind, key}}`
+  (or, for back-compat during migration, `{section: N}`), the
+  adapter writes `state.focusedScope[kind] = key` as part of the
+  same STATE_DELTA burst. Keeps the agent out of state plumbing;
+  moves the existing frontend heuristic to the server where it
+  belongs.
+- **Deprecates** the current `canvas_aux_slot` auto-swap, the
+  frontend `sectionScopedWidgets` map, and the prompt rule "re-emit
+  characters on navigation." All three become dead code after
+  phase 3.
+
+Host-function impact: `emit_widget` grows a `scope=` kwarg. No new
+host functions; no `focus_scope` or `set_state`. The agent never
+touches state directly — the boundary we wanted to keep.
 
 ## 4. Proposed ordering
 

@@ -445,6 +445,15 @@ demo work:
   `DEBUG_CODE_EXEC`, and the React frontend surfaces them in a
   collapsible pane behind `?debug=1`. Prompt iteration is now a
   first-class loop.
+- **First-class widget scoping / linkage.** ~~The right fix is a
+  `scope` field on `Widget` plus a `focus_scope` host function.~~
+  **Resolution sketched in `design-json-render-migration.md` §3.1.**
+  Going with `Widget.scope: Option<{kind, key}>` (agent-declared) and
+  leaning on json-render's built-in `visible` condition instead of a
+  new host function; the server infers `focusedScope` from button
+  click data, so the agent never writes state directly. Lands as
+  part of phase 2 of the AG-UI migration.
+
 - **Prompt tuning for tool-calling agents.** qwen3.5:9b in the rLM
   loop has a tendency to (a) parrot earlier FINAL strings on
   subsequent turns and (b) summarise from memory rather than calling
