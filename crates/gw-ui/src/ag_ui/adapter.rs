@@ -53,6 +53,14 @@ pub struct AgUiState {
     sessions: Mutex<HashMap<SessionId, broadcast::Sender<AgUiEvent>>>,
     /// Per-session inbound sinks.
     inbound: Mutex<HashMap<SessionId, InboundSender>>,
+    /// Per-session focused-scope map (what the user has navigated to,
+    /// keyed by scope kind). Updated when a widget event carries
+    /// `data.scope = {kind, key}` (or, for back-compat,
+    /// `data.section = N`). Emitted into STATE_SNAPSHOT and pushed as
+    /// STATE_DELTA patches on change. Purely AG-UI-layer state; not
+    /// persisted anywhere else. See
+    /// `docs/design-json-render-migration.md` §3.1.
+    focused_scope: Mutex<HashMap<SessionId, HashMap<String, serde_json::Value>>>,
 }
 
 /// Public-facing adapter. Construct once per gw instance and share.
@@ -72,6 +80,7 @@ impl AgUiAdapter {
             store: store.clone(),
             sessions: Mutex::new(HashMap::new()),
             inbound: Mutex::new(HashMap::new()),
+            focused_scope: Mutex::new(HashMap::new()),
         });
 
         let st = state.clone();
@@ -134,6 +143,7 @@ impl AgUiAdapter {
     pub async fn unregister_session(&self, session_id: SessionId) {
         self.state.inbound.lock().await.remove(&session_id);
         self.state.sessions.lock().await.remove(&session_id);
+        self.state.focused_scope.lock().await.remove(&session_id);
     }
 
     /// Dispatch a `LoopEvent` to a specific session's SSE stream. Called
@@ -207,10 +217,19 @@ async fn sse_handler(
     // without a separate /surface fetch. Emitted as the first event
     // on the stream, ahead of any live deltas.
     let snapshot_event = match state.store.snapshot(sid).await {
-        Ok(snap) => Some(AgUiEvent::StateSnapshot {
-            surface_id: snap.surface.id.0.to_string(),
-            state: canonical_state(&snap),
-        }),
+        Ok(snap) => {
+            let focus = state
+                .focused_scope
+                .lock()
+                .await
+                .get(&sid)
+                .cloned()
+                .unwrap_or_default();
+            Some(AgUiEvent::StateSnapshot {
+                surface_id: snap.surface.id.0.to_string(),
+                state: canonical_state(&snap, &focus),
+            })
+        }
         Err(_) => None,
     };
     let snapshot_stream = futures::stream::iter(snapshot_event.into_iter().map(|ev| {
@@ -279,6 +298,34 @@ async fn post_widget_event(
         }
     }
 
+    // Infer focused-scope updates from the click payload. Either
+    // `data.scope = {kind, key}` (preferred) or `data.section = N`
+    // (back-compat while the existing Frankenstein prompts still use
+    // the old convention). Emits a STATE_DELTA and updates the
+    // adapter's per-session focus map so subsequent STATE_SNAPSHOTs
+    // include the current focus.
+    if let Some((kind, key)) = extract_scope_update(&body.data) {
+        let mut map = state.focused_scope.lock().await;
+        let entry = map.entry(sid).or_default();
+        let changed = entry.get(&kind) != Some(&key);
+        if changed {
+            entry.insert(kind.clone(), key.clone());
+            let patch = serde_json::json!({
+                "op": "replace",
+                "path": format!("/focusedScope/{}", kind),
+                "value": key,
+            });
+            drop(map);
+            let sessions = state.sessions.lock().await;
+            if let Some(tx) = sessions.get(&sid) {
+                let _ = tx.send(AgUiEvent::StateDelta {
+                    surface_id: body.surface_id.0.to_string(),
+                    patches: vec![patch],
+                });
+            }
+        }
+    }
+
     let inbound = state.inbound.lock().await;
     let tx = inbound.get(&sid).ok_or_else(|| {
         (
@@ -293,6 +340,25 @@ async fn post_widget_event(
         )
     })?;
     Ok(StatusCode::ACCEPTED)
+}
+
+/// Inspect a WidgetEvent's `data` payload for a focused-scope update.
+/// Accepts two shapes:
+///   - `{"scope": {"kind": "...", "key": <any-json>}}` — canonical form.
+///   - `{"section": N}` — Frankenstein-demo back-compat; treated as
+///     `kind="section"`, `key=N`.
+fn extract_scope_update(data: &serde_json::Value) -> Option<(String, serde_json::Value)> {
+    if let Some(scope) = data.get("scope").and_then(|v| v.as_object()) {
+        let kind = scope.get("kind")?.as_str()?.to_string();
+        let key = scope.get("key")?.clone();
+        return Some((kind, key));
+    }
+    if let Some(section) = data.get("section") {
+        if !section.is_null() {
+            return Some(("section".into(), section.clone()));
+        }
+    }
+    None
 }
 
 async fn get_surface(
@@ -332,6 +398,35 @@ mod tests {
     use chrono::Utc;
     use gw_core::{UiSurfaceId, Widget, WidgetId, WidgetKind, WidgetPayload, WidgetState};
     use serde_json::json;
+
+    #[test]
+    fn extract_scope_update_reads_canonical_shape() {
+        let data = json!({"scope": {"kind": "section", "key": 4}});
+        let (kind, key) = extract_scope_update(&data).unwrap();
+        assert_eq!(kind, "section");
+        assert_eq!(key, json!(4));
+    }
+
+    #[test]
+    fn extract_scope_update_back_compat_section() {
+        let data = json!({"section": 7});
+        let (kind, key) = extract_scope_update(&data).unwrap();
+        assert_eq!(kind, "section");
+        assert_eq!(key, json!(7));
+    }
+
+    #[test]
+    fn extract_scope_update_none_when_absent() {
+        assert!(extract_scope_update(&json!({})).is_none());
+        assert!(extract_scope_update(&json!({"foo": "bar"})).is_none());
+        assert!(extract_scope_update(&json!({"section": null})).is_none());
+    }
+
+    #[test]
+    fn extract_scope_update_rejects_partial_scope() {
+        assert!(extract_scope_update(&json!({"scope": {"kind": "section"}})).is_none());
+        assert!(extract_scope_update(&json!({"scope": {"key": 4}})).is_none());
+    }
 
     fn active_widget(session: SessionId, surface: UiSurfaceId) -> Widget {
         Widget {

@@ -11,6 +11,8 @@
 //! domain-shaped `UI_PATCH` event alongside the new `STATE_DELTA` so
 //! the current frontend keeps working. Phase 3 removes UI_PATCH.
 
+use std::collections::HashMap;
+
 use serde_json::{json, Value};
 
 use crate::surface::{UiNotification, UiSurfaceSnapshot, UiSurfaceStore};
@@ -19,7 +21,13 @@ use crate::surface::{UiNotification, UiSurfaceSnapshot, UiSurfaceStore};
 /// described in the migration design doc §3. Emitted as the body of
 /// `STATE_SNAPSHOT` on SSE subscribe; all subsequent `STATE_DELTA`
 /// patches are JSON-Pointer writes against this shape.
-pub fn canonical_state(snap: &UiSurfaceSnapshot) -> Value {
+///
+/// `focused_scope` is the adapter's per-session focus map (populated
+/// from button-click `data.scope` / `data.section` in
+/// `post_widget_event`). Passed in rather than stored on `UiSurface`
+/// because focus is a wire-layer concern; the core surface store
+/// doesn't track it.
+pub fn canonical_state(snap: &UiSurfaceSnapshot, focused_scope: &HashMap<String, Value>) -> Value {
     let mut widgets = serde_json::Map::new();
     let mut pinned = serde_json::Map::new();
     for w in &snap.widgets {
@@ -40,6 +48,10 @@ pub fn canonical_state(snap: &UiSurfaceSnapshot) -> Value {
         .iter()
         .map(|id| Value::String(id.0.to_string()))
         .collect();
+    let focus_map: serde_json::Map<String, Value> = focused_scope
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
 
     json!({
         "widgets": Value::Object(widgets),
@@ -48,7 +60,7 @@ pub fn canonical_state(snap: &UiSurfaceSnapshot) -> Value {
         "canvasAuxSlot": snap.surface.canvas_aux_slot.map(|id| id.0.to_string()),
         "pinnedIds": Value::Object(pinned),
         "pressed": {},
-        "focusedScope": {},
+        "focusedScope": Value::Object(focus_map),
     })
 }
 
@@ -193,7 +205,7 @@ mod tests {
             },
             widgets: vec![w.clone()],
         };
-        let state = canonical_state(&snap);
+        let state = canonical_state(&snap, &HashMap::new());
         assert_eq!(state["widgets"][w.id.0.to_string()]["id"], json!(w.id.0));
         assert_eq!(state["widgetOrder"][0], json!(w.id.0.to_string()));
         assert_eq!(state["canvasSlot"], json!(w.id.0.to_string()));
@@ -201,6 +213,26 @@ mod tests {
         assert_eq!(state["pinnedIds"][w.id.0.to_string()], json!(true));
         assert!(state["pressed"].is_object());
         assert!(state["focusedScope"].is_object());
+    }
+
+    #[test]
+    fn canonical_state_includes_focused_scope() {
+        let sid = SessionId(Uuid::new_v4());
+        let surf = UiSurfaceId::new();
+        let snap = UiSurfaceSnapshot {
+            surface: UiSurface {
+                id: surf,
+                session_id: sid,
+                widget_order: vec![],
+                canvas_slot: None,
+                canvas_aux_slot: None,
+            },
+            widgets: vec![],
+        };
+        let mut focus = HashMap::new();
+        focus.insert("section".into(), json!(4));
+        let state = canonical_state(&snap, &focus);
+        assert_eq!(state["focusedScope"]["section"], json!(4));
     }
 
     #[tokio::test]
