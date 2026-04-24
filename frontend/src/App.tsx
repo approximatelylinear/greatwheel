@@ -36,7 +36,7 @@ export function App() {
   const [sessionId] = useState(resolveSessionId);
   const [debug] = useState(debugEnabled);
   const [streamError, setStreamError] = useState<string | null>(null);
-  const { state, appendUser, markRunning, ingest: sessionIngest } =
+  const { state, appendUser, markRunning, widgetAdded, ingest: sessionIngest } =
     useSessionStore();
 
   // Single json-render StateStore for the whole app. Populated by
@@ -52,9 +52,9 @@ export function App() {
   const ingest = useCallback(
     (ev: Parameters<typeof sessionIngest>[0]) => {
       sessionIngest(ev);
-      applyAgUiEventToStore(store, ev);
+      applyAgUiEventToStore(store, ev, { onWidgetAdded: widgetAdded });
     },
-    [sessionIngest, store],
+    [sessionIngest, store, widgetAdded],
   );
 
   useEffect(() => {

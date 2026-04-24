@@ -150,6 +150,10 @@ export function useSessionStore() {
     state,
     appendUser: (content: string) => dispatch({ type: 'append-user', content }),
     markRunning: () => dispatch({ type: 'mark-running' }),
+    /** Called by the state bridge when a new widget lands in
+     *  `/widgets/<id>`. Drives the follow-up anchoring heuristic. */
+    widgetAdded: (widget: Widget) =>
+      dispatch({ type: 'widget-emitted', widget }),
     ingest: (ev: AgUiEvent) => {
       const action = agUiToAction(ev);
       if (action) dispatch(action);
@@ -173,15 +177,12 @@ function agUiToAction(ev: AgUiEvent): Action | null {
       };
     case 'INPUT_REQUEST':
       return { type: 'assistant-chunk', message_id: crypto.randomUUID(), delta: ev.prompt };
-    case 'UI_EVENT':
-      // Widget records land in the json-render StateStore via the
-      // state bridge. Here we only care about the follow-up anchor
-      // heuristic, which needs the Widget's follow_up flag.
-      return { type: 'widget-emitted', widget: ev.widget };
     case 'STATE_SNAPSHOT':
     case 'STATE_DELTA':
-    case 'UI_PATCH':
-      // Consumed by the stateBridge (or phased-out); no reducer work.
+      // Consumed by the state bridge (widget/canvas/pressed/focus
+      // live in the json-render StateStore). Follow-up anchoring is
+      // triggered from the bridge's onWidgetAdded callback via
+      // `widgetAdded` below, not through this reducer path.
       return null;
     case 'DEBUG_CODE_EXEC':
       return {

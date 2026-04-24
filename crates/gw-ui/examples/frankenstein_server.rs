@@ -69,11 +69,22 @@ UI host functions (keyword args):
         an answer.
   - supersede_widget(old_widget_id, session_id, kind, payload, multi_use=False, follow_up=False)
   - pin_to_canvas(widget_id)
-  - highlight_button(widget_id, button_id)
-      UI hint: marks a specific button inside a widget as the currently-focused one.
-      Call this EVERY time you decide to load a section, so the picker shows the user
-      which section you're discussing — even when they reached it via a free-text
-      question instead of clicking.
+      Moves a widget into the primary canvas slot at the top-right.
+      Use for persistent navigation (the chapter picker).
+  - pin_below_canvas(widget_id)
+      Moves a widget into the auxiliary slot BELOW the primary pin.
+      Use for contextual content scoped to whatever's selected
+      (characters in the current section). Each call replaces
+      whatever's in the slot — the previous aux widget goes away.
+  - highlight_button(session_id, button_id)
+      UI hint: marks a specific button inside the session's primary pinned
+      widget (i.e. the chapter picker) as the currently-focused one. Call
+      this EVERY time you decide to load a section, so the picker shows
+      the user which section you're discussing — even when they reached
+      it via a free-text question instead of clicking.
+      You can also pass widget_id=... explicitly if you need to highlight
+      inside a widget that isn't pinned, but for Frankenstein the
+      session_id form is enough.
   - FINAL(text)
 
 Your session id is the Python variable `gw_session_id`.
@@ -82,7 +93,13 @@ Your session id is the Python variable `gw_session_id`.
 
 **Behaviour**
 
-1. First user turn (greeting): show a chapter picker pinned to the canvas. No section is active yet — **do NOT call `highlight_button` in this turn.** The picker should come up with nothing lit.
+1. First user turn — ALWAYS, regardless of what the user said. Your first action on the very first turn is to emit and pin the chapter picker. The picker must exist before anything else can reference it (character widgets, `highlight_button`, etc.). Do this EVEN IF the user's first message is a question or a command rather than a greeting.
+
+   If the first message is a greeting (hi, hello, start), the turn ends here with a welcome FINAL and no section loaded.
+
+   If the first message is a question or instruction (like "Summarize Chapter 5"), emit/pin the picker in iteration 1, then ALSO do the section load / printing in iteration 1, then FINAL with the summary in iteration 2 — effectively rule 2 with the picker setup prepended.
+
+   Picker code (always the same on turn 1):
 
    ```python
    sections = list_sections()
@@ -113,12 +130,11 @@ Your session id is the Python variable `gw_session_id`.
            {"type": "Row", "children": chapters},
        ]},
    )
-   picker_widget_id = result["widget_id"]   # remember; you'll reuse this on every later turn
-   pin_to_canvas(widget_id=picker_widget_id)
+   pin_to_canvas(widget_id=result["widget_id"])
    FINAL("Welcome. Pick a section above — or ask me any question about the novel.")
    ```
 
-   (The REPL keeps `picker_widget_id` defined across turns, so you can use it later without re-emitting the widget.)
+   Note: local Python variables from turn 1 (like the widget id returned by emit_widget) do NOT persist across turns. For later turns, reference pinned widgets via `session_id=gw_session_id` — `highlight_button` looks up the session's primary canvas pin automatically.
 
 2. Widget button click (`[widget-event] ... data={"section": N}`): use **two iterations**. You have not seen the return value of `get_section(index=N)` yet when you write your first code block — it only exists at runtime. To ground in the actual text you must print it first, read the print output, then write the summary.
 
@@ -127,9 +143,10 @@ Your session id is the Python variable `gw_session_id`.
    ```python
    section = get_section(index=N)
    # Light up the section's button in the picker — whether the user
-   # clicked it or reached it by asking a question. picker_widget_id
-   # was saved when you emitted the picker on the first turn.
-   highlight_button(widget_id=picker_widget_id, button_id=f"sec-{N}")
+   # clicked it or reached it by asking a question. No need to remember
+   # the picker's widget_id; highlight_button auto-resolves it from
+   # the session's primary canvas pin.
+   highlight_button(session_id=gw_session_id, button_id=f"sec-{N}")
    print("TITLE::", section["title"])
    print("BODY_HEAD::", section["body"][:1500])
    print("BODY_TAIL::", section["body"][-800:])
@@ -148,12 +165,18 @@ Your session id is the Python variable `gw_session_id`.
    )
    themes = "<1-2 sentences on themes visible in the printed excerpt>"
 
-   # Before FINAL, emit a small follow-up widget with 2-3 question
-   # buttons the user might want to click next. Use follow_up=True so
-   # it anchors to this message in the UI. Each button's `data` should
-   # be a natural-language question in `{"ask": "..."}` form — when
-   # clicked, the harness delivers it as `[widget-event] ... data=...`
-   # and you can respond to it on a later turn.
+   # Before FINAL, emit TWO widgets:
+   #
+   # (a) A follow-up widget anchored to this chat message with 2-3
+   #     "Go deeper" question buttons. Uses follow_up=True.
+   #
+   # (b) A characters widget pinned to the auxiliary canvas slot.
+   #     Contains 3-5 Cards, one per major character present in
+   #     BODY_HEAD / BODY_TAIL, with a short role subtitle. Clicking
+   #     a card sends {"character": "<name>", "section": N}.
+   #     Do not invent characters who don't appear in the printed
+   #     excerpt.
+
    emit_widget(
        session_id=gw_session_id,
        kind="a2ui",
@@ -170,14 +193,55 @@ Your session id is the Python variable `gw_session_id`.
        ]},
    )
 
+   chars_result = emit_widget(
+       session_id=gw_session_id,
+       kind="a2ui",
+       # scope ties this widget to section N. The frontend reads the
+       # scope field and bakes a `visible` condition on the root
+       # element, so when the user navigates to a different section
+       # (changing state.focusedScope.section) this widget auto-hides
+       # without needing to be re-emitted.
+       scope={"kind": "section", "key": N},
+       payload={"type": "Column", "children": [
+           {"type": "Text", "text": f"Characters in {title}"},
+           {"type": "Column", "children": [
+               {"type": "Card", "id": "char-1",
+                "title": "<character full name>",
+                "subtitle": "<one short phrase: role / relation / action>",
+                "action": "submit",
+                "data": {"character": "<character full name>", "section": N}},
+               # 2-4 more Cards for other characters present in this section
+           ]},
+       ]},
+   )
+   pin_below_canvas(widget_id=chars_result["widget_id"])
+
    FINAL(f"## {title}\n\n{summary}\n\n**Themes.** {themes}")
    ```
 
    Splitting across two iterations is required because the `section["body"]` return value is NOT in your context on iteration 1 — you have to print it first, see the printout, then write the summary.
 
-3. Free-text question (e.g. "what happens in chapter 5?"): figure out the section index(es), call `get_section(index=N)` on the relevant one, `highlight_button(widget_id=picker_widget_id, button_id=f"sec-{N}")` so the UI tracks which section you're on, print enough of the body in iteration 1, then answer in iteration 2 grounded in the printed text.
+3. Character Card click (`[widget-event] ... data={"character": "<name>", "section": N}`): write a short character profile grounded in that section. Use the same two-iteration pattern:
 
-4. Always end each turn with exactly one `FINAL(text)` call.
+   **Iteration 1** — reload the section so the body is in your context, and keep the picker highlight in sync:
+
+   ```python
+   section = get_section(index=N)
+   highlight_button(session_id=gw_session_id, button_id=f"sec-{N}")
+   print("CHARACTER::", "<name>")
+   print("TITLE::", section["title"])
+   print("BODY::", section["body"])
+   ```
+
+   **Iteration 2** — write a 3-4 sentence character profile grounded only in what's printed. Call `FINAL` with markdown formatting (`## {name}` header, then profile paragraph). Do NOT emit another follow-up widget here; the existing one from the section summary still applies.
+
+4. Free-text question (typed by user, OR delivered via a "Go deeper" button which arrives as `[widget-event] ... data={"ask": "..."}`): figure out the section index N the question is about, then follow the SAME two-iteration pattern as rule 2 — including re-emitting the characters widget + `pin_below_canvas` in iteration 2 for that section.
+
+   If the question is about a section DIFFERENT from the one currently selected (e.g. the user is going deeper on an older chapter's follow-up), the characters widget in the canvas is stale. Re-pinning it with the new section's cast is REQUIRED so the canvas stays in sync with whatever section the current answer is about.
+
+   Concretely: any time you call `highlight_button` for a new section, also emit a fresh characters widget for that section and call `pin_below_canvas` on it. The two are paired.
+
+5. Always end each turn with exactly one `FINAL(text)` call.
 "###;
 
 // ── Frankenstein corpus + plugin ─────────────────────────────────────
@@ -348,6 +412,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "supersede_widget".into(),
         "resolve_widget".into(),
         "pin_to_canvas".into(),
+        "pin_below_canvas".into(),
         "highlight_button".into(),
         "emit_mcp_resource".into(),
         "list_sections".into(),

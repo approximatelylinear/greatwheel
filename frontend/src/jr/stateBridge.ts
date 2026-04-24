@@ -1,5 +1,5 @@
 import type { StateStore } from '@json-render/core';
-import type { AgUiEvent } from '../types';
+import type { AgUiEvent, Widget } from '../types';
 
 /**
  * Canonical state shape the server ships in STATE_SNAPSHOT (see
@@ -18,6 +18,16 @@ export const INITIAL_CANONICAL_STATE: Record<string, unknown> = {
   focusedScope: {},
 };
 
+export interface StateBridgeCallbacks {
+  /**
+   * Fires when a JSON-Patch op adds a new Widget to `/widgets/<id>`.
+   * The session reducer uses this to drive follow-up anchoring
+   * (attaching `follow_up: true` widgets to the nearest assistant
+   * message) — a chat-surface concern the server doesn't model.
+   */
+  onWidgetAdded?: (widget: Widget) => void;
+}
+
 /**
  * Fan out an AG-UI event into a json-render StateStore. Recognises
  * STATE_SNAPSHOT (full replace) and STATE_DELTA (RFC 6902 JSON-Patch
@@ -27,24 +37,44 @@ export const INITIAL_CANONICAL_STATE: Record<string, unknown> = {
 export function applyAgUiEventToStore(
   store: StateStore,
   ev: AgUiEvent,
+  callbacks: StateBridgeCallbacks = {},
 ): void {
   if (ev.type === 'STATE_SNAPSHOT') {
     const next = (ev.state ?? {}) as Record<string, unknown>;
-    // Seed any canonical keys the server omitted so path binds don't
-    // resolve to undefined mid-render.
     for (const [k, v] of Object.entries(INITIAL_CANONICAL_STATE)) {
       store.set(`/${k}`, next[k] ?? v);
     }
-    // Also carry through any extras (forward-compat for keys we add
-    // server-side without touching this file).
     for (const [k, v] of Object.entries(next)) {
       if (!(k in INITIAL_CANONICAL_STATE)) store.set(`/${k}`, v);
+    }
+    // Snapshot can also carry pre-existing widgets; treat each as an
+    // "add" for follow-up anchoring purposes so a client reconnecting
+    // mid-session still wires them up.
+    if (callbacks.onWidgetAdded) {
+      const widgets = (next.widgets ?? {}) as Record<string, Widget>;
+      for (const w of Object.values(widgets)) {
+        callbacks.onWidgetAdded(w);
+      }
     }
     return;
   }
   if (ev.type === 'STATE_DELTA') {
     for (const raw of ev.patches ?? []) {
-      applyPatchOp(store, raw as JsonPatchOp);
+      const op = raw as JsonPatchOp;
+      applyPatchOp(store, op);
+      // Detect widget additions so the session reducer can anchor
+      // follow-up widgets to chat messages. Only triggers on a
+      // top-level `/widgets/<uuid>` add — not on children or
+      // replacements of existing widgets' fields.
+      if (
+        callbacks.onWidgetAdded &&
+        op.op === 'add' &&
+        /^\/widgets\/[^/]+$/.test(op.path) &&
+        op.value &&
+        typeof op.value === 'object'
+      ) {
+        callbacks.onWidgetAdded(op.value as Widget);
+      }
     }
   }
 }
@@ -60,8 +90,6 @@ function applyPatchOp(store: StateStore, op: JsonPatchOp): void {
     case 'add':
     case 'replace': {
       if (op.path.endsWith('/-')) {
-        // JSON-Patch array-append shorthand. StateStore has no
-        // append primitive — resolve parent, push, write back.
         const parentPath = op.path.slice(0, -2);
         const parent = store.get(parentPath);
         const arr = Array.isArray(parent) ? parent : [];
@@ -72,9 +100,6 @@ function applyPatchOp(store: StateStore, op: JsonPatchOp): void {
       return;
     }
     case 'remove': {
-      // Best-effort: StateStore doesn't have a delete primitive, so
-      // we blank out the key. No consumers in phase 3 rely on
-      // distinguishing missing vs null, so this is fine.
       store.set(op.path, undefined);
       return;
     }

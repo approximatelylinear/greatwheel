@@ -34,7 +34,7 @@ use uuid::Uuid;
 
 use crate::surface::{UiSurfaceSnapshot, UiSurfaceStore};
 
-use super::codec::{loop_event_to_ag_ui, notification_to_ag_ui};
+use super::codec::loop_event_to_ag_ui;
 use super::events::{AgUiEvent, PostMessageBody};
 use super::state::{
     canonical_state, notification_session, notification_surface, notification_to_patches,
@@ -88,31 +88,24 @@ impl AgUiAdapter {
             loop {
                 match rx.recv().await {
                     Ok(notif) => {
-                        // Emit the new JSON-Patch STATE_DELTA (vanilla
-                        // AG-UI) and the legacy UI_PATCH (for the
-                        // current frontend reducer) in parallel. Phase 3
-                        // will delete the legacy leg.
+                        // Every UiSurfaceStore notification projects to
+                        // a single STATE_DELTA (JSON-Patch array) against
+                        // the canonical state shape.
                         let Some(session_id) = notification_session(&st.store, &notif).await else {
                             continue;
                         };
                         let surface_id = notification_surface(&st.store, &notif)
                             .await
                             .unwrap_or_default();
-                        let patches = notification_to_patches(&st.store, &notif).await;
-                        let legacy = notification_to_ag_ui(&st.store, notif).await;
-
-                        let sessions = st.sessions.lock().await;
-                        let Some(tx) = sessions.get(&session_id) else {
+                        let Some(patches) = notification_to_patches(&st.store, &notif).await else {
                             continue;
                         };
-                        if let Some(patches) = patches {
+                        let sessions = st.sessions.lock().await;
+                        if let Some(tx) = sessions.get(&session_id) {
                             let _ = tx.send(AgUiEvent::StateDelta {
-                                surface_id: surface_id.clone(),
+                                surface_id,
                                 patches,
                             });
-                        }
-                        if let Some((_, ev)) = legacy {
-                            let _ = tx.send(ev);
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -491,25 +484,18 @@ mod tests {
         let w = active_widget(sid, UiSurfaceId::new());
         store.emit(w).await.unwrap();
 
-        // Phase 2 dual-emit: every store notification produces a
-        // vanilla-AG-UI STATE_DELTA first and the legacy UI_EVENT /
-        // UI_PATCH second. Collect both and confirm the set.
-        let first = tokio::time::timeout(std::time::Duration::from_millis(200), sub.recv())
+        // Phase 3c: single vanilla STATE_DELTA per notification.
+        let ev = tokio::time::timeout(std::time::Duration::from_millis(200), sub.recv())
             .await
             .unwrap()
             .unwrap();
-        let second = tokio::time::timeout(std::time::Duration::from_millis(200), sub.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            matches!(first, AgUiEvent::StateDelta { .. }),
-            "expected STATE_DELTA first, got {first:?}"
-        );
-        assert!(
-            matches!(second, AgUiEvent::UiEvent { .. }),
-            "expected UI_EVENT second, got {second:?}"
-        );
+        match ev {
+            AgUiEvent::StateDelta { patches, .. } => {
+                assert!(!patches.is_empty());
+                assert_eq!(patches[0]["op"], "add");
+            }
+            other => panic!("expected STATE_DELTA, got {other:?}"),
+        }
     }
 
     #[tokio::test]

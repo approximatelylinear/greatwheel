@@ -35,34 +35,22 @@ pub enum AgUiEvent {
     },
     /// The agent is asking the user for input.
     InputRequest { prompt: String },
-    /// A widget was emitted on the surface.
-    UiEvent {
-        surface_id: String,
-        widget: serde_json::Value,
-    },
     /// Full canonical state snapshot. Emitted once per session on SSE
     /// subscribe so clients can initialise their state store without
-    /// a separate `/surface` fetch. Body matches the shape a standard
-    /// AG-UI client expects: `state.widgets`, `state.widgetOrder`,
-    /// `state.canvasSlot`, etc.
+    /// a separate fetch. Body shape: `state.widgets`,
+    /// `state.widgetOrder`, `state.canvasSlot`, `state.pressed`,
+    /// `state.focusedScope`.
     StateSnapshot {
         surface_id: String,
         state: serde_json::Value,
     },
-    /// Standard AG-UI JSON-Patch delta against the canonical state
-    /// (RFC 6902). Phase 2 emits these alongside `UiPatch`; phase 3
-    /// will delete `UiPatch`.
+    /// Vanilla AG-UI JSON-Patch delta against the canonical state
+    /// (RFC 6902). The only widget-state update channel — widget
+    /// creation arrives as `{op: "add", path: "/widgets/<id>", value: Widget}`
+    /// plus `{op: "add", path: "/widgetOrder/-", value: "<id>"}`.
     StateDelta {
         surface_id: String,
         patches: Vec<serde_json::Value>,
-    },
-    /// Legacy domain-shaped state patch — our original `{kind, ...}`
-    /// body (supersede / resolve / expire / pin / pin_aux / highlight).
-    /// Kept during the phase 2 transition for the existing frontend
-    /// reducer; removed in phase 3.
-    UiPatch {
-        surface_id: String,
-        patch: serde_json::Value,
     },
     /// Diagnostic: a code block the agent just ran, with its stdout and
     /// terminal-ness. Greatwheel-specific (not in AG-UI's standard

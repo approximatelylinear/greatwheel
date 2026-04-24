@@ -44,38 +44,20 @@ export interface WidgetEvent {
   data: unknown;
 }
 
-export interface UiSurface {
-  id: string;
-  session_id: string;
-  widget_order: string[];
-  canvas_slot: string | null;
-  canvas_aux_slot?: string | null;
-}
-
-export interface UiSurfaceSnapshot {
-  surface: UiSurface;
-  widgets: Widget[];
-}
-
 // AG-UI outbound event shapes — the codec on the server emits these.
+// All widget-state updates flow through STATE_SNAPSHOT + STATE_DELTA
+// (JSON-Patch ops against the canonical state shape). See
+// docs/design-json-render-migration.md §3.
 export type AgUiEvent =
   | { type: 'TEXT_MESSAGE_CONTENT'; message_id: string; delta: string }
   | { type: 'RUN_STARTED'; run_id?: string }
   | { type: 'RUN_FINISHED'; run_id?: string }
   | { type: 'RUN_ERROR'; message: string; run_id?: string }
   | { type: 'INPUT_REQUEST'; prompt: string }
-  | { type: 'UI_EVENT'; surface_id: string; widget: Widget }
-  /** Full canonical state snapshot, emitted once on SSE subscribe.
-   *  Phase 2: ignored by the session reducer (we still hydrate from
-   *  `/surface`); phase 3 will consume it and drop the /surface fetch. */
+  /** Full canonical state snapshot, emitted once on SSE subscribe. */
   | { type: 'STATE_SNAPSHOT'; surface_id: string; state: unknown }
-  /** Vanilla AG-UI JSON-Patch delta. Phase 2: ignored — we still read
-   *  from UI_PATCH (the legacy shape below). Phase 3 switches to this
-   *  and deletes UI_PATCH. */
+  /** Vanilla AG-UI JSON-Patch delta (RFC 6902). */
   | { type: 'STATE_DELTA'; surface_id: string; patches: unknown[] }
-  /** Legacy domain-shaped patch (supersede / resolve / expire / pin /
-   *  pin_aux / highlight). Phase 3 removes this. */
-  | { type: 'UI_PATCH'; surface_id: string; patch: StateDeltaPatch }
   | {
       type: 'DEBUG_CODE_EXEC';
       code: string;
@@ -92,11 +74,3 @@ export interface CodeTrace {
   error?: string;
   at: number;
 }
-
-export type StateDeltaPatch =
-  | { kind: 'supersede'; old: string; new: Widget }
-  | { kind: 'resolve'; widget_id: string; data: unknown }
-  | { kind: 'expire'; widget_id: string }
-  | { kind: 'pin'; widget_id: string }
-  | { kind: 'pin_aux'; widget_id: string }
-  | { kind: 'highlight'; widget_id: string; button_id: string };
