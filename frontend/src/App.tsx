@@ -140,7 +140,9 @@ export function App() {
           <CanvasPane />
         </main>
       </JSONUIProvider>
-      {debug && <DebugPane traces={state.codeTraces} />}
+      {debug && (
+        <DebugPane traces={state.codeTraces} toolCalls={state.toolCalls} />
+      )}
       <footer className="app-footer">
         <MessageInput onSend={onSend} disabled={state.running} />
       </footer>

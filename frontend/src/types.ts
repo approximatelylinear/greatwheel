@@ -88,3 +88,14 @@ export interface CodeTrace {
   error?: string;
   at: number;
 }
+
+export interface ToolCall {
+  id: string;
+  name: string;
+  args: unknown;
+  result?: unknown;
+  error?: string;
+  status: 'running' | 'done' | 'error';
+  startedAt: number;
+  completedAt?: number;
+}

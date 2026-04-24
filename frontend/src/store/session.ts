@@ -1,5 +1,5 @@
 import { useReducer } from 'react';
-import type { AgUiEvent, CodeTrace, Widget } from '../types';
+import type { AgUiEvent, CodeTrace, ToolCall, Widget } from '../types';
 
 export interface Message {
   id: string;
@@ -24,6 +24,10 @@ export interface SessionState {
   messages: Message[];
   running: boolean;
   codeTraces: CodeTrace[];
+  /** Insertion-ordered tool calls (each is a host-function invocation
+   *  the agent dispatched). START/ARGS/END events accumulate into the
+   *  same record keyed by `tool_call_id`. Surfaced in the debug pane. */
+  toolCalls: ToolCall[];
   /** messageId → widgetIds anchored to that message. Follow-up-style
    *  widgets (agent-emitted with `follow_up: true`) render under
    *  their matching message instead of in the scroll tail. */
@@ -39,14 +43,25 @@ type Action =
   | { type: 'assistant-chunk'; message_id: string; delta: string }
   | { type: 'run-finished' }
   | { type: 'widget-emitted'; widget: Widget }
-  | { type: 'code-trace'; trace: CodeTrace };
+  | { type: 'code-trace'; trace: CodeTrace }
+  | { type: 'tool-call-start'; id: string; name: string; at: number }
+  | { type: 'tool-call-args'; id: string; args: unknown }
+  | {
+      type: 'tool-call-end';
+      id: string;
+      result?: unknown;
+      error?: string;
+      at: number;
+    };
 
 const MAX_TRACES = 50;
+const MAX_TOOL_CALLS = 50;
 
 const initial: SessionState = {
   messages: [],
   running: false,
   codeTraces: [],
+  toolCalls: [],
   messageFollowUps: {},
   pendingFollowUps: [],
 };
@@ -141,6 +156,42 @@ function reducer(state: SessionState, action: Action): SessionState {
       }
       return { ...state, codeTraces: nextTraces };
     }
+    case 'tool-call-start': {
+      const next: ToolCall[] = [
+        ...state.toolCalls,
+        {
+          id: action.id,
+          name: action.name,
+          args: undefined,
+          status: 'running',
+          startedAt: action.at,
+        },
+      ];
+      if (next.length > MAX_TOOL_CALLS) {
+        next.splice(0, next.length - MAX_TOOL_CALLS);
+      }
+      return { ...state, toolCalls: next };
+    }
+    case 'tool-call-args': {
+      const idx = state.toolCalls.findIndex((c) => c.id === action.id);
+      if (idx < 0) return state;
+      const next = state.toolCalls.slice();
+      next[idx] = { ...next[idx]!, args: action.args };
+      return { ...state, toolCalls: next };
+    }
+    case 'tool-call-end': {
+      const idx = state.toolCalls.findIndex((c) => c.id === action.id);
+      if (idx < 0) return state;
+      const next = state.toolCalls.slice();
+      next[idx] = {
+        ...next[idx]!,
+        result: action.result,
+        error: action.error,
+        status: action.error ? 'error' : 'done',
+        completedAt: action.at,
+      };
+      return { ...state, toolCalls: next };
+    }
   }
 }
 
@@ -185,12 +236,22 @@ function agUiToAction(ev: AgUiEvent): Action | null {
       // `widgetAdded` below, not through this reducer path.
       return null;
     case 'TOOL_CALL_START':
+      return {
+        type: 'tool-call-start',
+        id: ev.tool_call_id,
+        name: ev.tool_name,
+        at: Date.now(),
+      };
     case 'TOOL_CALL_ARGS':
+      return { type: 'tool-call-args', id: ev.tool_call_id, args: ev.delta };
     case 'TOOL_CALL_END':
-      // Host-function tool-call events. Currently unrendered; a
-      // future commit surfaces them in DebugPane alongside the
-      // existing code-trace stream.
-      return null;
+      return {
+        type: 'tool-call-end',
+        id: ev.tool_call_id,
+        result: ev.result,
+        error: ev.error,
+        at: Date.now(),
+      };
     case 'DEBUG_CODE_EXEC':
       return {
         type: 'code-trace',
