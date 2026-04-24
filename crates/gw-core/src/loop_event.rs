@@ -10,11 +10,26 @@ pub enum LoopEvent {
     UserMessage(String),
     /// LLM produces a follow-up (e.g., after code execution).
     FollowUp(String),
-    /// LLM response with content and optional model tag.
-    Response {
-        content: String,
+    /// Start of an assistant-authored text message. All subsequent
+    /// `TextMessageDelta` and `TextMessageEnd` events carrying the
+    /// same `message_id` belong to this message. Maps to AG-UI
+    /// `TEXT_MESSAGE_START`.
+    TextMessageStart { message_id: String },
+    /// A delta (partial text) of an in-flight message. Today the
+    /// conversation loop emits one of these per message carrying the
+    /// full text (LLM output isn't plumbed as a live token stream yet
+    /// because the rLM loop needs the full output to parse for code
+    /// blocks before deciding what's user-visible). When we add real
+    /// streaming, nothing else on the wire needs to change — clients
+    /// simply see many of these between a START/END pair.
+    TextMessageDelta {
+        message_id: String,
+        delta: String,
         model: Option<String>,
     },
+    /// End of an assistant-authored text message. Maps to AG-UI
+    /// `TEXT_MESSAGE_END`.
+    TextMessageEnd { message_id: String },
     /// LLM requests input from the user.
     InputRequest(String),
     /// A plugin-registered host function is about to be dispatched.

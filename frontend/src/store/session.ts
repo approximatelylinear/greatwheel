@@ -214,6 +214,13 @@ export function useSessionStore() {
 
 function agUiToAction(ev: AgUiEvent): Action | null {
   switch (ev.type) {
+    case 'TEXT_MESSAGE_START':
+    case 'TEXT_MESSAGE_END':
+      // Bracket markers. The reducer's assistant-chunk logic keys on
+      // message_id in the CONTENT events, so no state change is
+      // needed here. Future: clients could use START to show a
+      // placeholder before the first delta arrives.
+      return null;
     case 'TEXT_MESSAGE_CONTENT':
       return { type: 'assistant-chunk', message_id: ev.message_id, delta: ev.delta };
     case 'RUN_STARTED':

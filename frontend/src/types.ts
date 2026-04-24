@@ -49,7 +49,13 @@ export interface WidgetEvent {
 // (JSON-Patch ops against the canonical state shape). See
 // docs/design-json-render-migration.md §3.
 export type AgUiEvent =
+  /** Start / end bracket every assistant-authored text message.
+   *  CONTENT deltas between them carry the text. Today there's one
+   *  CONTENT per message with the full text; wire is forward-
+   *  compatible with token-level streaming. */
+  | { type: 'TEXT_MESSAGE_START'; message_id: string }
   | { type: 'TEXT_MESSAGE_CONTENT'; message_id: string; delta: string }
+  | { type: 'TEXT_MESSAGE_END'; message_id: string }
   | { type: 'RUN_STARTED'; run_id?: string }
   | { type: 'RUN_FINISHED'; run_id?: string }
   | { type: 'RUN_ERROR'; message: string; run_id?: string }

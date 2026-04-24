@@ -2,6 +2,25 @@ use gw_core::{EntryId, EntryType, LlmMessage, LoopEvent, ReplSnapshotData, Sessi
 use gw_runtime::{extract_code_blocks, HostBridge, ReplAgent};
 use tokio::sync::mpsc;
 use tracing::{info, info_span, warn};
+use uuid::Uuid;
+
+/// Emit an AG-UI text-message trilogy (START, DELTA, END) for a
+/// complete assistant-authored string. Phase 5: today we emit the
+/// whole string as one DELTA — wire format is already forward-
+/// compatible with real token streaming, which would fire many
+/// DELTAs between the same START/END pair.
+fn emit_text_message(tx: &mpsc::UnboundedSender<LoopEvent>, content: String) {
+    let message_id = Uuid::new_v4().to_string();
+    let _ = tx.send(LoopEvent::TextMessageStart {
+        message_id: message_id.clone(),
+    });
+    let _ = tx.send(LoopEvent::TextMessageDelta {
+        message_id: message_id.clone(),
+        delta: content,
+        model: None,
+    });
+    let _ = tx.send(LoopEvent::TextMessageEnd { message_id });
+}
 
 use crate::context::{build_turn_context_with_opts, ContextOptions};
 use crate::error::LoopError;
@@ -239,7 +258,9 @@ impl ConversationLoop {
                 }
 
                 // Other events are outbound or handled elsewhere.
-                LoopEvent::Response { .. }
+                LoopEvent::TextMessageStart { .. }
+                | LoopEvent::TextMessageDelta { .. }
+                | LoopEvent::TextMessageEnd { .. }
                 | LoopEvent::InputRequest(_)
                 | LoopEvent::HostCallStarted { .. }
                 | LoopEvent::HostCallArgs { .. }
@@ -272,10 +293,7 @@ impl ConversationLoop {
         };
         let _ = self.event_tx.send(LoopEvent::TurnComplete);
         if let Some(response) = result.response {
-            let _ = self.event_tx.send(LoopEvent::Response {
-                content: response,
-                model: None,
-            });
+            emit_text_message(&self.event_tx, response);
         }
 
         while let Some(follow_up) = self.pending_follow_ups.pop() {
@@ -291,10 +309,7 @@ impl ConversationLoop {
             };
             let _ = self.event_tx.send(LoopEvent::TurnComplete);
             if let Some(response) = result.response {
-                let _ = self.event_tx.send(LoopEvent::Response {
-                    content: response,
-                    model: None,
-                });
+                emit_text_message(&self.event_tx, response);
             }
         }
 

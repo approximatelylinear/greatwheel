@@ -91,10 +91,19 @@ impl HostBridge for ConversationBridge {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let _ = self.event_tx.send(LoopEvent::Response {
-                    content: message,
+                // Emit the AG-UI text-message trilogy for channel.send
+                // — each send is its own logical message with its own
+                // id, so bracketing is meaningful.
+                let message_id = uuid::Uuid::new_v4().to_string();
+                let _ = self.event_tx.send(LoopEvent::TextMessageStart {
+                    message_id: message_id.clone(),
+                });
+                let _ = self.event_tx.send(LoopEvent::TextMessageDelta {
+                    message_id: message_id.clone(),
+                    delta: message,
                     model: None,
                 });
+                let _ = self.event_tx.send(LoopEvent::TextMessageEnd { message_id });
                 Ok(Object::None)
             }
 

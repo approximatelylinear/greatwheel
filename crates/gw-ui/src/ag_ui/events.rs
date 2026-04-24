@@ -14,8 +14,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum AgUiEvent {
-    /// Streaming delta of assistant-authored text.
+    /// Start of an assistant-authored text message. Subsequent
+    /// `TextMessageContent` / `TextMessageEnd` events with the same
+    /// `message_id` belong to this message.
+    TextMessageStart { message_id: String },
+    /// Delta of assistant-authored text. Today emitted once per
+    /// message with the full content; forward-compatible with a
+    /// future stream of many deltas between START/END.
     TextMessageContent { message_id: String, delta: String },
+    /// End of an assistant-authored text message.
+    TextMessageEnd { message_id: String },
     /// A new run has started (maps from `LoopEvent::TurnStarted`).
     RunStarted {
         #[serde(skip_serializing_if = "Option::is_none")]

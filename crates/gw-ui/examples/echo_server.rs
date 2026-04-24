@@ -49,17 +49,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 LoopEvent::UserMessage(content) => {
                     turn += 1;
                     tracing::info!(turn, ?content, "user message");
-                    // Simulated streaming response.
                     let reply = format!("echo #{turn}: {content}");
-                    adapter_for_loop
-                        .dispatch(
-                            session_id,
-                            &LoopEvent::Response {
-                                content: reply,
-                                model: None,
-                            },
-                        )
-                        .await;
+                    echo_text(&adapter_for_loop, session_id, reply).await;
                     // On the first turn, emit an A2UI widget so the
                     // frontend has something interactive to render.
                     if turn == 1 {
@@ -72,18 +63,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 LoopEvent::WidgetInteraction(ev) => {
                     tracing::info!(?ev, "widget interaction");
-                    adapter_for_loop
-                        .dispatch(
-                            session_id,
-                            &LoopEvent::Response {
-                                content: format!(
-                                    "received widget event: action={} data={}",
-                                    ev.action, ev.data
-                                ),
-                                model: None,
-                            },
-                        )
-                        .await;
+                    let reply = format!(
+                        "received widget event: action={} data={}",
+                        ev.action, ev.data
+                    );
+                    echo_text(&adapter_for_loop, session_id, reply).await;
                     adapter_for_loop
                         .dispatch(session_id, &LoopEvent::TurnComplete)
                         .await;
@@ -133,4 +117,29 @@ fn sample_widget(session_id: SessionId, surface_id: UiSurfaceId) -> Widget {
         follow_up: false,
         scope: None,
     }
+}
+
+async fn echo_text(adapter: &AgUiAdapter, session_id: SessionId, content: String) {
+    let message_id = uuid::Uuid::new_v4().to_string();
+    adapter
+        .dispatch(
+            session_id,
+            &LoopEvent::TextMessageStart {
+                message_id: message_id.clone(),
+            },
+        )
+        .await;
+    adapter
+        .dispatch(
+            session_id,
+            &LoopEvent::TextMessageDelta {
+                message_id: message_id.clone(),
+                delta: content,
+                model: None,
+            },
+        )
+        .await;
+    adapter
+        .dispatch(session_id, &LoopEvent::TextMessageEnd { message_id })
+        .await;
 }

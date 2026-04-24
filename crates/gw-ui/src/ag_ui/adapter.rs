@@ -450,11 +450,13 @@ mod tests {
         adapter.register_session(sid, tx).await;
 
         let mut sub = adapter.subscribe_session(sid).await;
+        let message_id = "msg-1".to_string();
         adapter
             .dispatch(
                 sid,
-                &LoopEvent::Response {
-                    content: "hi".into(),
+                &LoopEvent::TextMessageDelta {
+                    message_id: message_id.clone(),
+                    delta: "hi".into(),
                     model: None,
                 },
             )

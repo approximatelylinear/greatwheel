@@ -7,7 +7,6 @@
 //! greatwheel-specific `DEBUG_CODE_EXEC` extension.
 
 use gw_core::LoopEvent;
-use uuid::Uuid;
 
 use super::events::AgUiEvent;
 
@@ -17,9 +16,17 @@ use super::events::AgUiEvent;
 /// `UiSurfaceStore` notification path).
 pub fn loop_event_to_ag_ui(event: &LoopEvent) -> Option<AgUiEvent> {
     match event {
-        LoopEvent::Response { content, .. } => Some(AgUiEvent::TextMessageContent {
-            message_id: Uuid::new_v4().to_string(),
-            delta: content.clone(),
+        LoopEvent::TextMessageStart { message_id } => Some(AgUiEvent::TextMessageStart {
+            message_id: message_id.clone(),
+        }),
+        LoopEvent::TextMessageDelta {
+            message_id, delta, ..
+        } => Some(AgUiEvent::TextMessageContent {
+            message_id: message_id.clone(),
+            delta: delta.clone(),
+        }),
+        LoopEvent::TextMessageEnd { message_id } => Some(AgUiEvent::TextMessageEnd {
+            message_id: message_id.clone(),
         }),
         LoopEvent::TurnStarted => Some(AgUiEvent::RunStarted { run_id: None }),
         LoopEvent::TurnComplete => Some(AgUiEvent::RunFinished { run_id: None }),
@@ -83,18 +90,40 @@ pub fn loop_event_to_ag_ui(event: &LoopEvent) -> Option<AgUiEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[test]
-    fn response_maps_to_text_message_content() {
-        let ev = LoopEvent::Response {
-            content: "hello".into(),
+    fn text_message_trilogy_maps_to_ag_ui() {
+        let id = "msg-1".to_string();
+
+        let start = loop_event_to_ag_ui(&LoopEvent::TextMessageStart {
+            message_id: id.clone(),
+        })
+        .unwrap();
+        assert!(matches!(start, AgUiEvent::TextMessageStart { .. }));
+
+        let delta = loop_event_to_ag_ui(&LoopEvent::TextMessageDelta {
+            message_id: id.clone(),
+            delta: "hello".into(),
             model: None,
-        };
-        let ag = loop_event_to_ag_ui(&ev).unwrap();
-        match ag {
-            AgUiEvent::TextMessageContent { delta, .. } => assert_eq!(delta, "hello"),
-            other => panic!("expected TextMessageContent, got {:?}", other),
+        })
+        .unwrap();
+        match delta {
+            AgUiEvent::TextMessageContent {
+                message_id,
+                delta: d,
+            } => {
+                assert_eq!(message_id, id);
+                assert_eq!(d, "hello");
+            }
+            other => panic!("expected TextMessageContent, got {other:?}"),
         }
+
+        let end = loop_event_to_ag_ui(&LoopEvent::TextMessageEnd {
+            message_id: id.clone(),
+        })
+        .unwrap();
+        assert!(matches!(end, AgUiEvent::TextMessageEnd { .. }));
     }
 
     #[test]
