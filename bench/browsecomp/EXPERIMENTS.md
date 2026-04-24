@@ -221,6 +221,76 @@ accuracy, not timeout artifacts.
 ### Key insight
 86% of failures are **retrieval** (right documents never found), not extraction. The 9B model reasons well once it has the right documents. Dense vector search doesn't help — but ColBERT reranking of a wider BM25 pool does, because the right documents are often in BM25's top-200 but ranked too low for the agent to see.
 
+### Meng et al. 2026 — `Revisiting Text Ranking in Deep Research` (apr24)
+
+Independent study on the **same BrowseComp-Plus dataset** we use. Full 830
+queries × 2 open-source agents (gpt-oss-20b, GLM-4.7-Flash-30B) × 5
+retrievers (BM25, SPLADE-v3, RepLLaMA, Qwen3-Embed-8B, ColBERTv2) × 3
+re-rankers (monoT5-3B, RankLLaMA-7B, Rank1-7B). arXiv:2602.21456v1.
+
+**Their best single-pipeline result**: gpt-oss-20b + BM25 (passage corpus)
++ monoT5-3B re-ranker at depth 50 = **recall 0.716, accuracy 0.689**.
+Relative to no re-ranking, this is +16.2% recall, +20.5% accuracy — the
+biggest single-lever gain in their whole study.
+
+**What corroborates what we found:**
+- Passage-level > document-level, especially on smaller-context agents
+  (gpt-oss-20b 131K) — matches our +5/+6 passage lift.
+- BM25 on passages BEATS all neural retrievers (raw): BM25 0.572 >
+  SPLADE-v3 0.516 > ColBERTv2 0.521 > RepLLaMA 0.406 > Qwen3-Embed-8B
+  0.417. Matches our Qwen3 Phase 2 regression.
+- Reasoning-based re-ranker (Rank1-7B) shows no clear advantage over
+  non-reasoning rerankers on keyword-style queries — matches our doubts
+  about reasoning on agent-issued queries.
+- Agent-issued queries are web-search style with quotation marks and
+  exact-match tokens (their Table 5 examples: `"90+7" attendance 61700`,
+  `Man United" "4-1" "90+4"`) — which is exactly why lexical retrieval
+  dominates.
+
+**What contradicts what we found:**
+- Re-ranking helps them *consistently*; it *hurt* us. Gap: they test
+  monoT5-3B / RankLLaMA-7B / Rank1-7B (T5- / Llama- cross-encoder
+  rerankers trained on MS MARCO). We only tried **ColBERT-as-reranker**
+  and it regressed -6 fuzzy on sample30. ColBERT is used as a *retriever*
+  in their study, not a re-ranker — the two are different jobs. A
+  T5-style cross-encoder reranker on top of our BM25+passage stack is
+  an **untested, likely big lever** on our side.
+
+**Novel method worth stealing — Q2Q (query-to-question)**. Neural rankers
+are trained on MS MARCO natural-language questions, but agents emit
+keyword-style web-search queries → training–inference mismatch hurts
+neural rerankers badly. Their fix: a small LLM call reformulates the
+agent's keyword query into an NL question (optionally conditioning on
+the agent's recent reasoning trace). Keep the raw query for BM25, use
+the NL version for the neural reranker. Gains (their Table 11, passage
+corpus, gpt-oss-20b):
+- SPLADE-v3: raw 0.516 → Q2Q(Q+R) 0.557 (+7.95% relative, p<0.05)
+- Qwen3-Embed-8B: raw 0.417 → Q2Q(Q+R) 0.459 (+10.1% relative, p<0.05)
+- SPLADE-v3 + Rank1(d=10): raw 0.580 → Q2Q(Q+R) 0.613 (+5.7%)
+- BM25: Q2Q *hurts* (expected, BM25 wants keywords)
+
+**Recipe details worth copying:**
+- Passage size: ~250 words (spaCy `en_core_web_sm` sentence-bounded),
+  avg 279 tokens. Our current 4096-byte chunks are ~1K tokens — roughly
+  4x theirs.
+- Title prepended to each passage when available.
+- BM25 defaults (`k1=0.9, b=0.4`) are fine on passages but *worst* on
+  documents. Better on documents: `k1=3.8, b=0.87` or `k1=10, b=1`
+  (stronger length normalization).
+- Deeper rerank depths help: d=10 → d=20 (+6.2% recall, +6.8% acc);
+  d=20 → d=50 (+2.1% recall, +2.2% acc).
+- Full-document reader tool *helps* on document corpus (truncated input
+  context), *hurts* on passage corpus (redundant — passage retrieval
+  already gives access to relevant segments).
+
+**Blind spots (where our direction is orthogonal):**
+- They do NOT test ensembling, multi-retriever union, or diversity-based
+  set selection. Their whole contribution is *vertical* (better
+  retriever → reranker → deeper depths). Our complementary-channel /
+  coverage-pre-search finding (3-way union = 20/30 on sample30) is a
+  different axis; the paper is silent on whether it's better to optimize
+  one pipeline or compose several.
+
 ---
 
 ## Completed Experiments (mar16-mar27)
@@ -293,6 +363,13 @@ accuracy, not timeout artifacts.
 - **Expected impact:** Low-medium — could widen BM25 recall, benefiting ColBERT reranking
 - **Status:** Worth revisiting now that ColBERT reranking is in place
 
+#### B4. BM25 parameter tuning on document corpus
+- **What:** Meng et al. grid-search BM25 on BrowseComp-Plus documents and report the default (`k1=0.9, b=0.4`, following tantivy/BrowseCompPlus defaults) is the *worst* setting for docs — larger `b` (stronger length normalization) and larger `k1` help substantially. Their best: `k1=10, b=1` → acc 0.506 (vs 0.259 at default) OR `k1=3.8, b=0.87` → acc 0.513.
+- **Where:** `crates/gw-memory/src/corpus.rs` — tantivy BM25 params (currently default). Passages are reportedly fine at default, so only affects the doc-level channel.
+- **Effort:** Small — parameter change + rebuild doc index.
+- **Expected impact:** Medium on the doc channel (half of our RRF fusion). Uncertain effect on end-to-end when passage channel dominates — our sample30 may already rely on passages more than docs.
+- **Status:** Worth a probe. Low cost, bounded risk.
+
 ### Agent/Prompt Improvements
 
 #### A1. Iterative search budget enforcement
@@ -326,8 +403,9 @@ accuracy, not timeout artifacts.
 
 ### Alternative Retrieval
 
-#### R1. Different embedding model — Deprioritized
-- **Status:** Dense vector search doesn't help on this benchmark regardless of embedding model.
+#### R1. Different embedding model — Revisiting (was Deprioritized)
+- **Original status:** Dense vector search doesn't help on this benchmark regardless of embedding model.
+- **Update (apr16):** That conclusion was tested only with nomic-embed-text-v1.5 (~137M encoder). The BrowseComp-Plus paper shows Qwen3-Embedding-8B (a decoder-LLM-class embedder) clearly outperforming BM25 across multiple agents. Their indexing recipe also differs materially: full documents at max_length=4096 with EOS pooling and an instruction-style query prefix — a regime nomic was never tested under here. See R8 below.
 
 #### R2. ColBERT reranker on BM25 results — DONE, new best
 - **Result:** BM25 top-200 → Reason-ModernColBERT rerank → top-10 achieves **12/30 (40%)**, new all-time best.
@@ -364,12 +442,167 @@ accuracy, not timeout artifacts.
 - **Expected impact:** High — the prompt-retriever coupling is the most likely cause of the 7/30 regression. Co-optimization is the principled fix.
 - **Status:** Blocked on R4 or R5 (need a fast ColBERT backend first, otherwise GEPA iterations will be prohibitively slow at 26s/search).
 
+#### R8. Qwen3-Embedding (LLM-class single-vector dense)
+- **What:** Mirror the BrowseComp-Plus paper's indexing recipe with Qwen3-Embedding-0.6B (smallest variant, fast to iterate). Full-doc encoding at max_length=4096, EOS pooling, L2-normalized, no doc prefix. Queries get the BC+ instruction prefix, max_length=512. Single-vector cosine retrieval via LanceDB.
+- **Where:** `bench/browsecomp/qwen3_embed_server.py` (HTTP), `build_qwen3_index.py`, `searchers/qwen3_searcher.py`, `qwen3` backend in `retrieval_benchmark_v2.py`. See `DESIGN-qwen3-embed.md` for the full plan.
+- **Hypothesis:** R1's "no benefit regardless of embedding model" was nomic-specific. A 0.6B decoder-LLM embedder with full-doc context and the right query prompt is a fundamentally different class of model. If 0.6B already lifts R@200 toward ColBERT's 25/30, escalate to 4B/8B; otherwise the chart's gain is unique to the 8B regime.
+- **Effort:** Small-medium (infra is built; ~30 min for full corpus index build at 0.6B on a 4090).
+- **Expected impact:** Unknown — that's what the experiment measures. Phase 1 is retrieval R@k, Phase 2 is end-to-end agent eval.
+- **Status:** Built apr16. Phase 1 retrieval result (apr17):
+
+**Phase 1 — Retrieval R@k on sample30:**
+
+| Backend                | R@5  | R@10 | R@20 | R@50 | R@100 | R@200 | p50 ms |
+|------------------------|------|------|------|------|-------|-------|--------|
+| BM25 (tantivy boosted) | 4/30 | 8/30 | 8/30 | 9/30 | 11/30 | 12/30 | 266    |
+| **Qwen3-Embed-0.6B**   | 5/30 | 10/30| 11/30| **21/30** | **22/30** | **24/30** | **54** |
+| Qdrant ColBERT         | 10/30| 13/30| 15/30| 21/30| 25/30 | 25/30 | 25,680 |
+| LanceDB MV (ColBERT)   | 10/30| 13/30| 15/30| 21/30| 25/30 | 25/30 | 46,076 |
+
+**Hypothesis confirmed.** The smallest variant (0.6B) hits R@200 = 24/30 —
+essentially matching ColBERT's ceiling — at ~475x lower latency than
+Qdrant and ~850x lower than LanceDB MV. The prior "dense doesn't help"
+conclusion was definitively nomic-specific. Critically, the 54ms latency
+kills the main driver of ColBERT's end-to-end regression (timeout
+pressure from 26s/search × 12 calls). Phase 2 (agent eval) now strongly
+motivated — this is the first backend with both high recall AND low
+enough latency to let the agent complete its reasoning chain.
+
+**Per-query inspection (sanity check).** Ran `inspect_qwen3_hits.py` to
+verify the aggregate numbers aren't an artifact of something weird
+(identical scores, degenerate ranking, etc.). Rank distribution of the
+24 finds: rank 1: 3, rank 2-5: 2, rank 6-10: 5, rank 11-50: 11, rank
+51-200: 3. Sums exactly to 24 and reproduces every R@k number in the
+table above.
+
+The **R@10 → R@50 jump (10/30 → 21/30)** is the key quantitative story:
+eleven queries place gold at ranks 11-50. The agent's default k=10 would
+miss all of them; k=50 (or a reranker over the top-200) would catch
+them. This is a different retrieval regime than BM25's flatter rank
+distribution and should inform the agent's k setting during Phase 2.
+
+Spot checks confirm semantic matching is real:
+- *Best rank (q159, art restoration):* gold at rank 1; top-5 are all
+  art / museum / restoration documents.
+- *Mid rank (q763, "historic site near an airport with a specific
+  runway length"):* gold at rank 21; top-5 are thematically adjacent
+  (historic sites, airfields, national register lists) but not the
+  exact gold — classic dense behavior of hitting the topic zone.
+- *Miss (q747):* multi-hop query chaining Person A → state → tribe →
+  college → VP from Maine → …. Qwen3 latches onto "Council of Three
+  Fires" (the most prominent entity) and retrieves docs about the tribe
+  itself, not about Person A. No single-vector encoder solves this in
+  one shot — it's a query-decomposition problem.
+
+The 6 misses (q1034, q1257, q469, q689, q747, q853) are all
+long-chain multi-hop queries of this shape — same class of queries
+that challenge every other backend. They are not close-but-wrong
+retrievals.
+
+**Artifacts for Phase 2:** The qwen3 index is at `data/qwen3-embed/`
+(401 MB, 100195 docs), encoder service runs on port 8003,
+`search_server_qwen3.py` is the drop-in agent-facing HTTP shim
+(same contract as `search_server.py` / `search_server_qdrant.py`).
+
+**Phase 2 — End-to-end agent eval on sample30 (apr17-18):**
+
+| Backend                | Exact    | Fuzzy    | Avg tokens |
+|------------------------|----------|----------|------------|
+| BM25 baseline          | 9/30     | 11/30    | 134K       |
+| Qdrant ColBERT         | 12/30    | 13/30    | 122K       |
+| **Qwen3-Embed-0.6B**   | **3/30** | **4/30** | **63K**    |
+
+Command: `target/release/gw-bench --search-backend http --search-url http://localhost:8000 --search-mode bm25 --model qwen3.5:9b --config bench/browsecomp/configs/baseline.toml --query bench/browsecomp/sample30.tsv --output-dir runs/qwen3-eval --k 10 --max-turns 12`
+(scored via `quick_eval.py --fuzzy` against the same run dir; baseline
+scores come from running `quick_eval.py` on `runs/native-bm25-baseline`
+and `runs/qdrant-eval` for an apples-to-apples comparison).
+
+**Same "retrieval recall ≠ agent accuracy" pattern as ColBERT, even
+more extreme.** Phase 1 R@200=24/30, but Phase 2 fuzzy=4/30. Token
+usage is *half* the BM25 run — the agent is terminating early, confident
+in wrong answers. Correct: q175 (Cocomelon), q464 (115), q797
+(Breadfast).
+
+Failure-mode analysis (`runs/qwen3-eval/run_*.json`):
+
+1. **"Topic zone but wrong doc" errors on queries Phase 1 solved.**
+   q159: Phase 1 found gold docid 42101 at rank 1, but the agent
+   answered "July 27, 2018" (vs truth "October 15, 2016") — it hit
+   a topically-adjacent doc and confidently picked its date. q830
+   (rank 1 in Phase 1): agent returned "Intervention" vs truth
+   "Implicit Theories of Intelligence Predict Achievement" — found
+   *a* psych paper, not *the* psych paper.
+2. **Parsing bug** in the FINAL extractor: q625's recorded answer is
+   literally `FINAL("Yoko Kanno")` — the agent's FINAL call wrapper
+   was captured verbatim instead of unwrapped. Not qwen3-specific but
+   surfaced by this run.
+3. **Multi-hop over-compression.** q747: agent answered "Iowa" (the
+   state Person A was born in, an intermediate entity in the query
+   chain) instead of "Japan" (where Person A spent two years as a
+   teenager, the actual final answer). The dense retriever surfaced
+   topic-relevant docs but the single-vector compression plus the
+   BM25-tuned decomposition prompt together lost the specificity
+   needed to hop correctly.
+
+**Root cause:** the agent's system prompt is BM25-tuned. Pre-search
+decomposition, PRF, phrase/AND/OR boost intuitions, and the "verify
+by name" directive all assume keyword matching. Qwen3-Embedding's
+"finds the topic zone, not the exact doc" character (documented in
+Phase 1 spot checks) is not what this prompt expects. The agent reads
+a semantically-plausible snippet, treats it as evidence, and submits.
+
+**This is exactly the failure mode R6 (GEPA co-optimization) was
+designed to address.** Qwen3 now joins ColBERT as a retriever in need
+of a co-adapted agent prompt. The R@200=24/30 ceiling is there to be
+captured if the prompt uses the backend's characteristics (topic
+clusters, wider k, reranking) rather than fighting them.
+
+Next-step options (in preference order):
+- **GEPA on qwen3 backend (R6).** Prompt-retriever co-optimization.
+  Qwen3's 54ms latency makes this tractable where ColBERT's 26s/search
+  made it prohibitive. This is the most principled fix.
+- **k=50 + simple rerank (cheap agent-side co-adaptation).** Phase 1's
+  R@10→R@50 spike (10→21) is a hint: the agent at k=10 sees gold only
+  ⅓ of the time, but at k=50 it would see it ⅔ of the time. Bump
+  `--k 10` to `--k 50` and see if giving the agent more candidates
+  moves the needle.
+- **Ensemble with BM25 / ColBERT (A4).** Each backend's correct set is
+  small and partly disjoint; an ensemble with per-query routing could
+  reach ~14/30 (the historical 3-way union) plus any qwen3-unique
+  wins.
+- **Fix the `FINAL(...)` unwrap regression** (unrelated to qwen3 but
+  found here). Small prompt / parser change.
+
+#### R9. Qwen3 at k=50 (agent-side cheap diagnostic)
+- **What:** Re-run R8 Phase 2 with `--k 50` instead of `--k 10`. Phase 1 showed 11/30 queries have gold at rank 11-50; at k=10 the agent never sees them, at k=50 it would. This isolates the question: is the Phase 2 regression because the agent can't *see* the gold doc, or because it can't *recognize* it once seen?
+- **Where:** `target/release/gw-bench --k 50 ...` pointing at the existing qwen3 search server. No code changes required.
+- **Effort:** Tiny — ~90 min run, no new infra. Existing index/server/binary sufficient.
+- **Expected impact:** Diagnostic, high information value. Two possible outcomes:
+  - If k=50 lifts fuzzy from 4/30 toward BM25's 11/30, the problem is candidate visibility → a reranker over qwen3 top-50 is the fix (cheap + principled).
+  - If k=50 doesn't help, the problem is agent recognition → GEPA co-optimization (R6) is necessary and cheap fixes won't cut it.
+- **Risk:** Larger k may overwhelm the 9B model's attention (we've historically seen 25-30 docs is near the ceiling for context stuffing — noted in "Things that don't help"). Worth a look at context_snippet_chars behavior at k=50 before the run.
+- **Status:** Ready to run. Should be scheduled before R6 since R6's verdict depends on this answer.
+
 #### R7. Brute-force MaxSim recall ceiling
 - **What:** Run the brute-force searcher (exact MaxSim, no approximation, no token cap) on sample30. Establishes the true recall ceiling — the number every HNSW or ANN backend is trying to approximate.
 - **Where:** `retrieval_benchmark_v2.py --searchers brute_force`
 - **Effort:** Small — searcher exists, ~5 min/query × 30 = ~2.5 hours
 - **Expected impact:** Low directly, high indirectly — tells us whether the 25/30 from Qdrant/LanceDB MV is at the ceiling or leaving recall on the table (e.g. due to the 2000-token cap or HNSW approximation error).
 - **Status:** Ready to run.
+
+#### M1. monoT5-3B cross-encoder reranker on BM25+passage
+- **What:** Replace / augment the current ColBERT-blob reranker with a T5-style cross-encoder reranker (monoT5-3B, or RankLLaMA-7B if GPU budget allows). Meng et al. (arxiv 2602.21456) report this as the single biggest lever on BrowseComp-Plus: BM25+passage alone = acc 0.572, +monoT5-3B at depth 50 = acc 0.689 (+20.5%).
+- **Where:** New Python server `bench/browsecomp/rerank_server_monot5.py` mirroring the rerank_server_blobs.py HTTP contract. `gw-bench --rerank-url http://localhost:8002` already plumbed in.
+- **Effort:** Medium — monoT5-3B is on HF, ~3-5 GB VRAM, ~100-300 ms/query at batch 32. One eval run at depths 10/20/50 takes ~2-3 hours.
+- **Expected impact:** High. Our ColBERT-rerank regression (7/29 fuzzy vs 13/29 passage-only) is likely NOT a general "reranking hurts" result but specific to ColBERT-as-reranker + no Q2Q; Meng shows reranking helps consistently with T5-style cross-encoders. If their +20% relative holds on sample30, we'd go from ~13/29 to ~16/29.
+- **Status:** Highest-EV next experiment on this branch. Pair with M2 below.
+
+#### M2. Q2Q (query-to-question) reformulation for neural rerankers
+- **What:** Small LLM call that translates the agent's keyword-style query into a natural-language question before handing it to a neural reranker (see Meng et al. §3.2.5). Two variants: Q (raw query only) and Q+R (query + recent reasoning trace). Keep the raw keyword query for BM25; use the NL version for the reranker only.
+- **Where:** `crates/gw-bench/src/main.rs` — rerank dispatch currently sends the raw query to the rerank URL. Add a Q2Q LLM call using the same Ollama client we use for pre-search. Gate on a config flag `rerank_q2q_mode = "off" | "query" | "query_and_trace"`.
+- **Effort:** Small-medium — ~50 LOC + one cheap LLM call per rerank invocation. Reformulator prompt is in the paper.
+- **Expected impact:** Medium — Meng reports +7-10% relative accuracy for SPLADE/Qwen3-Embed and +5.7% for SPLADE+Rank1. Effect on monoT5 isn't in the paper but same mechanism should apply.
+- **Status:** Blocked on M1 (need a T5-style reranker to benefit from Q2Q — BM25 is hurt by Q2Q, so we should NOT route BM25 through this).
 
 ### Passage Index Extensions (mar27 — builds on new best)
 
@@ -410,6 +643,110 @@ Current best: **passage + doc BM25 via RRF (12/30 fuzzy)**. These experiments bu
 - **Where:** `crates/gw-bench/src/main.rs` — `pre_search()` function
 - **Effort:** Small — swap `search_bm25_boosted` for `search_with_passages` in pre-search
 - **Expected impact:** Medium — better pre-search context = better starting point for the rLM loop. The 12/30 run already benefited from passage search during the loop; extending to pre-search could compound the effect.
+
+#### P7. Meng-style passage recipe (smaller chunks + title prepend)
+- **What:** Rebuild the passage index following Meng et al. exactly: split on spaCy `en_core_web_sm` sentence boundaries into ~250-word passages (~1500 bytes, ~279 tokens), and prepend the document title to each passage when available. Our current 4096-byte chunks are ~4x theirs and split naively.
+- **Where:** `crates/gw-memory/src/corpus.rs` passage builder — would need (a) sentence-boundary splitter (spaCy called from Python, or a Rust sentence splitter), (b) title extraction from the corpus JSONL (title field exists in `corpus_meta.jsonl`), (c) title-prepending at index time.
+- **Effort:** Medium. Rust sentence splitter options: `rust-sent-segment`, `unicode-segmentation`, or a Python preprocessing pass emitting a passage-jsonl that Rust indexes. Pre-segmentation in Python is simplest; ~30 min rebuild after.
+- **Expected impact:** Medium-high. Meng's BM25+passage (this recipe) = raw acc 0.572; our 4096-byte passage + doc RRF sits at ~0.43-0.48 fuzzy on sample30 (11-13/29). Some of that gap is likely the finer chunking + title anchor.
+- **Status:** Worth doing before M1 — gives us a cleaner apples-to-apples baseline against the paper's 0.572 number.
+
+#### P8. Hierarchical did not help — record for posterity
+- **What:** Multi-chunk hierarchical index (512 + 1024 + 2048 + 4096 bytes) built apr21. 15M passages. On sample30 this regressed to 9/29 fuzzy vs 13/29 fuzzy for 4096-only. Smaller chunks have higher term density per byte and outrank the 4096s, but the narrower snippets underdetermine the answer phrase.
+- **Status:** DONE, regression — keep the entry so we don't re-run it.
+
+### Evidence Set Construction (set-level retrieval)
+
+Thesis: for entity-heavy deep-search tasks, the core retrieval problem is not pointwise semantic matching but **evidence-set construction** — picking k docs that collectively cover the query subject to relevance. Two buckets:
+- **(a) Amplification** — derive more anchored queries from anchored evidence (S7, S8; passage PRF and entity-hop also belong here).
+- **(b) Composition** — pick the final k from a candidate pool (S1-S6).
+
+Agent co-adaptation (R6/GEPA) remains a peer track, not subsumed — the R@200=24/30 → 7/30 gap was driven by latency and prompt-fit as much as by set quality.
+
+Common design principle: widen along axes that preserve lexical anchoring (rare-term overlap, entity anchors), avoid widening along axes that relax it (pure semantic similarity, embedding-only MMR).
+
+#### S1. MMR with lexical redundancy (composition)
+- **What:** Rerank top-N with Max Marginal Relevance using rare-term Jaccard (not embedding cosine) as the redundancy term: `score(d) − λ·max_{d' in picked} jaccard_rare(d, d')`. Diversifies the final k while keeping a lexical anchor.
+- **Where:** Post-processing wrapper `mmr_wrapper.py` over any Searcher, or as a stage in `search_server*.py`.
+- **Effort:** Small — ~40 LOC wrapper + rare-term extraction (regex on capitalized spans).
+- **Expected impact:** Medium — directly operationalizes set-level framing with a well-understood baseline. One knob (λ) to sweep.
+
+#### S2. Soft-capped source-family dedup (composition)
+- **What:** Cluster top-N candidates by MinHash on passage text or shared-rare-term Jaccard. Soft cap: ≤3 picks from any one cluster before moving on. Avoids budget drain on mirrors/near-duplicates while preserving aggregator list pages (sometimes the gold doc).
+- **Where:** Same wrapper as S1.
+- **Effort:** Small.
+- **Expected impact:** Low-medium — targets a specific failure mode (near-duplicate drain) that hasn't been measured directly.
+
+#### S3. Entity-cluster balance (composition)
+- **What:** Extract rare capitalized spans from top-N via regex (no NER model). Cluster candidates by entity fingerprint. Require ≥2 distinct clusters in final k; do NOT force parity — the pivot entity should dominate.
+- **Where:** Same wrapper as S1/S2.
+- **Effort:** Small-medium.
+- **Expected impact:** Low-medium — unclear whether entity diversity is load-bearing vs a proxy for source diversity already caught by S2.
+
+#### S4. Score-band sampling (composition)
+- **What:** Partition top-N into per-retriever score bands (high/mid/low). Sample k with a conservative mix like 7/2/1 for k=10. Per-retriever bands because BM25, ColBERT, and qwen3 scores live on different scales.
+- **Where:** Same wrapper.
+- **Effort:** Small (requires S9 normalization for cross-retriever bands).
+- **Expected impact:** Low — start conservative. Widen only if retrospective analysis shows low-band docs ever contribute a gold doc.
+
+#### S5. Query-coverage set selection (composition)
+- **What:** Pre-search already decomposes queries into sub-facts. Extract target entities from each sub-fact; greedy set-cover over candidates, picking docs that each cover an uncovered sub-fact entity. Directly implements `coverage(S) s.t. relevance(S)`.
+- **Where:** New stage in `pre_search` / bridge, consumes existing decomposition output.
+- **Effort:** Medium.
+- **Expected impact:** Medium-high — the most direct implementation of the thesis. Ceiling is decomposition quality.
+
+#### S6. Complementary-channel union with overlap budget (composition)
+- **What:** Build k=10 by pulling top-m from each of {BM25+boosts, blob rerank, qwen3, optionally ColBERT} with a capped overlap (e.g. ≤2 shared docids before backfilling from lower ranks). Current 3-channel union ceiling is 14/30 — this tests how much is reachable without an oracle.
+- **Where:** New `union_searcher.py` wrapping multiple Searchers.
+- **Effort:** Small.
+- **Expected impact:** Medium — prior ensembling (best-of-N, majority voting) had limited gains, but those operated on *answers* (post-agent). This operates on *retrieval sets* (pre-agent) and is a cheaper, earlier intervention.
+- **Caveat:** Ensembling hasn't historically paid off here. Worth trying because the operating layer is different, but temper expectations.
+
+#### S7. Gold-support expansion from passages (amplification)
+- **What:** When a top passage looks strong — confidence gate: rank-1/rank-5 score margin above threshold, OR doc-channel and passage-channel agree on the same docid — extract rare terms + capitalized spans, run a second-hop BM25 search, add top corroborating docs. PRF anchored to rare terms rather than distinctiveness scores.
+- **Where:** `crates/gw-bench/src/main.rs` `pre_search` — new stage after round-1.
+- **Effort:** Medium.
+- **Expected impact:** Medium-high — gated expansion avoids compounding wrong anchors, which was the failure mode of prior unanchored PRF variants.
+
+#### S8. Anchor-preserving expansion filter (amplification)
+- **What:** Any doc added via any expansion path (PRF, entity-hop, query expansion) must contain ≥1 rare term from the *original* query. Enforces "widen along lexical-preserving axes." Lightweight filter, not a new retrieval stage.
+- **Where:** Wrapper over existing PRF and any future expansion in `pre_search`.
+- **Effort:** Tiny.
+- **Expected impact:** Low-medium — mostly a safety rail; may recover lost precision from existing PRF.
+
+#### S9. Cross-retriever score normalization (infrastructure)
+- **What:** Normalize BM25 and dense scores to [0,1] via `(2/π)·arctan(bm25/k)` (or similar compressive transform) so that cross-retriever score bands (S4) and weighted union (S6) are well-defined. Currently we RRF everything, which discards score magnitude entirely.
+- **Where:** Shared utility in `searchers/base.py`.
+- **Effort:** Small.
+- **Expected impact:** Unknown on its own — enables S4 and weighted variants of S6. Only worth doing if those show promise.
+- **Status:** Pointer, not a standalone priority. Noted because the normalization has precedent (arctan-compressed BM25 alongside cosine scores).
+
+#### S10. Oracle set scorer (diagnostic ceiling)
+- **What:** For each query, generate several candidate k-sets (pointwise top-k, MMR, set-cover, union). Run a single LLM pass per set: "does this collectively support answering the query?" Pick the best. Measures the ceiling of set-level framing under current retrieval.
+- **Where:** Offline harness, not in the agent loop.
+- **Effort:** Medium.
+- **Expected impact:** Diagnostic — if oracle lifts agent accuracy over pointwise top-k, set framing is validated. If not, pointwise is near the ceiling and set-level gains will be marginal. Either way it bounds the bucket.
+
+#### S11. Failure-case ideal-set design (selector specification)
+- **What:** Inverse of S10. Take 5-10 concrete failure cases. For each, hand-design the ideal evidence set that would have supported the correct answer (gold doc + k-1 corroborators). Then reverse-engineer: what feature function over the candidate pool would have ranked the ideal set above what we actually selected? Extract selection rules; if they generalize, they become the spec for S1/S2/S5/S6 heuristics (or a learned selector).
+- **Where:** Offline notebook / scratch harness. Failure set drawn from the queries Qdrant/BM25/qwen3 all miss (complement of the 14/30 union). Gold docs known, so "ideal set" construction is semi-automatic: seed with gold doc, add corroborators that share rare terms / entity anchors.
+- **Pre-check:** For each failure, verify the gold doc is in top-200 of at least one channel. If not, it's a recovery problem (bucket a), not composition (bucket b) — skip for this experiment.
+- **Anti-bias protocol:** Write selection rules *before* looking at what any existing selector returned for that query, to avoid post-hoc rationalization.
+- **Effort:** Medium — mostly analyst time, 30-60 min per case.
+- **Expected impact:** High as a design tool (produces concrete requirements for S1/S5/S6), low as a direct accuracy lift (the selector has to be built separately). Pair with S10: S10 bounds the ceiling, S11 specifies how to reach it.
+- **Caveat:** Small N. 5-10 cases is enough to derive rules but not enough to learn a parametric selector. If rules don't generalize across cases, that itself is a finding: per-query routing (A4 ensemble) may beat a universal selector.
+
+#### S12. Entity-linker ColBERT as auxiliary signal
+- **What:** Small ColBERT index built over a *curated vocabulary* — canonical entity strings extracted from the corpus (regex NER + light normalization for aliases/abbreviations), optionally joined with gw-kb topic labels. Used as an **entity-linking / normalization layer**, not as a primary retriever: given a query or a candidate doc, return the set of canonical entity IDs it mentions, with fuzzy tolerance for surface-form variation.
+- **Why (thesis connection):** most set-construction signals currently assume we can tell whether a doc "contains" a query entity. Right now that's regex exact match — brittle for "FDR" vs "Franklin D. Roosevelt", "US" vs "United States", etc. Token-level MaxSim over canonical entity strings is a fuzzy-but-anchored match: it tolerates surface-form variation without widening to generic semantic similarity (which would relax lexical anchoring by design). Scale is tractable — ~500K entities × ~3 tokens ≈ 1.5M vectors, no PLAID/WARP needed.
+- **Consumers:**
+  - **S5 (query-coverage)**: match sub-fact entities from pre-search decomposition against candidate docs via canonical ID, not surface string.
+  - **S7 (gold-support expansion)**: canonicalize entities in a strong passage before the second-hop search, so corroborator queries aren't spelling-dependent.
+  - **S8 (anchor-preserving filter)**: the "≥1 rare term from original query" check becomes "≥1 canonical entity from original query," which is more robust.
+- **Where:** New `entity_linker.py` (offline extraction + canonicalization + ColBERT index), consumed by the S5/S7/S8 wrappers.
+- **Effort:** Medium — entity extraction + canonicalization is the bulk of the work; the ColBERT index itself is small and can reuse our existing candle encoder.
+- **Expected impact:** Medium as a *robustness multiplier* for S5/S7/S8. Not a standalone accuracy lift — it makes existing signals more reliable rather than adding a new channel.
+- **Non-goal:** Not a first-stage retriever, not a KG substitute. See Related Work for why the curated-vocabulary-as-first-stage framing doesn't match our bottleneck.
 
 ---
 
@@ -511,26 +848,53 @@ and ran three ablation variants against sample30 with qwen3.5:9b.
 
 ---
 
-## Priority Ranking (updated apr12)
+## Priority Ranking (updated apr24 post-Meng)
 
-Three independent threads:
-1. **Ensemble/routing** — three retrieval approaches (BM25, BM25+rerank, Qdrant) have complementary strengths. Union = 14/30 (47%). The biggest unlock is combining them.
-2. **Agent co-adaptation** — prompt-retriever coupling must be fixed for reranked/ColBERT results.
-3. **gw-kb conversion funnel** — 70% gold-doc recall but 20% accuracy. The agent finds docs but doesn't read them.
+Six independent threads:
+1. **Cross-encoder reranking (new, evidence from Meng et al.)** — the single biggest lever reported on BrowseComp-Plus (+20.5% acc with BM25+monoT5-3B at depth 50). Our prior ColBERT-rerank regression is likely specific to that reranker, not "reranking in general." M1 (monoT5 rerank) + M2 (Q2Q reformulation) together represent the most concrete unexplored direction with external evidence.
+2. **Evidence set construction / coverage** — S5-lite (coverage pre-search) is now implemented and is a complementary channel: 12/29 fuzzy alone, 4-way union with passage runs = 20/30. S6 (channel union) is the remaining unbuilt composition experiment.
+3. **Dense retrieval** — Qwen3-Embedding-0.6B Phase 1 hit R@200=24/30 at 54ms p50. Phase 2 (agent eval) regressed to 4/30 fuzzy; R9 at k=50 confirmed agent can't recognize gold even when seen. Only recoverable via co-adapted prompt (R6/GEPA).
+4. **Ensemble/routing** — three-channel union = 14/30, four-channel (+ S5-lite) = 20/30. Needs a per-query pick-the-right-answer heuristic that avoids prior majority-vote failure (wrong answers agreed more).
+5. **gw-kb conversion funnel** — 70% gold-doc recall but 20% accuracy. Agent finds docs but doesn't read them.
+6. **Recipe/infra audit (new, from Meng)** — their passage recipe (250-word spaCy chunks + title prepend, P7) and their BM25 doc params (`k1=3.8, b=0.87`, B4) are cheap pre-pipeline tweaks with published numbers.
 
 | Priority | Experiment | Expected Impact | Effort | Rationale |
 |----------|-----------|----------------|--------|-----------|
-| **1** | A4. Ensemble / routing | High | Medium | Union of 3 approaches = 14/30. Even naive "run all, pick majority" helps. Query-type routing could be smarter. |
-| **2** | R6. GEPA co-optimization | High | Medium | Prompt was never tuned for reranked results. GEPA with blob rerank backend may recover lost queries (175, 643, 885). R4 unblocks this. |
-| **3** | KB2. Doc-reading prompt | High | Small | The #1 bottleneck: 17/30 gold docs found but never read. Doc-grounded prompts already proven on Rust path. |
-| **4** | KB8. Tantivy index parity check | Diagnostic | Small | Must know if gw-kb's tantivy produces same results as BM25s before diagnosing further. |
-| **5** | KB3. BM25-only search | Medium-High | Small | Isolates whether hybrid signals (vector + topic-membership) hurt. |
-| **6** | R7. Brute-force recall ceiling | Low→High | Small | 2.5-hour one-time run. Tells us if 25/30 is the ceiling or if the 2000-token cap is costing us. |
-| **7** | R5. LanceDB MV agent eval | Medium | Small | Isolates Qdrant token-cap effect. No server, no token cap. |
-| **8** | KB7. Pre-inject topic summaries | Medium-High | Small | Removes turn-sink, surfaces topic knowledge for free. |
-| **9** | KB5. Topic-seeded query expansion | Medium | Medium | Server-side topic leverage. |
-| **10** | B3. Query expansion + reranking | Medium | Medium | LLM query expansion widens BM25 recall for reranking. |
-| **11** | R3. SPLADE | Medium-High | Large | May be redundant now that ColBERT works |
+| **1** | M1. monoT5-3B rerank on BM25+passage | High (+20% acc in paper) | Medium | Meng et al. report this as the single biggest lever on BrowseComp-Plus. Our ColBERT-rerank regression was reranker-specific, not a general result; a T5 cross-encoder is an untested, evidence-backed lever. |
+| **2** | M2. Q2Q reformulation for neural rerankers | Medium (+5-10% rel) | Small-medium | Paper's Table 11/13: mitigates the training–inference query mismatch that hurt our neural-rerank attempts. Blocked by M1 (only applies when a neural reranker is in the loop). |
+| **3** | P7. Meng-style passages (250 words, spaCy, title prepend) | Medium-high | Medium | Their 0.572 baseline = BM25 on this exact recipe. Our 4096-byte chunks are ~4x theirs. Direct recipe replication. |
+| **4** | A4 / S6. Four-channel routing (pass-run1 + pass-run2 + S5-lite + S5-filter) | High | Small-medium | 4-way union reaches 20/30 fuzzy on sample30. Per-query pick-right heuristic is the last-mile to operationalize. |
+| **5** | S1. MMR with lexical redundancy | Medium | Small | Classical diverse selection, reformulated to preserve lexical anchoring (rare-term Jaccard, not embedding cosine). Different diversity axis from S5. |
+| **6** | S7. Gold-support expansion from passages | Medium-high | Medium | Confidence-gated rare-term PRF. Amplification bucket; compounds naturally with S6 composition. |
+| **7** | B4. BM25 param tuning on document corpus (k1=3.8, b=0.87) | Low-medium | Tiny | Paper shows default = worst on docs. Doc channel is half of our RRF. Cheap probe. |
+| **8** | KB2. Doc-reading prompt | High | Small | The #1 bottleneck in gw-kb: 17/30 gold docs found but never read. Doc-grounded prompts already proven on Rust path. |
+| **9** | R6. GEPA co-optimization on qwen3 | High | Medium | Only way to recover the Qwen3 R@200=24/30 ceiling. Deferred pending cheaper wins. |
+| ~~done~~ | ~~R8. Qwen3-Embedding (Phase 2: agent eval)~~ | | | **Done apr18 — fuzzy=4/30 (regression vs BM25 11/30). Retriever-agent coupling fails; R9/R6 are the diagnostics.** |
+| **4** | S6. Complementary-channel union w/ overlap budget | Medium | Small | Cheapest test of the set-construction thesis. Operates on retrieval sets (pre-agent), unlike prior post-agent ensembling that failed. Targets the 14/30 union ceiling. |
+| **5** | S1. MMR with lexical redundancy | Medium | Small | Classical diverse selection, reformulated to preserve lexical anchoring (rare-term Jaccard, not embedding cosine). Pairs well with S6. |
+| **6** | S5. Query-coverage set selection | Medium-high | Medium | Most direct implementation of `coverage(S) s.t. relevance(S)`. Leverages existing pre-search decomposition. |
+| **7** | S7. Gold-support expansion from passages | Medium-high | Medium | Confidence-gated rare-term PRF. Amplification bucket; compounds naturally with S6 composition. |
+| **8** | KB2. Doc-reading prompt | High | Small | The #1 bottleneck: 17/30 gold docs found but never read. Doc-grounded prompts already proven on Rust path. |
+| **10** | KB8. Tantivy index parity check | Diagnostic | Small | Must know if gw-kb's tantivy produces same results as BM25s before diagnosing further. |
+| **11** | KB3. BM25-only search | Medium-High | Small | Isolates whether hybrid signals (vector + topic-membership) hurt. |
+| **12** | S11. Failure-case ideal-set design | Design tool | Medium | Hand-designs ideal evidence sets from failures; reverse-engineers selector requirements. Specifies the heuristics S1/S5/S6 should implement. Pair with S10. |
+| **13** | S10. Oracle set scorer | Diagnostic | Medium | Bounds the set-construction bucket. S11 specifies how to reach the ceiling; S10 measures where it is. |
+| **14** | S2. Soft-capped source-family dedup | Low-medium | Small | Quick composition win if near-duplicate drain is real. |
+| **15** | S8. Anchor-preserving expansion filter | Low-medium | Tiny | Safety rail over existing PRF; low risk. |
+| **16** | S12. Entity-linker ColBERT (auxiliary) | Medium | Medium | Robustness multiplier for S5/S7/S8 — canonicalizes entity anchors so set-construction signals tolerate surface-form variation without relaxing lexical anchoring. Not a standalone retriever. |
+| **17** | R7. Brute-force recall ceiling | Low→High | Small | 2.5-hour one-time run. Tells us if 25/30 is the ceiling or if the 2000-token cap is costing us. |
+| **18** | R5. LanceDB MV agent eval | Medium | Small | Isolates Qdrant token-cap effect. No server, no token cap. |
+| **19** | KB7. Pre-inject topic summaries | Medium-High | Small | Removes turn-sink, surfaces topic knowledge for free. |
+| **20** | S3. Entity-cluster balance | Low-medium | Small-medium | May be subsumed by S2; worth running only if S2 underdelivers. |
+| **21** | S4. Score-band sampling | Low | Small | Needs S9 normalization to work across retrievers. Conservative 7/2/1 start. |
+| **22** | KB5. Topic-seeded query expansion | Medium | Medium | Server-side topic leverage. |
+| **23** | B3. Query expansion + reranking | Medium | Medium | LLM query expansion widens BM25 recall for reranking. |
+| **24** | R3. SPLADE | Medium-High | Large | May be redundant now that dense + ColBERT both work |
+| **25** | R8b. Qwen3-Embedding 4B/8B escalation | Unknown | Medium | If Phase 2 0.6B validates, test whether the larger model closes more misses. |
+| **26** | S9. Score normalization (arctan) | Enables others | Small | Infrastructure for S4 and weighted S6. Only worth doing if either shows promise. |
+| ~~done~~ | ~~R9. Qwen3 at k=50 diagnostic~~ | | | **Done apr19 — 4/29 exact, same as k=10. Agent can't recognize gold even with 5x candidates. Visibility not the bottleneck.** |
+| ~~done~~ | ~~S5-lite. Coverage pre-search~~ | | | **Done apr24 — 12/29 fuzzy on sample30, complementary channel (wins q1106, q625 no other config gets). 4-way union = 20/30.** |
+| ~~done~~ | ~~R8. Qwen3-Embedding (Phase 1: R@k)~~ | | | **Done apr17 — R@200=24/30 (vs BM25 12/30, ColBERT 25/30) at 54ms p50. Hypothesis confirmed.** |
 | ~~done~~ | ~~R4. BM25 + blob rerank~~ | | | **Done — 7/30 (+2 over 5/30 baseline). Complementary to Qdrant. Union=14/30.** |
 | ~~done~~ | ~~KB eval harness~~ | | | **Done — 3 ablations, all below baseline** |
 | ~~done~~ | ~~R2b. ColBERT first-stage~~ | | | **Done — 25/30 R@200, 7/30 agent accuracy** |
@@ -539,3 +903,60 @@ Three independent threads:
 | ~~done~~ | ~~A2. Answer type~~ | | | **Done — no benefit** |
 | ~~skip~~ | ~~A3. Larger model~~ | | | Deprioritized per user preference |
 | ~~skip~~ | ~~R1. Different embeddings~~ | | | Dense vector search doesn't help |
+
+---
+
+## Related Work / Research Bookmarks
+
+Not on the priority list, but worth knowing about so we don't re-discover them. These are potential research detours if the main threads stall; park them here.
+
+### Papers directly relevant to BrowseComp-Plus
+
+- **Meng, Ou, MacAvaney, Dalton — `Revisiting Text Ranking in Deep Research`** (arXiv:2602.21456v1, Feb 2026). Summarized inline in the findings section above. Key levers: BM25+passage+monoT5-3B (their best single pipeline, acc 0.689) and Q2Q reformulation (+5-10% on neural rankers). Planned experiments M1 and M2 were added based on this paper; P7 (passage recipe) and B4 (doc BM25 params) replicate their recipe details.
+
+### Fast late-interaction retrieval (WARP family)
+
+Both of these target the gap we hit with Qdrant MV (26s) and LanceDB MV (46s): a native ColBERT-class retriever that's agent-viable. We sidestepped the problem via blob-rerank (200ms over BM25 top-N) and qwen3-embed (54ms p50, single-vector). Parked because qwen3-embed already occupies the high-recall + low-latency slot and BM25+set-construction is the current research thesis.
+
+- **WARP** (SIGIR'25, `jlscheerer/xtr-warp`) — first-stage engine built on Google's XTR (T5-based) + ColBERTv2/PLAID. Three techniques:
+  - **Centroid path**: k-means over corpus tokens (~√N centroids); each doc token stored as `(centroid_id, 2-bit residual)`. Query tokens retrieve candidates from nearest centroids' member sets.
+  - **Implicit decompression**: MaxSim score rewritten as `q · centroid[id] + q · residual` — first term precomputed per query, second is a dot product against the 2-bit residual. Never materializes full token vectors.
+  - **WARP_SELECT**: imputes similarities for unvisited centroids from a global prior instead of computing against all centroids. Avoids `O(Q · num_centroids)` per query.
+  - **Reported**: 3x faster than PLAID, 41x faster than XTR reference.
+
+- **Witchcraft** (`dropbox/witchcraft`) — Rust reimplementation of WARP backed by a single SQLite file. 21ms p95 on NFCorpus (M2 Max), ~2x faster than WARP itself. Hybrid BM25+semantic in one store via SQLite FTS. Single-file deployment, no server. File layout maps cleanly to the algorithm: `packops.rs` (residual packing), `rans64.rs` (entropy-coded residuals), `fast_ops.rs` / `fused_matmul.rs` (SIMD inner products), `merger.rs` (score aggregation). Encoder lives in `quantized_t5.rs` / `openvino_t5.rs` / `embedder.rs` and is the only T5/XTR-specific surface.
+
+### Porting Reason-ModernColBERT into a WARP-style index
+
+*Infrastructure (moderate, ~1-2 weeks):*
+- Swap encoder: replace Witchcraft's `quantized_t5.rs` with a candle ModernBERT encoder. `crates/gw-memory/src/colbert/candle_encoder.rs` is already parity-tested and is the natural starting point.
+- Verify output dim (standard ColBERT = 128; should match). If different, rebuild rANS codebook widths.
+- k-means over our existing blob-store token tensors (122 GB, already computed) → centroids. ~1 hour CPU.
+- Requantize residuals, pack into Witchcraft's SQLite format.
+- The encoder-agnostic kernels (`packops`, `fast_ops`, `fused_matmul`, `merger`, `rans64`) work unchanged.
+
+*Quality (unknown, the real risk):*
+- WARP's approximations were calibrated around XTR's training objective, which deliberately makes individual token matches self-contained (each token is a meaningful retrieval signal on its own). Standard ColBERT — including Reason-ModernColBERT — doesn't have that property; it relies on MaxSim over *all* query tokens.
+- PLAID on ColBERTv2 shows residual compression loss is small, so the centroid + decompression half should transfer cleanly. WARP_SELECT's imputation half is the open question — centroid-skipping may lose more recall on ColBERT than on XTR.
+- Only way to know is to build and measure.
+
+**Bookmark status:** not on the critical path. Revisit if (a) the set-construction thesis plateaus below 18-20/30, and (b) we have reason to believe an additional ColBERT-quality channel (beyond blob-rerank) would unlock union-ceiling gains that qwen3-embed can't.
+
+### ColBERT over a curated vocabulary (as first-stage)
+
+An alternative route to fast late-interaction: sidestep the scale problem entirely by encoding only a *curated token set* — topic labels from gw-kb, or canonical entity strings from NER — rather than every token in every doc. This collapses the index by 3-5 orders of magnitude (gw-kb has ~4075 topics; corpus-wide entity extraction would yield ~500K canonical entities) and makes brute-force MaxSim tractable without PLAID/WARP tricks.
+
+**Why this doesn't fit as a first-stage retriever for BrowseComp:**
+
+- **Regime shift**: this is no longer full-text late interaction, it's **entity/topic linking** that resolves to documents via graph edges (gw-kb's topic-doc edges, or co-occurrence edges from NER). Different technique with different failure modes, not a drop-in replacement for BM25 or qwen3-embed.
+- **Empirical evidence**: gw-kb's existing topic path already underperforms BM25s on BrowseComp (2-6/30 vs 12/30 baseline). The documented bottleneck wasn't fuzzy topic matching — it was the agent not reading documents and topic summaries not being in the retrieval path the right way. Better topic matching doesn't fix either.
+- **Late interaction degrades on short strings**: MaxSim's advantage is token-level matching over long doc contexts. Matching a query against a 5-8 token topic label is close to single-vector cosine on strings — sentence-transformers do this cheaply.
+- **Still need passage-level retrieval downstream**: BrowseComp answers live in passages, not topic summaries. A topic router finds the cluster, then has to dump member docs back into BM25 anyway.
+
+**Why it isn't a KG substitute either:**
+
+You'd get soft entity resolution (good — "FDR" ↔ "Franklin D. Roosevelt") and topic routing (okay — gw-kb already has this). You'd not get typed relations, multi-hop traversal via typed edges, or structural inference. The hardest BrowseComp failures (q747's multi-hop chain) specifically need relational composition, which a fuzzy entity matcher doesn't provide.
+
+**Where the idea does earn its keep:** as an *auxiliary entity-linker* feeding the set-construction experiments (S5/S7/S8), not as a standalone retriever. That version is captured as **S12** in the Evidence Set Construction section.
+
+**Bookmark status:** the curated-vocabulary first-stage framing is parked here. The useful slot (auxiliary entity linker) is on the priority list.
