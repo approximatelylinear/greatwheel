@@ -184,13 +184,17 @@ pub(crate) struct BenchConfig {
     pub max_answer_length: usize,
 
     // --- S5-lite: coverage pre-search ---
-    /// When true, pre-search returns the top-N from each of the N sub-queries
-    /// (round-robin, one hit per sub-query before a second) and skips PRF +
-    /// round-2 refinement. Enforces sub-fact coverage in the top-k.
+    /// When true, pre-search round-1 takes top-N from each sub-query in
+    /// round-robin (rank r across all queries before rank r+1). Enforces
+    /// sub-fact coverage in the top-k.
     pub presearch_coverage: bool,
     /// Per-sub-query depth when presearch_coverage is true. Total budget is
     /// roughly n_presearch_queries × presearch_coverage_per_query.
     pub presearch_coverage_per_query: usize,
+    /// When true AND presearch_coverage is true, skip PRF + round-2
+    /// refinement entirely (pure S5-lite). When false, coverage feeds into
+    /// the standard PRF + round-2 pipeline (coverage + refine hybrid).
+    pub presearch_coverage_skip_refine: bool,
 }
 
 impl Default for BenchConfig {
@@ -222,6 +226,7 @@ impl Default for BenchConfig {
             repl_output_max_chars: 8000,
             presearch_coverage: false,
             presearch_coverage_per_query: 2,
+            presearch_coverage_skip_refine: true,
             fallback_history_max_chars: 15000,
             fallback_msg_max_chars: 2000,
             nudge_reminder_start: 3,
@@ -1431,12 +1436,17 @@ fn pre_search(
         info!(
             n_hits = all_hits.len(),
             n_queries = queries.len(),
-            "Coverage pre-search complete (round-robin, no PRF, no round-2)"
+            skip_refine = bench_config.presearch_coverage_skip_refine,
+            "Coverage pre-search round-1 complete (round-robin)"
         );
-        let span = tracing::Span::current();
-        span.record("gw.hits", all_hits.len() as u64);
-        span.record("gw.queries", total_queries as u64);
-        return (all_hits, context_text, input_tokens, output_tokens);
+        if bench_config.presearch_coverage_skip_refine {
+            let span = tracing::Span::current();
+            span.record("gw.hits", all_hits.len() as u64);
+            span.record("gw.queries", total_queries as u64);
+            return (all_hits, context_text, input_tokens, output_tokens);
+        }
+        // else: fall through to PRF + round-2 refinement over the
+        // coverage-anchored seed set (hybrid S5-lite + refine).
     }
 
     for search_query in &queries {
