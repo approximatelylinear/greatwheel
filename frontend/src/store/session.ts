@@ -184,6 +184,13 @@ function agUiToAction(ev: AgUiEvent): Action | null {
       // triggered from the bridge's onWidgetAdded callback via
       // `widgetAdded` below, not through this reducer path.
       return null;
+    case 'TOOL_CALL_START':
+    case 'TOOL_CALL_ARGS':
+    case 'TOOL_CALL_END':
+      // Host-function tool-call events. Currently unrendered; a
+      // future commit surfaces them in DebugPane alongside the
+      // existing code-trace stream.
+      return null;
     case 'DEBUG_CODE_EXEC':
       return {
         type: 'code-trace',

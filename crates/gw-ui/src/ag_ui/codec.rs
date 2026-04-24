@@ -30,6 +30,31 @@ pub fn loop_event_to_ag_ui(event: &LoopEvent) -> Option<AgUiEvent> {
         LoopEvent::InputRequest(prompt) => Some(AgUiEvent::InputRequest {
             prompt: prompt.clone(),
         }),
+        LoopEvent::HostCallStarted {
+            tool_call_id,
+            function,
+        } => Some(AgUiEvent::ToolCallStart {
+            tool_call_id: tool_call_id.clone(),
+            tool_name: function.clone(),
+        }),
+        LoopEvent::HostCallArgs { tool_call_id, args } => Some(AgUiEvent::ToolCallArgs {
+            tool_call_id: tool_call_id.clone(),
+            delta: args.clone(),
+        }),
+        LoopEvent::HostCallCompleted {
+            tool_call_id,
+            result,
+            error,
+            ..
+        } => Some(AgUiEvent::ToolCallEnd {
+            tool_call_id: tool_call_id.clone(),
+            result: if error.is_some() {
+                None
+            } else {
+                Some(result.clone())
+            },
+            error: error.clone(),
+        }),
         LoopEvent::CodeExecuted {
             code,
             stdout,
@@ -48,7 +73,6 @@ pub fn loop_event_to_ag_ui(event: &LoopEvent) -> Option<AgUiEvent> {
         // state transitions that don't need frontend awareness.
         LoopEvent::UserMessage(_)
         | LoopEvent::FollowUp(_)
-        | LoopEvent::HostCallCompleted { .. }
         | LoopEvent::SwitchBranch(_)
         | LoopEvent::Compact
         | LoopEvent::SessionEnd
@@ -137,6 +161,64 @@ mod tests {
             new: w,
         })
         .is_none());
+    }
+
+    #[test]
+    fn host_call_events_map_to_tool_call_trilogy() {
+        let id = "tc-1".to_string();
+
+        let start = loop_event_to_ag_ui(&LoopEvent::HostCallStarted {
+            tool_call_id: id.clone(),
+            function: "emit_widget".into(),
+        })
+        .unwrap();
+        match start {
+            AgUiEvent::ToolCallStart {
+                tool_call_id,
+                tool_name,
+            } => {
+                assert_eq!(tool_call_id, id);
+                assert_eq!(tool_name, "emit_widget");
+            }
+            other => panic!("expected ToolCallStart, got {other:?}"),
+        }
+
+        let args = loop_event_to_ag_ui(&LoopEvent::HostCallArgs {
+            tool_call_id: id.clone(),
+            args: serde_json::json!({"args": [], "kwargs": {"kind": "a2ui"}}),
+        })
+        .unwrap();
+        assert!(matches!(args, AgUiEvent::ToolCallArgs { .. }));
+
+        let end_ok = loop_event_to_ag_ui(&LoopEvent::HostCallCompleted {
+            tool_call_id: id.clone(),
+            function: "emit_widget".into(),
+            result: serde_json::json!({"widget_id": "abc"}),
+            error: None,
+        })
+        .unwrap();
+        match end_ok {
+            AgUiEvent::ToolCallEnd { result, error, .. } => {
+                assert!(result.is_some());
+                assert!(error.is_none());
+            }
+            other => panic!("expected ToolCallEnd, got {other:?}"),
+        }
+
+        let end_err = loop_event_to_ag_ui(&LoopEvent::HostCallCompleted {
+            tool_call_id: id,
+            function: "emit_widget".into(),
+            result: serde_json::Value::Null,
+            error: Some("boom".into()),
+        })
+        .unwrap();
+        match end_err {
+            AgUiEvent::ToolCallEnd { result, error, .. } => {
+                assert!(result.is_none());
+                assert_eq!(error.as_deref(), Some("boom"));
+            }
+            other => panic!("expected ToolCallEnd with error, got {other:?}"),
+        }
     }
 
     #[test]

@@ -52,6 +52,31 @@ pub enum AgUiEvent {
         surface_id: String,
         patches: Vec<serde_json::Value>,
     },
+    /// A host function is about to run. `tool_call_id` correlates
+    /// this event with the matching `_ARGS` / `_END` events.
+    ToolCallStart {
+        tool_call_id: String,
+        tool_name: String,
+    },
+    /// Arguments for a dispatched tool call. Currently emitted once
+    /// per call with the full args payload; reserved for streaming
+    /// later. `delta` is the AG-UI-canonical field name for the args
+    /// chunk.
+    ToolCallArgs {
+        tool_call_id: String,
+        delta: serde_json::Value,
+    },
+    /// Tool call completed. Carries the result and error (if any) as
+    /// an AG-UI extension on the standard TOOL_CALL_END shape —
+    /// spec-strict clients can ignore the extra fields and treat this
+    /// as a plain END marker.
+    ToolCallEnd {
+        tool_call_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// Diagnostic: a code block the agent just ran, with its stdout and
     /// terminal-ness. Greatwheel-specific (not in AG-UI's standard
     /// vocabulary); named with a `DEBUG_` prefix so a spec-strict

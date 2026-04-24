@@ -17,10 +17,32 @@ pub enum LoopEvent {
     },
     /// LLM requests input from the user.
     InputRequest(String),
-    /// A host call has been resolved.
+    /// A plugin-registered host function is about to be dispatched.
+    /// Outbound-only — channels map this to AG-UI `TOOL_CALL_START`.
+    /// `tool_call_id` correlates start / args / complete across the
+    /// three event types. The built-in conversation primitives
+    /// (`send_message`, `ask_user`, `compact_session`) do NOT produce
+    /// tool-call events — they have their own dedicated projections.
+    HostCallStarted {
+        tool_call_id: String,
+        function: String,
+    },
+    /// Arguments for a dispatched host function. Emitted once between
+    /// `HostCallStarted` and `HostCallCompleted` with the full
+    /// positional + keyword args. Maps to AG-UI `TOOL_CALL_ARGS`.
+    HostCallArgs {
+        tool_call_id: String,
+        args: serde_json::Value,
+    },
+    /// A host call has been resolved. Carries the outcome (error or
+    /// value) for the tool-call correlation identified by
+    /// `tool_call_id`. Maps to AG-UI `TOOL_CALL_END`.
     HostCallCompleted {
+        tool_call_id: String,
         function: String,
         result: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     /// Switch the active branch to a different entry.
     SwitchBranch(EntryId),

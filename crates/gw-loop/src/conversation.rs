@@ -241,6 +241,8 @@ impl ConversationLoop {
                 // Other events are outbound or handled elsewhere.
                 LoopEvent::Response { .. }
                 | LoopEvent::InputRequest(_)
+                | LoopEvent::HostCallStarted { .. }
+                | LoopEvent::HostCallArgs { .. }
                 | LoopEvent::HostCallCompleted { .. }
                 | LoopEvent::TurnStarted
                 | LoopEvent::TurnComplete

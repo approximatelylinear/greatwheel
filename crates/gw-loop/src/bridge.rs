@@ -150,13 +150,60 @@ impl HostBridge for ConversationBridge {
                 //    async handlers are resolved via block_in_place +
                 //    Handle::current().block_on inside HostFnRouter::dispatch.
                 if let Some(router) = &self.plugin_router {
-                    if let Some(result) = router.dispatch(function, args.clone(), kwargs.clone()) {
-                        return match result {
-                            Ok(value) => Ok(json_to_object(value)),
-                            Err(e) => Err(AgentError::HostFunction {
-                                function: function.to_string(),
-                                message: e.to_string(),
+                    if router.has(function) {
+                        // Emit AG-UI tool-call trilogy: START, ARGS,
+                        // then dispatch, then END. Built-in conversation
+                        // primitives (send_message/ask_user/etc.) skip
+                        // this because they have dedicated projections
+                        // (Response / InputRequest / Compact).
+                        let tool_call_id = uuid::Uuid::new_v4().to_string();
+                        let _ = self.event_tx.send(LoopEvent::HostCallStarted {
+                            tool_call_id: tool_call_id.clone(),
+                            function: function.to_string(),
+                        });
+                        let _ = self.event_tx.send(LoopEvent::HostCallArgs {
+                            tool_call_id: tool_call_id.clone(),
+                            args: serde_json::json!({
+                                "args": args,
+                                "kwargs": kwargs,
                             }),
+                        });
+                        let dispatched = router.dispatch(function, args.clone(), kwargs.clone());
+                        return match dispatched {
+                            Some(Ok(value)) => {
+                                let _ = self.event_tx.send(LoopEvent::HostCallCompleted {
+                                    tool_call_id,
+                                    function: function.to_string(),
+                                    result: value.clone(),
+                                    error: None,
+                                });
+                                Ok(json_to_object(value))
+                            }
+                            Some(Err(e)) => {
+                                let err_msg = e.to_string();
+                                let _ = self.event_tx.send(LoopEvent::HostCallCompleted {
+                                    tool_call_id,
+                                    function: function.to_string(),
+                                    result: Value::Null,
+                                    error: Some(err_msg.clone()),
+                                });
+                                Err(AgentError::HostFunction {
+                                    function: function.to_string(),
+                                    message: err_msg,
+                                })
+                            }
+                            // router.has said yes but dispatch couldn't
+                            // find it — race during reconfig, treat as
+                            // unknown.
+                            None => {
+                                let _ = self.event_tx.send(LoopEvent::HostCallCompleted {
+                                    tool_call_id,
+                                    function: function.to_string(),
+                                    result: Value::Null,
+                                    error: Some("function disappeared mid-dispatch".into()),
+                                });
+                                Err(AgentError::UnknownFunction(function.to_string()))
+                            }
                         };
                     }
                 }

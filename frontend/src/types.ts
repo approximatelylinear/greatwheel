@@ -58,6 +58,20 @@ export type AgUiEvent =
   | { type: 'STATE_SNAPSHOT'; surface_id: string; state: unknown }
   /** Vanilla AG-UI JSON-Patch delta (RFC 6902). */
   | { type: 'STATE_DELTA'; surface_id: string; patches: unknown[] }
+  /** One host function is about to run. `tool_call_id` correlates
+   *  with matching _ARGS and _END events. */
+  | { type: 'TOOL_CALL_START'; tool_call_id: string; tool_name: string }
+  /** Arguments for a dispatched tool call. `delta` carries the full
+   *  `{args, kwargs}` payload (not yet streamed). */
+  | { type: 'TOOL_CALL_ARGS'; tool_call_id: string; delta: unknown }
+  /** Tool call completed. `result` / `error` are an AG-UI extension —
+   *  spec-strict clients ignore them and treat this as a plain END. */
+  | {
+      type: 'TOOL_CALL_END';
+      tool_call_id: string;
+      result?: unknown;
+      error?: string;
+    }
   | {
       type: 'DEBUG_CODE_EXEC';
       code: string;
