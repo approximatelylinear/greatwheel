@@ -572,3 +572,133 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
   letter-spacing: 0;
 }
 
+/* ─── Observer (behind ?observe=<uuid>) ────────────────────────── */
+
+.obs-app {
+  display: flex; flex-direction: column; height: 100vh;
+  background: var(--bg); color: var(--fg);
+  font: 13px/1.4 var(--font-ui);
+}
+.obs-header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 20px; border-bottom: 1px solid var(--border);
+  background: var(--bg-soft);
+}
+.obs-brand { display: flex; flex-direction: column; flex: 1; }
+.obs-title {
+  font: 15px/1.2 var(--font-serif); color: var(--fg);
+  letter-spacing: 0.01em;
+}
+.obs-subtitle {
+  font: 10.5px/1.3 var(--font-mono); color: var(--muted);
+  letter-spacing: 0.04em;
+}
+.obs-pulse {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--muted); transition: background 120ms;
+}
+.obs-pulse.on {
+  background: #7bd38f;
+  box-shadow: 0 0 0 4px rgba(123, 211, 143, 0.15);
+}
+.obs-pulse.err { background: var(--error); }
+.obs-main {
+  flex: 1; overflow-y: auto; padding: 16px 20px;
+  display: grid; grid-template-columns: 320px 1fr; gap: 16px;
+  grid-auto-rows: min-content;
+}
+.obs-pane {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.obs-pane-head {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 9px 14px; border-bottom: 1px solid var(--border);
+  font: 11px/1.3 var(--font-mono); letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted-strong);
+}
+.obs-head-meta {
+  font-size: 10px; color: var(--muted); letter-spacing: 0.04em;
+}
+.obs-empty {
+  padding: 18px 14px; color: var(--muted); font-style: italic;
+  font-size: 12px;
+}
+
+/* Session summary pane spans the left rail; other panes fill right. */
+.obs-summary { grid-row: span 2; }
+.obs-summary-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 1px;
+  background: var(--border); border-radius: 0 0 var(--radius-md) var(--radius-md);
+  overflow: hidden;
+}
+.obs-stat { padding: 10px 14px; background: var(--surface); }
+.obs-stat-label {
+  font: 9.5px/1.3 var(--font-mono); letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted);
+}
+.obs-stat-value {
+  font: 14px/1.3 var(--font-mono); color: var(--fg); margin-top: 3px;
+  word-break: break-all;
+}
+.obs-stat-ok .obs-stat-value { color: #7bd38f; }
+.obs-stat-err .obs-stat-value { color: var(--error); }
+.obs-stat-dim .obs-stat-value { color: var(--muted-strong); }
+.obs-error-banner {
+  padding: 8px 14px; font: 11px/1.4 var(--font-mono);
+  background: #2a141a; color: #ff9a9a; border-top: 1px solid var(--border);
+}
+
+/* Turn timeline */
+.obs-timeline { padding: 8px 14px 14px; display: flex; flex-direction: column; gap: 8px; }
+.obs-turn-row { display: flex; flex-direction: column; gap: 3px; }
+.obs-turn-meta {
+  display: flex; gap: 10px; align-items: center;
+  font: 10px/1.3 var(--font-mono); color: var(--muted);
+}
+.obs-turn-id { color: var(--fg-dim); }
+.obs-turn-status {
+  padding: 0 5px; border-radius: 2px; font-size: 9px;
+  letter-spacing: 0.05em; text-transform: uppercase;
+}
+.obs-turn-running { background: var(--accent-soft); color: var(--accent); }
+.obs-turn-done { background: rgba(123, 211, 143, 0.14); color: #7bd38f; }
+.obs-turn-error { background: rgba(255, 107, 107, 0.18); color: #ff9a9a; }
+.obs-turn-dur { color: var(--muted-strong); }
+.obs-turn-count { color: var(--muted); }
+.obs-turn-bar-track {
+  position: relative; height: 8px; background: var(--bg); border-radius: 2px;
+}
+.obs-turn-bar {
+  position: absolute; top: 0; bottom: 0; border-radius: 2px; min-width: 2px;
+  background: var(--muted); transition: width 120ms;
+}
+.obs-turn-bar-running { background: var(--accent); }
+.obs-turn-bar-done { background: #7bd38f; }
+.obs-turn-bar-error { background: var(--error); }
+
+/* State-delta log */
+.obs-patch-list {
+  padding: 6px 0; max-height: 600px; overflow-y: auto;
+  font: 10.5px/1.45 var(--font-mono);
+}
+.obs-patch-row {
+  display: grid; grid-template-columns: 70px 55px 1fr;
+  gap: 10px; padding: 3px 14px; border-bottom: 1px solid var(--bg-soft);
+}
+.obs-patch-row:hover { background: var(--bg-soft); }
+.obs-patch-time { color: var(--muted); }
+.obs-patch-op {
+  padding: 0 4px; border-radius: 2px; font-size: 9.5px;
+  letter-spacing: 0.05em; text-transform: uppercase;
+  align-self: start;
+}
+.obs-patch-op-add { background: rgba(123, 211, 143, 0.14); color: #7bd38f; }
+.obs-patch-op-replace { background: var(--accent-soft); color: var(--accent); }
+.obs-patch-op-remove { background: rgba(255, 107, 107, 0.14); color: #ff9a9a; }
+.obs-patch-path { color: var(--fg-dim); word-break: break-all; }
+.obs-patch-value {
+  grid-column: 3; color: var(--muted-strong);
+  white-space: pre-wrap; word-break: break-all;
+}
+
