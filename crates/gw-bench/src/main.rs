@@ -1399,7 +1399,7 @@ fn pre_search(
         })
         .map(|l| l.trim().trim_matches('"'))
         .filter(|l| !l.is_empty() && l.len() < 100)
-        .take(5)
+        .take(bench_config.n_presearch_queries)
         .collect();
 
     info!(queries = ?queries, "Pre-search queries");
@@ -1450,11 +1450,11 @@ fn pre_search(
     }
 
     for search_query in &queries {
-        let hits = backend_search(backend, search_query, std::cmp::min(k as usize, 5), rt);
+        let hits = backend_search(backend, search_query, bench_config.presearch_k, rt);
         for hit in hits {
             if seen_docids.insert(hit.docid.clone()) {
                 let snippet = hit.snippet.as_deref().unwrap_or("");
-                let preview: String = snippet.chars().take(300).collect();
+                let preview: String = snippet.chars().take(bench_config.context_snippet_chars).collect();
                 context_text.push_str(&format!("docid={}: {}\n", hit.docid, preview));
                 all_hits.push(serde_json::json!({
                     "docid": hit.docid,
@@ -1474,7 +1474,7 @@ fn pre_search(
     let prf_terms = {
         let mut term_freq: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
-        for h in all_hits.iter().take(5) {
+        for h in all_hits.iter().take(bench_config.prf_top_n) {
             let snippet = h["snippet"].as_str().unwrap_or("");
             for word in snippet.split_whitespace() {
                 let clean: String = word
@@ -1503,12 +1503,12 @@ fn pre_search(
         ];
         let stop_set: std::collections::HashSet<&str> = stopwords.iter().cloned().collect();
         term_freq.retain(|t, _| !stop_set.contains(t.as_str()));
-        // Sort by freq, take top 5
+        // Sort by freq, take top N (configurable via prf_term_count)
         let mut sorted: Vec<(String, usize)> = term_freq.into_iter().collect();
         sorted.sort_by(|a, b| b.1.cmp(&a.1));
         sorted
             .into_iter()
-            .take(5)
+            .take(bench_config.prf_term_count)
             .map(|(t, _)| t)
             .collect::<Vec<String>>()
     };
@@ -1517,7 +1517,7 @@ fn pre_search(
         info!(prf_terms = ?prf_terms, "PRF terms extracted");
         // Search with PRF terms as a combined query
         let prf_query = prf_terms.join(" ");
-        let prf_hits = backend_search(backend, &prf_query, 3, rt);
+        let prf_hits = backend_search(backend, &prf_query, bench_config.prf_k, rt);
         for hit in prf_hits {
             if seen_docids.insert(hit.docid.clone()) {
                 let snippet = hit.snippet.as_deref().unwrap_or("");
@@ -1620,12 +1620,15 @@ fn pre_search(
         }
 
         let keep_indices: Vec<usize> = keep_set.into_iter().collect();
-        let new_queries: Vec<String> = new_query_set.into_iter().take(3).collect();
+        let new_queries: Vec<String> = new_query_set
+            .into_iter()
+            .take(bench_config.round2_new_queries)
+            .collect();
 
         info!(keep = ?keep_indices, new_queries = ?new_queries, "Pre-search round 2 parsed");
 
         // If we got valid KEEP indices, filter the context
-        if !keep_indices.is_empty() && keep_indices.len() <= 15 {
+        if !keep_indices.is_empty() && keep_indices.len() <= bench_config.round2_keep_max {
             let filtered: Vec<serde_json::Value> = keep_indices
                 .iter()
                 .filter_map(|&i| all_hits.get(i).cloned())
@@ -1650,9 +1653,10 @@ fn pre_search(
         }
 
         // Run new searches from round 2
-        total_queries += new_queries.len().min(3);
-        for search_query in new_queries.iter().take(3) {
-            let hits = backend_search(backend, search_query, std::cmp::min(k as usize, 5), rt);
+        let r2_count = new_queries.len().min(bench_config.round2_new_queries);
+        total_queries += r2_count;
+        for search_query in new_queries.iter().take(r2_count) {
+            let hits = backend_search(backend, search_query, bench_config.round2_k, rt);
             for hit in hits {
                 if seen_docids.insert(hit.docid.clone()) {
                     let snippet = hit.snippet.as_deref().unwrap_or("");
