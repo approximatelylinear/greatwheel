@@ -1,6 +1,15 @@
 import { defineRegistry } from '@json-render/react';
 import { spikeCatalog } from './catalog';
 
+function formatCell(v: unknown): string {
+  if (v == null) return '—';
+  if (typeof v === 'number') {
+    return Number.isInteger(v) ? String(v) : v.toLocaleString();
+  }
+  if (typeof v === 'string') return v;
+  return JSON.stringify(v);
+}
+
 // Reuse the same CSS classes as A2uiWidget so the spike visually
 // matches the existing demo. The structural wiring (emit, children)
 // is what we're testing here, not the look.
@@ -31,6 +40,51 @@ const built = defineRegistry(spikeCatalog, {
           <div className="a2ui-card-sub">{props.subtitle}</div>
         )}
       </button>
+    ),
+    DataTable: ({ props, emit }) => (
+      <div className="a2ui-table-wrap">
+        <table className="a2ui-table">
+          <thead>
+            <tr>
+              {props.columns.map((c, i) => (
+                <th key={`${i}-${c}`}>{c}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {props.rows.map((row, i) => (
+              <tr
+                key={i}
+                className="a2ui-table-row"
+                onClick={() => {
+                  // The translator wires `onSelect` via `on.select`
+                  // ActionBinding rather than the default `press`
+                  // event. See translate.ts.
+                  emit(`row:${i}`);
+                }}
+              >
+                {row.map((cell, j) => (
+                  <td key={j}>{formatCell(cell)}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {props.truncated && (
+          <div className="a2ui-table-truncated">… more rows truncated</div>
+        )}
+      </div>
+    ),
+    QueryCard: ({ props }) => (
+      <div className={`a2ui-query-card${props.error ? ' error' : ''}`}>
+        {props.summary && (
+          <div className="a2ui-query-summary">{props.summary}</div>
+        )}
+        <pre className="a2ui-query-sql">{props.sql}</pre>
+        {props.error && (
+          <pre className="a2ui-query-error">{props.error}</pre>
+        )}
+      </div>
     ),
   },
   actions: {

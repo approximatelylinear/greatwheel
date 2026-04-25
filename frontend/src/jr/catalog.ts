@@ -35,6 +35,25 @@ export const spikeCatalog = defineCatalog(schema, {
       }),
       description: 'Clickable card with title and optional subtitle',
     },
+    DataTable: {
+      props: z.object({
+        columns: z.array(z.string()),
+        rows: z.array(z.array(z.unknown())),
+        rowKey: z.string().nullable().optional(),
+        truncated: z.boolean().optional(),
+      }),
+      description:
+        'Interactive table; clicking a row fires a select event with the row payload',
+    },
+    QueryCard: {
+      props: z.object({
+        sql: z.string(),
+        summary: z.string().nullable().optional(),
+        error: z.string().nullable().optional(),
+      }),
+      description:
+        'Read-only display of the SQL the agent ran (transparency), with optional one-line summary or error',
+    },
   },
   actions: {
     interact: {

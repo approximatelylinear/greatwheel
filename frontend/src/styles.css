@@ -566,6 +566,57 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
 }
 .debug-tab:hover { color: var(--fg-dim); }
 .debug-tab.active { color: var(--fg); background: rgba(255, 255, 255, 0.04); }
+/* ─── Data explorer (DataTable + QueryCard) ──────────────────── */
+
+.a2ui-table-wrap {
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--surface); overflow: hidden;
+}
+.a2ui-table {
+  width: 100%; border-collapse: collapse;
+  font: 12px/1.4 var(--font-mono);
+}
+.a2ui-table thead th {
+  text-align: left; padding: 8px 12px;
+  font: 9.5px/1.3 var(--font-mono); letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted-strong);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-soft); position: sticky; top: 0;
+}
+.a2ui-table tbody td {
+  padding: 7px 12px; border-bottom: 1px solid var(--border);
+  color: var(--fg-dim); white-space: nowrap;
+  text-overflow: ellipsis; overflow: hidden; max-width: 280px;
+}
+.a2ui-table tbody td:first-child { color: var(--fg); }
+.a2ui-table-row { cursor: pointer; transition: background 100ms; }
+.a2ui-table-row:hover { background: var(--surface-hi); }
+.a2ui-table-row:hover td { color: var(--fg); }
+.a2ui-table-truncated {
+  padding: 6px 12px; color: var(--muted);
+  font: 10.5px/1.3 var(--font-mono); font-style: italic;
+  border-top: 1px solid var(--border); background: var(--bg-soft);
+}
+
+.a2ui-query-card {
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--surface); overflow: hidden;
+}
+.a2ui-query-card.error { border-color: var(--error); }
+.a2ui-query-summary {
+  padding: 8px 14px; border-bottom: 1px solid var(--border);
+  font: 11px/1.4 var(--font-ui); color: var(--fg-dim);
+}
+.a2ui-query-sql {
+  margin: 0; padding: 10px 14px; background: #0a0d13;
+  font: 11.5px/1.5 var(--font-mono); color: #a8b1bf;
+  white-space: pre-wrap; word-break: break-word;
+}
+.a2ui-query-error {
+  margin: 0; padding: 8px 14px; background: #1e1114; color: #ff9a9a;
+  font: 11px/1.4 var(--font-mono); white-space: pre-wrap;
+}
+
 .debug-toolcall.running { border-color: var(--accent); }
 .debug-toolcall .debug-toolcall-name {
   font-family: var(--font-mono); color: var(--fg); font-size: 11px;

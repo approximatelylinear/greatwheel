@@ -100,6 +100,64 @@ export function toJrSpec(widget: Widget): Spec | null {
         };
         return key;
       }
+      case 'DataTable': {
+        const columns = Array.isArray(node.columns)
+          ? (node.columns as unknown[]).map(String)
+          : [];
+        const rawRows: unknown[][] = Array.isArray(node.rows)
+          ? (node.rows as unknown[][]).map((r) =>
+              Array.isArray(r) ? r : [],
+            )
+          : [];
+        const rowKey =
+          node.rowKey != null && node.rowKey !== '' ? String(node.rowKey) : null;
+        // Per-row ActionBindings: registry's `emit('row:N')` routes
+        // through the matching `on` entry to the catalog's `interact`
+        // action with the row's data baked in.
+        const on: Record<string, unknown> = {};
+        rawRows.forEach((row, i) => {
+          const rowObj: Record<string, unknown> = {};
+          columns.forEach((c, j) => {
+            rowObj[c] = row[j];
+          });
+          const rowId =
+            rowKey && Object.prototype.hasOwnProperty.call(rowObj, rowKey)
+              ? rowObj[rowKey]
+              : i;
+          on[`row:${i}`] = {
+            action: 'interact',
+            params: {
+              widgetId,
+              surfaceId,
+              buttonId: `row:${i}`,
+              action: 'select',
+              data: { rowId, row: rowObj },
+            },
+          };
+        });
+        elements[key] = {
+          type: 'DataTable',
+          props: {
+            columns,
+            rows: rawRows,
+            rowKey,
+            truncated: Boolean(node.truncated),
+          },
+          on,
+        } as UIElement;
+        return key;
+      }
+      case 'QueryCard': {
+        elements[key] = {
+          type: 'QueryCard',
+          props: {
+            sql: String(node.sql ?? ''),
+            summary: node.summary != null ? String(node.summary) : null,
+            error: node.error != null ? String(node.error) : null,
+          },
+        };
+        return key;
+      }
       default: {
         // Unknown — fall back to a Text node showing the raw JSON so
         // we can see what we missed instead of blowing up silently.

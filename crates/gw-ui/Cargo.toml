@@ -27,6 +27,7 @@ gw-loop = { workspace = true }
 gw-runtime = { workspace = true }
 ouros = { workspace = true }
 reqwest = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing-subscriber = { workspace = true }
 
@@ -41,3 +42,7 @@ path = "examples/llm_server.rs"
 [[example]]
 name = "frankenstein_server"
 path = "examples/frankenstein_server.rs"
+
+[[example]]
+name = "data_explorer"
+path = "examples/data_explorer.rs"
