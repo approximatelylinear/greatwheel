@@ -61,6 +61,19 @@ pub struct AgUiState {
     /// persisted anywhere else. See
     /// `docs/design-json-render-migration.md` §3.1.
     focused_scope: Mutex<HashMap<SessionId, HashMap<String, serde_json::Value>>>,
+    /// App-wide branding. Server-set once at construction; included in
+    /// every STATE_SNAPSHOT under `/branding`. Frontend reads
+    /// `{$state: "/branding/title"}` etc. so each demo
+    /// (Frankenstein / data-explorer / future) can label itself
+    /// instead of all sharing a hardcoded "Frankenstein" header.
+    branding: std::sync::Mutex<Option<Branding>>,
+}
+
+/// App-wide branding shown in the frontend header.
+#[derive(Debug, Clone)]
+pub struct Branding {
+    pub title: String,
+    pub subtitle: String,
 }
 
 /// Public-facing adapter. Construct once per gw instance and share.
@@ -81,6 +94,7 @@ impl AgUiAdapter {
             sessions: Mutex::new(HashMap::new()),
             inbound: Mutex::new(HashMap::new()),
             focused_scope: Mutex::new(HashMap::new()),
+            branding: std::sync::Mutex::new(None),
         });
 
         let st = state.clone();
@@ -131,6 +145,17 @@ impl AgUiAdapter {
         sessions
             .entry(session_id)
             .or_insert_with(|| broadcast::channel::<AgUiEvent>(256).0);
+    }
+
+    /// Set the app-wide branding (title + subtitle) that appears in
+    /// the frontend header. Called once at startup by each example.
+    /// Surfaced in every subsequent STATE_SNAPSHOT.
+    pub fn set_branding(&self, title: impl Into<String>, subtitle: impl Into<String>) {
+        let mut b = self.state.branding.lock().expect("branding mutex poisoned");
+        *b = Some(Branding {
+            title: title.into(),
+            subtitle: subtitle.into(),
+        });
     }
 
     pub async fn unregister_session(&self, session_id: SessionId) {
@@ -218,9 +243,14 @@ async fn sse_handler(
                 .get(&sid)
                 .cloned()
                 .unwrap_or_default();
+            let branding = state
+                .branding
+                .lock()
+                .expect("branding mutex poisoned")
+                .clone();
             Some(AgUiEvent::StateSnapshot {
                 surface_id: snap.surface.id.0.to_string(),
-                state: canonical_state(&snap, &focus),
+                state: canonical_state(&snap, &focus, branding.as_ref()),
             })
         }
         Err(_) => None,

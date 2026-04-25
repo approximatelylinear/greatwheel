@@ -358,11 +358,7 @@ fn describe_schema(conn: &Connection) -> Result<Value, PluginError> {
 
 fn run_sql(conn: &Connection, sql: &str, limit: usize) -> Value {
     // Read-only guard: only SELECT or WITH ... SELECT.
-    let head = sql
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_uppercase();
+    let head = sql.split_whitespace().next().unwrap_or("").to_uppercase();
     if head != "SELECT" && head != "WITH" {
         return json!({
             "columns": [],
@@ -485,6 +481,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("UiPlugin did not provide UiSurfaceStore")?;
 
     let adapter = Arc::new(AgUiAdapter::new(&store));
+    adapter.set_branding("Bookshop", "a SQL data explorer");
     let session_id = SessionId(Uuid::new_v4());
 
     let (tap_tx, mut tap_rx) = mpsc::unbounded_channel::<LoopEvent>();

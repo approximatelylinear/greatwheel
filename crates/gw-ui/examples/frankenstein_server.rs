@@ -381,6 +381,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // AG-UI
     let adapter = Arc::new(AgUiAdapter::new(&store));
+    adapter.set_branding("Frankenstein", "a conversational reading companion");
     let session_id = SessionId(Uuid::new_v4());
 
     // Channels + tap (same pattern as llm_server)

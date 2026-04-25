@@ -15,6 +15,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
+use crate::ag_ui::adapter::Branding;
 use crate::surface::{UiNotification, UiSurfaceSnapshot, UiSurfaceStore};
 
 /// Serialize a surface snapshot into the canonical state shape
@@ -27,7 +28,11 @@ use crate::surface::{UiNotification, UiSurfaceSnapshot, UiSurfaceStore};
 /// `post_widget_event`). Passed in rather than stored on `UiSurface`
 /// because focus is a wire-layer concern; the core surface store
 /// doesn't track it.
-pub fn canonical_state(snap: &UiSurfaceSnapshot, focused_scope: &HashMap<String, Value>) -> Value {
+pub fn canonical_state(
+    snap: &UiSurfaceSnapshot,
+    focused_scope: &HashMap<String, Value>,
+    branding: Option<&Branding>,
+) -> Value {
     let mut widgets = serde_json::Map::new();
     let mut pinned = serde_json::Map::new();
     for w in &snap.widgets {
@@ -53,6 +58,8 @@ pub fn canonical_state(snap: &UiSurfaceSnapshot, focused_scope: &HashMap<String,
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
+    let branding_value = branding.map(|b| json!({ "title": b.title, "subtitle": b.subtitle }));
+
     json!({
         "widgets": Value::Object(widgets),
         "widgetOrder": Value::Array(order),
@@ -61,6 +68,7 @@ pub fn canonical_state(snap: &UiSurfaceSnapshot, focused_scope: &HashMap<String,
         "pinnedIds": Value::Object(pinned),
         "pressed": {},
         "focusedScope": Value::Object(focus_map),
+        "branding": branding_value,
     })
 }
 
@@ -210,7 +218,7 @@ mod tests {
             },
             widgets: vec![w.clone()],
         };
-        let state = canonical_state(&snap, &HashMap::new());
+        let state = canonical_state(&snap, &HashMap::new(), None);
         assert_eq!(state["widgets"][w.id.0.to_string()]["id"], json!(w.id.0));
         assert_eq!(state["widgetOrder"][0], json!(w.id.0.to_string()));
         assert_eq!(state["canvasSlot"], json!(w.id.0.to_string()));
@@ -236,7 +244,7 @@ mod tests {
         };
         let mut focus = HashMap::new();
         focus.insert("section".into(), json!(4));
-        let state = canonical_state(&snap, &focus);
+        let state = canonical_state(&snap, &focus, None);
         assert_eq!(state["focusedScope"]["section"], json!(4));
     }
 

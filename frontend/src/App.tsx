@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createStateStore, type StateStore } from '@json-render/core';
-import { JSONUIProvider } from '@json-render/react';
+import { JSONUIProvider, useStateValue } from '@json-render/react';
 import { postMessage, postWidgetEvent } from './api/client';
 import { openStream } from './api/sse';
 import { useSessionStore } from './store/session';
@@ -120,16 +120,13 @@ export function App() {
   );
 
   return (
-    <div className="app">
-      <header className="app-header">
-        <div className="app-brand">
-          <span className="app-title">Frankenstein</span>
-          <span className="app-subtitle">a conversational reading companion</span>
-        </div>
-        {streamError && <span className="app-error">{streamError}</span>}
-        <span className="app-mark" title={`session ${sessionId}`}>greatwheel</span>
-      </header>
-      <JSONUIProvider registry={registry} store={store} handlers={handlers}>
+    <JSONUIProvider registry={registry} store={store} handlers={handlers}>
+      <div className="app">
+        <header className="app-header">
+          <BrandedTitle />
+          {streamError && <span className="app-error">{streamError}</span>}
+          <span className="app-mark" title={`session ${sessionId}`}>greatwheel</span>
+        </header>
         <main className="app-main">
           <ChatPane
             messages={state.messages}
@@ -139,13 +136,32 @@ export function App() {
           />
           <CanvasPane />
         </main>
-      </JSONUIProvider>
-      {debug && (
-        <DebugPane traces={state.codeTraces} toolCalls={state.toolCalls} />
+        {debug && (
+          <DebugPane traces={state.codeTraces} toolCalls={state.toolCalls} />
+        )}
+        <footer className="app-footer">
+          <MessageInput onSend={onSend} disabled={state.running} />
+        </footer>
+      </div>
+    </JSONUIProvider>
+  );
+}
+
+/**
+ * Header brand block sourced from `/branding` in the canonical state
+ * (set per-demo via `AgUiAdapter::set_branding` on the server). Falls
+ * back to "greatwheel" until the first STATE_SNAPSHOT lands.
+ */
+function BrandedTitle() {
+  const branding = useStateValue<{ title: string; subtitle: string }>(
+    '/branding',
+  );
+  return (
+    <div className="app-brand">
+      <span className="app-title">{branding?.title ?? 'greatwheel'}</span>
+      {branding?.subtitle && (
+        <span className="app-subtitle">{branding.subtitle}</span>
       )}
-      <footer className="app-footer">
-        <MessageInput onSend={onSend} disabled={state.running} />
-      </footer>
     </div>
   );
 }

@@ -16,6 +16,7 @@ export const INITIAL_CANONICAL_STATE: Record<string, unknown> = {
   pinnedIds: {},
   pressed: {},
   focusedScope: {},
+  branding: null,
 };
 
 export interface StateBridgeCallbacks {
