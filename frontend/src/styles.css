@@ -109,6 +109,50 @@ html, body, #root {
   border-right: 1px solid var(--border);
 }
 
+/* In canvas-primary, the chat is a record of questions / answers
+   the user is moving past. Dim every assistant block except the
+   most recent answer pair so the eye lands on the live one.
+   The most recent assistant message is the last `.message-assistant`
+   in `.messages`; everything before stays visible but quiet. */
+.app-main-canvas-primary .messages > div:not(:last-child) {
+  opacity: 0.55;
+  transition: opacity 200ms;
+}
+.app-main-canvas-primary .messages > div:not(:last-child):hover {
+  opacity: 1;
+}
+/* Old follow-up button rows are stale (the user has typed since);
+   collapse them under their parent message but keep them clickable
+   on hover so revisiting an earlier branch is still possible. */
+.app-main-canvas-primary
+  .messages
+  > div:not(:last-child)
+  .message-followups {
+  max-height: 0;
+  overflow: hidden;
+  margin: 0;
+  transition: max-height 200ms ease-out, margin 200ms ease-out;
+}
+.app-main-canvas-primary
+  .messages
+  > div:not(:last-child):hover
+  .message-followups {
+  max-height: 200px;
+  margin-top: 8px;
+}
+
+/* Canvas-primary DataTable can use the full canvas width; relax
+   the per-cell max-width so columns flex naturally. The wrap still
+   scrolls horizontally if the table is wider than the canvas. */
+.app-main-canvas-primary .a2ui-table-wrap {
+  overflow-x: auto;
+}
+.app-main-canvas-primary .a2ui-table tbody td {
+  max-width: none;
+  white-space: normal;
+  overflow: visible;
+}
+
 /* ─── Chat pane ──────────────────────────────────────────────── */
 
 .chat-pane { overflow-y: auto; padding: 28px 24px 32px; }

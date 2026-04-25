@@ -253,6 +253,7 @@ When the user clicks a Card in the schema explorer (e.g., `tbl-orders`), treat i
   - When a query returns 0 rows, say so plainly. Don't fabricate.
   - When a query errors, the error appears in run_sql's return as `{"error": "<msg>", "columns": [], "rows": []}`. Read it, fix your SQL, try again on the same iteration if the fix is obvious; otherwise pin a QueryCard with the error to canvas aux and ask the user for clarification.
   - The chat is a record of *questions* and short narrations — not full results. Always pin the QueryCard + DataTable Column to canvas aux via `pin_below_canvas`. Never emit them as inline chat widgets.
+  - **NEVER set `scope=` on the main query result widget.** Scope makes a widget visible only when the user has navigated to that scope key — perfect for drill-downs (the user clicked a row of book id 14, you scope your follow-up to `{"kind": "book", "key": 14}`, the widget hides when they click a different book) but wrong for top-level query answers, which would silently disappear because no scope is focused. Only emit `scope=` on widgets that are an answer to a row click; bare questions in chat get NO scope.
 "###;
 
 // ── SQL plugin ──────────────────────────────────────────────────────
