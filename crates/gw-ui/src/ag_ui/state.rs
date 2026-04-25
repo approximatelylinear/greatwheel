@@ -58,7 +58,13 @@ pub fn canonical_state(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    let branding_value = branding.map(|b| json!({ "title": b.title, "subtitle": b.subtitle }));
+    let branding_value = branding.map(|b| {
+        json!({
+            "title": b.title,
+            "subtitle": b.subtitle,
+            "layout": b.layout,
+        })
+    });
 
     json!({
         "widgets": Value::Object(widgets),
