@@ -27,7 +27,7 @@ gw-loop = { workspace = true }
 gw-runtime = { workspace = true }
 ouros = { workspace = true }
 reqwest = { workspace = true }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing-subscriber = { workspace = true }
 
 [[example]]

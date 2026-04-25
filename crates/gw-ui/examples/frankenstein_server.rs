@@ -33,6 +33,7 @@ use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tower_http::cors::CorsLayer;
+use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 /// Model string for the Ollama path.
@@ -456,8 +457,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         })?;
 
-    // HTTP
-    let app = adapter.router().layer(CorsLayer::permissive());
+    // HTTP — TraceLayer logs `METHOD path → status latency` per request
+    // when `tower_http=debug` is set in RUST_LOG. CorsLayer stays
+    // permissive for the local frontend.
+    let app = adapter
+        .router()
+        .layer(TraceLayer::new_for_http())
+        .layer(CorsLayer::permissive());
     let listener = TcpListener::bind("127.0.0.1:8787").await?;
     println!("frankenstein server listening on http://127.0.0.1:8787");
     println!("model: {model_label}");
