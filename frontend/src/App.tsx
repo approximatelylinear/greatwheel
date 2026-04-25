@@ -148,8 +148,12 @@ interface AppShellProps {
  * data demos.
  */
 function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProps) {
-  const layout =
-    useStateValue<string | null>('/branding/layout') ?? 'chat-primary';
+  // useStateValue reads a single key at the path it's given; it
+  // doesn't drill into nested objects, so we read the whole
+  // /branding object and pluck `.layout` ourselves. (The header
+  // does the same thing for `.title` / `.subtitle` in BrandedTitle.)
+  const branding = useStateValue<{ layout?: string | null }>('/branding');
+  const layout = branding?.layout ?? 'chat-primary';
   return (
     <div className={`app app-${layout}`}>
       <header className="app-header">
