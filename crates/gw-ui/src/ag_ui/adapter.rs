@@ -69,11 +69,20 @@ pub struct AgUiState {
     branding: std::sync::Mutex<Option<Branding>>,
 }
 
-/// App-wide branding shown in the frontend header.
+/// App-wide branding shown in the frontend header. `layout` is an
+/// optional hint the frontend uses to pick a top-level grid:
+///
+///   - None / `"chat-primary"` (default) — chat fills, canvas is a
+///     narrow right rail. Good for chat demos where the canvas
+///     holds compact navigation (Frankenstein chapter picker).
+///   - `"canvas-primary"` — canvas fills, chat is a narrow left
+///     rail. Good for data / dashboard demos where the canvas holds
+///     wide content (DataTable in the SQL explorer).
 #[derive(Debug, Clone)]
 pub struct Branding {
     pub title: String,
     pub subtitle: String,
+    pub layout: Option<String>,
 }
 
 /// Public-facing adapter. Construct once per gw instance and share.
@@ -149,13 +158,32 @@ impl AgUiAdapter {
 
     /// Set the app-wide branding (title + subtitle) that appears in
     /// the frontend header. Called once at startup by each example.
-    /// Surfaced in every subsequent STATE_SNAPSHOT.
+    /// Surfaced in every subsequent STATE_SNAPSHOT. Layout defaults
+    /// to None (chat-primary); use `set_layout` to override.
     pub fn set_branding(&self, title: impl Into<String>, subtitle: impl Into<String>) {
         let mut b = self.state.branding.lock().expect("branding mutex poisoned");
+        let prev_layout = b.as_ref().and_then(|b| b.layout.clone());
         *b = Some(Branding {
             title: title.into(),
             subtitle: subtitle.into(),
+            layout: prev_layout,
         });
+    }
+
+    /// Override the layout hint. Call after `set_branding`. See
+    /// `Branding` for the recognised values.
+    pub fn set_layout(&self, layout: impl Into<String>) {
+        let mut b = self.state.branding.lock().expect("branding mutex poisoned");
+        let layout = layout.into();
+        if let Some(existing) = b.as_mut() {
+            existing.layout = Some(layout);
+        } else {
+            *b = Some(Branding {
+                title: String::new(),
+                subtitle: String::new(),
+                layout: Some(layout),
+            });
+        }
     }
 
     pub async fn unregister_session(&self, session_id: SessionId) {

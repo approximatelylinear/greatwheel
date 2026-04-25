@@ -87,8 +87,26 @@ html, body, #root {
 /* ─── Main layout ────────────────────────────────────────────── */
 
 .app-main {
-  display: grid; grid-template-columns: 1fr 380px;
-  min-height: 0;
+  display: grid; min-height: 0;
+}
+/* Default: chat fills, canvas is a narrow right rail (Frankenstein,
+   echo-server, anything with compact canvas content). */
+.app-main-chat-primary,
+.app-main:not(.app-main-canvas-primary) {
+  grid-template-columns: 1fr 380px;
+}
+/* Canvas-primary: canvas fills, chat is a narrow left rail. The
+   data-explorer demo uses this so the DataTable has room.
+   Also reorders so chat sits on the left, canvas on the right. */
+.app-main-canvas-primary {
+  grid-template-columns: 380px 1fr;
+}
+.app-main-canvas-primary .canvas-pane {
+  border-left: 1px solid var(--border);
+  border-right: 0;
+}
+.app-main-canvas-primary .chat-pane {
+  border-right: 1px solid var(--border);
 }
 
 /* ─── Chat pane ──────────────────────────────────────────────── */

@@ -121,29 +121,58 @@ export function App() {
 
   return (
     <JSONUIProvider registry={registry} store={store} handlers={handlers}>
-      <div className="app">
-        <header className="app-header">
-          <BrandedTitle />
-          {streamError && <span className="app-error">{streamError}</span>}
-          <span className="app-mark" title={`session ${sessionId}`}>greatwheel</span>
-        </header>
-        <main className="app-main">
-          <ChatPane
-            messages={state.messages}
-            running={state.running}
-            messageFollowUps={state.messageFollowUps}
-            onSuggest={onSend}
-          />
-          <CanvasPane />
-        </main>
-        {debug && (
-          <DebugPane traces={state.codeTraces} toolCalls={state.toolCalls} />
-        )}
-        <footer className="app-footer">
-          <MessageInput onSend={onSend} disabled={state.running} />
-        </footer>
-      </div>
+      <AppShell
+        sessionId={sessionId}
+        debug={debug}
+        streamError={streamError}
+        state={state}
+        onSend={onSend}
+      />
     </JSONUIProvider>
+  );
+}
+
+interface AppShellProps {
+  sessionId: string;
+  debug: boolean;
+  streamError: string | null;
+  state: ReturnType<typeof useSessionStore>['state'];
+  onSend: (content: string) => void;
+}
+
+/**
+ * Inner shell that lives inside JSONUIProvider so it can read the
+ * branding's layout hint to swap the top-level grid (chat-primary
+ * vs canvas-primary). Default chat-primary keeps Frankenstein's
+ * narrow-right-rail layout; canvas-primary widens the canvas for
+ * data demos.
+ */
+function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProps) {
+  const layout =
+    useStateValue<string | null>('/branding/layout') ?? 'chat-primary';
+  return (
+    <div className={`app app-${layout}`}>
+      <header className="app-header">
+        <BrandedTitle />
+        {streamError && <span className="app-error">{streamError}</span>}
+        <span className="app-mark" title={`session ${sessionId}`}>greatwheel</span>
+      </header>
+      <main className={`app-main app-main-${layout}`}>
+        <ChatPane
+          messages={state.messages}
+          running={state.running}
+          messageFollowUps={state.messageFollowUps}
+          onSuggest={onSend}
+        />
+        <CanvasPane />
+      </main>
+      {debug && (
+        <DebugPane traces={state.codeTraces} toolCalls={state.toolCalls} />
+      )}
+      <footer className="app-footer">
+        <MessageInput onSend={onSend} disabled={state.running} />
+      </footer>
+    </div>
   );
 }
 

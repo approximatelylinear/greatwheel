@@ -156,6 +156,8 @@ FINAL("Ask me about sales, customers, ratings, or any cross-table question. I'll
 
 Use **two iterations**. Iteration 1 writes and runs the SQL but does not call FINAL. Iteration 2 reads the result and emits widgets + FINAL. This is required because `run_sql`'s return value is NOT in your context until the next iteration.
 
+**Layout principle (CRITICAL):** the QueryCard + DataTable for the *current* query live in the **canvas aux slot** (right side of the page, below the schema explorer). They are NOT inline chat widgets. The chat scroll only carries the user's question + your one-paragraph narration + a small follow-up question Row. Each new question replaces the canvas aux content via `pin_below_canvas`.
+
 **Iteration 1 — write SQL, run it, print:**
 
 ```python
@@ -171,7 +173,7 @@ print("SQL_OK")  # so iteration 2 knows to proceed
 
 (The harness will surface stdout to iteration 2's context as part of the agent's recent history. Do not print large result blobs.)
 
-**Iteration 2 — emit DataTable + QueryCard, narrate:**
+**Iteration 2 — wrap QueryCard + DataTable in one Column, pin to canvas aux, narrate:**
 
 ```python
 sql = """
@@ -182,29 +184,27 @@ ORDER BY revenue_usd DESC
 """
 data = run_sql(sql, limit=20)
 
-# 1. Emit the SQL transparently.
-emit_widget(
+# 1. Build ONE Column widget containing the QueryCard (transparency)
+#    on top and the DataTable below. Pin it to the canvas aux slot.
+#    `pin_below_canvas` automatically replaces whatever was there
+#    from the previous question.
+result = emit_widget(
     session_id=gw_session_id,
     kind="a2ui",
-    payload={"type": "QueryCard", "sql": sql.strip(),
-             "summary": "Revenue by genre, top to bottom"},
+    payload={"type": "Column", "children": [
+        {"type": "QueryCard", "sql": sql.strip(),
+         "summary": "Revenue by genre, top to bottom"},
+        {"type": "DataTable",
+         "columns": data["columns"],
+         "rows": data["rows"],
+         "rowKey": "genre"},
+    ]},
 )
+pin_below_canvas(widget_id=result["widget_id"])
 
-# 2. Emit the result table. Use a meaningful rowKey if a column makes
-#    sense as a record id; otherwise omit it.
-emit_widget(
-    session_id=gw_session_id,
-    kind="a2ui",
-    payload={
-        "type": "DataTable",
-        "columns": data["columns"],
-        "rows": data["rows"],
-        "rowKey": "genre",
-    },
-)
-
-# 3. Emit 2-3 follow-up question buttons (follow_up=True) — short,
-#    contextually-relevant drill-downs.
+# 2. Emit 2-3 follow-up question buttons (follow_up=True) — short,
+#    contextually-relevant drill-downs that anchor under the
+#    answer in the chat.
 emit_widget(
     session_id=gw_session_id,
     kind="a2ui",
@@ -222,18 +222,27 @@ emit_widget(
     ]},
 )
 
+# 3. FINAL is the chat narration: 1-3 sentences pointing out what
+#    actually matters in the result. Don't restate the table; the
+#    user can see it in the canvas. Reference real numbers from the
+#    result.
 FINAL("Fiction leads at $X, then Science at $Y — driven mostly by Compaction's January launch. The long tail (Travel, Memoir) sits well below.")
 ```
 
 ## Row click drill-down
 
-When the user clicks a DataTable row, you get a WidgetInteraction with `data = {"rowId": <key>, "row": {...}}`. Treat this as a request to drill into that record. Use **two iterations** if you need fresh data; otherwise one is fine.
+When the user clicks a DataTable row, you get a WidgetInteraction with `data = {"rowId": <key>, "row": {...}}`. Treat this as a request to drill into that record. Same pattern as above:
 
-If the row has a natural section/scope (e.g., a book id), pass `scope={"kind": "book", "key": <id>}` on emitted drill-down widgets. Then put them in `pin_below_canvas` so they appear in the aux canvas slot. They'll auto-hide when the user navigates to a different book.
+  - Run a follow-up SQL grounded in that row.
+  - Wrap the new QueryCard + DataTable in a Column.
+  - `pin_below_canvas` it — replaces the prior canvas aux content.
+  - FINAL with a one-sentence narration of what changed.
 
-## Filter Card click
+If the row has a natural domain key (e.g., a book id), pass `scope={"kind": "book", "key": <id>}` when emitting the Column. The frontend then auto-hides the widget when focus moves to a different book.
 
-When the user clicks a Card representing a filter (e.g., a genre bucket from a previous query), re-run the original query with that filter applied. Supersede the previous DataTable rather than emitting a new one. Use `supersede_widget` and pass the previous widget_id (track it in your iteration context).
+## Schema Card click
+
+When the user clicks a Card in the schema explorer (e.g., `tbl-orders`), treat it as `SELECT * FROM <table> LIMIT 50` and follow the same pattern: pin the QueryCard + DataTable to canvas aux, FINAL with a one-line description.
 
 # General rules
 
@@ -242,7 +251,8 @@ When the user clicks a Card representing a filter (e.g., a genre bucket from a p
   - Use parameterised values directly in the SQL when literal — there is no parameter binding from Python.
   - Cap LIMIT at 100 unless the user explicitly asks for more.
   - When a query returns 0 rows, say so plainly. Don't fabricate.
-  - When a query errors, the error appears in run_sql's return as `{"error": "<msg>", "columns": [], "rows": []}`. Read it, fix your SQL, try again on the same iteration if the fix is obvious; otherwise emit a QueryCard with the error and ask the user for clarification.
+  - When a query errors, the error appears in run_sql's return as `{"error": "<msg>", "columns": [], "rows": []}`. Read it, fix your SQL, try again on the same iteration if the fix is obvious; otherwise pin a QueryCard with the error to canvas aux and ask the user for clarification.
+  - The chat is a record of *questions* and short narrations — not full results. Always pin the QueryCard + DataTable Column to canvas aux via `pin_below_canvas`. Never emit them as inline chat widgets.
 "###;
 
 // ── SQL plugin ──────────────────────────────────────────────────────
@@ -482,6 +492,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let adapter = Arc::new(AgUiAdapter::new(&store));
     adapter.set_branding("Bookshop", "a SQL data explorer");
+    adapter.set_layout("canvas-primary");
     let session_id = SessionId(Uuid::new_v4());
 
     let (tap_tx, mut tap_rx) = mpsc::unbounded_channel::<LoopEvent>();
