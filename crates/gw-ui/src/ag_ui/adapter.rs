@@ -259,31 +259,36 @@ async fn sse_handler(
     let rx = tx.subscribe();
     debug!(session_id = %sid.0, "ag-ui sse subscribed");
 
-    // Build a STATE_SNAPSHOT so a vanilla AG-UI client can render
-    // without a separate /surface fetch. Emitted as the first event
-    // on the stream, ahead of any live deltas.
-    let snapshot_event = match state.store.snapshot(sid).await {
-        Ok(snap) => {
-            let focus = state
-                .focused_scope
-                .lock()
-                .await
-                .get(&sid)
-                .cloned()
-                .unwrap_or_default();
-            let branding = state
-                .branding
-                .lock()
-                .expect("branding mutex poisoned")
-                .clone();
-            Some(AgUiEvent::StateSnapshot {
-                surface_id: snap.surface.id.0.to_string(),
-                state: canonical_state(&snap, &focus, branding.as_ref()),
-            })
-        }
-        Err(_) => None,
+    // Always build a STATE_SNAPSHOT so a vanilla AG-UI client can
+    // render without a separate /surface fetch — and so that
+    // session-level state like branding always reaches the client,
+    // even on empty sessions before the first widget is emitted.
+    // (Previously this fell through to None on Err, which meant
+    // tabs that subscribed early — before the agent ran the first
+    // turn — never received branding and were stuck on the default
+    // header / layout.)
+    let snap = state
+        .store
+        .snapshot(sid)
+        .await
+        .unwrap_or_else(|_| empty_snapshot(sid));
+    let focus = state
+        .focused_scope
+        .lock()
+        .await
+        .get(&sid)
+        .cloned()
+        .unwrap_or_default();
+    let branding = state
+        .branding
+        .lock()
+        .expect("branding mutex poisoned")
+        .clone();
+    let snapshot_event = AgUiEvent::StateSnapshot {
+        surface_id: snap.surface.id.0.to_string(),
+        state: canonical_state(&snap, &focus, branding.as_ref()),
     };
-    let snapshot_stream = futures::stream::iter(snapshot_event.into_iter().map(|ev| {
+    let snapshot_stream = futures::stream::iter(std::iter::once(snapshot_event).map(|ev| {
         Event::default()
             .json_data(&ev)
             .map_err(|_| axum::Error::new("serialise STATE_SNAPSHOT"))
