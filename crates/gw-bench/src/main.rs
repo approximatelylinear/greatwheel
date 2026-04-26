@@ -1358,8 +1358,9 @@ fn pre_search(
     bench_config: &BenchConfig,
 ) -> (Vec<serde_json::Value>, String, u32, u32) {
     // Ask LLM to extract diverse keyword queries — one per sub-fact in the question
+    let n_q = bench_config.n_presearch_queries;
     let extract_prompt = format!(
-        "Given this question, output 5 SHORT BM25 keyword search queries (2-5 words each).\n\n\
+        "Given this question, output {n_q} SHORT BM25 keyword search queries (2-5 words each).\n\n\
          CRITICAL: Keep queries SHORT (2-5 words). BM25 matches keywords, not sentences.\n\
          Each query should target a DIFFERENT fact or entity from the question.\n\
          Include: specific names, places, dates, awards, organizations, works.\n\n\
