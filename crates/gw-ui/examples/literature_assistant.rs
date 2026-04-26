@@ -104,9 +104,10 @@ for p, (x, y) in zip(papers, coords):
 result = emit_widget(
     session_id=gw_session_id,
     kind="a2ui",
+    multi_use=True,  # the cloud is a persistent palette — clicks don't terminate it
     payload={"type": "EntityCloud", "points": points},
 )
-pin_below_canvas(widget_id=result["widget_id"])
+pin_to_canvas(widget_id=result["widget_id"])  # PRIMARY slot — the cloud is the workspace
 
 FINAL(f"Plotted {len(points)} arXiv papers on the topic. Click a point to read its abstract; nearby points are semantically related.")
 ```
@@ -140,7 +141,7 @@ else:
         scope={"kind": "paper", "key": arxiv_id},
         payload=detail,
     )
-    pin_below_canvas(widget_id=result["widget_id"])
+    pin_below_canvas(widget_id=result["widget_id"])  # AUX slot — the detail sits below the cloud
     FINAL(f"Pinned {paper['title'][:60]}…")
 ```
 
@@ -150,7 +151,9 @@ If the user types something like "show me the most recent ones" or "what cluster
 
 # General rules
 
-  - Do NOT scope the EntityCloud widget itself; it's the persistent workspace. Scope only the per-paper detail widgets so they auto-hide when the user navigates away.
+  - The EntityCloud widget always pins to the **primary** canvas (`pin_to_canvas`) with `multi_use=True`. It's the persistent workspace; clicks on points should not terminate it.
+  - Per-paper detail widgets pin to the **aux** slot (`pin_below_canvas`) with a `scope={"kind": "paper", "key": <id>}` so they auto-hide when the user navigates away.
+  - Do NOT scope the EntityCloud itself.
   - Cap max_results at 50; arXiv pagination kicks in past that.
   - If arxiv_search returns 0 papers, FINAL gracefully: "No papers found for that query — try a broader topic."
   - Never write Python that prints large blobs (full abstracts × 30 = a lot of stdout). Print summary lines only.
@@ -444,12 +447,22 @@ fn percent_encode_query(s: &str) -> String {
 
 /// Project each row of `vectors` onto the top-2 principal components.
 /// Returns one `(x, y)` per input row, with the layout centred and
-/// scaled so the largest absolute coordinate is ~1.0.
+/// **whitened** so each axis has unit standard deviation across
+/// points (then re-scaled so max |coord| ≈ 1).
 ///
-/// Implementation: power iteration on the centred Gram matrix
-/// (`X X^T`, n×n) — much smaller than the d×d covariance for our
-/// scale (n=30 papers, d=768 dims). Top-2 eigenvectors of the Gram
-/// matrix give the principal coordinates directly.
+/// Pipeline: L2-normalise each row → centre by mean → power-iterate
+/// on the n×n Gram matrix for top-2 eigenvectors → whiten.
+///
+/// L2-normalisation matters: text embeddings encode meaning as
+/// direction (cosine similarity), so raw PCA on un-normalised
+/// vectors is dominated by length variance — typical symptom is
+/// 29 of 30 papers collapsing to a single dot near origin while
+/// one outlier defines the long axis. Normalising puts everything
+/// on the unit sphere so PCA captures real angular spread.
+///
+/// Whitening matters: the top eigenvalue often eats most of the
+/// variance, leaving axis-2 with sub-pixel spread. Dividing each
+/// projected axis by its std-dev gives a balanced layout.
 fn pca_project_2d(vectors: &[Vec<f32>]) -> Vec<(f32, f32)> {
     let n = vectors.len();
     if n == 0 {
@@ -464,9 +477,23 @@ fn pca_project_2d(vectors: &[Vec<f32>]) -> Vec<(f32, f32)> {
         return vec![(0.0, 0.0); n];
     }
 
+    // L2-normalise every row in-place. After this each vector lives on
+    // the unit hypersphere; cosine similarity = dot product.
+    let normed: Vec<Vec<f32>> = vectors
+        .iter()
+        .map(|v| {
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm < 1e-12 {
+                v.clone()
+            } else {
+                v.iter().map(|x| x / norm).collect()
+            }
+        })
+        .collect();
+
     // Centre each column.
     let mut means = vec![0.0f32; d];
-    for v in vectors {
+    for v in &normed {
         for (j, x) in v.iter().enumerate() {
             means[j] += x;
         }
@@ -474,7 +501,7 @@ fn pca_project_2d(vectors: &[Vec<f32>]) -> Vec<(f32, f32)> {
     for m in &mut means {
         *m /= n as f32;
     }
-    let mut centred: Vec<Vec<f32>> = vectors
+    let mut centred: Vec<Vec<f32>> = normed
         .iter()
         .map(|v| {
             v.iter()
@@ -511,11 +538,28 @@ fn pca_project_2d(vectors: &[Vec<f32>]) -> Vec<(f32, f32)> {
     }
     let pc2 = power_iterate(&deflated, 100, 1e-6);
 
-    // Coordinates: rescale eigenvectors by sqrt(λ) so the spread
-    // reflects component magnitude, then normalise so max |coord| ≈ 1.
-    let s1 = lambda1.max(1e-9).sqrt();
-    let s2 = rayleigh(&deflated, &pc2).max(1e-9).sqrt();
-    let mut coords: Vec<(f32, f32)> = (0..n).map(|i| (pc1[i] * s1, pc2[i] * s2)).collect();
+    // Whiten each projected axis: divide by its std-dev across
+    // points so axis-1 and axis-2 have comparable spread. Without
+    // this the top eigenvalue often dwarfs the second by 10-100x
+    // and the second axis collapses to sub-pixel range.
+    let mut xs: Vec<f32> = pc1.clone();
+    let mut ys: Vec<f32> = pc2.clone();
+    let stddev = |v: &[f32]| -> f32 {
+        let mean: f32 = v.iter().sum::<f32>() / v.len() as f32;
+        let var: f32 = v.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / v.len() as f32;
+        var.sqrt().max(1e-9)
+    };
+    let sx = stddev(&xs);
+    let sy = stddev(&ys);
+    for x in &mut xs {
+        *x /= sx;
+    }
+    for y in &mut ys {
+        *y /= sy;
+    }
+    // Final pass: scale so max |coord| ≈ 1 (the SVG widget assumes
+    // roughly that range).
+    let mut coords: Vec<(f32, f32)> = xs.into_iter().zip(ys).collect();
     let max_abs = coords
         .iter()
         .flat_map(|(x, y)| [x.abs(), y.abs()])
@@ -526,10 +570,9 @@ fn pca_project_2d(vectors: &[Vec<f32>]) -> Vec<(f32, f32)> {
             c.1 /= max_abs;
         }
     }
-    // Touch `centred` so the compiler doesn't optimise it away when we
-    // refactor; the data is the gram input but the variable lifetime
-    // here keeps things easy to debug.
-    let _ = &centred;
+    // Variables `lambda1`, `centred` are intermediate; touch them so
+    // future refactors keep them easy to debug from this site.
+    let _ = lambda1;
     centred.clear();
     coords
 }
