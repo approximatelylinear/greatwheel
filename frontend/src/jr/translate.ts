@@ -158,6 +158,44 @@ export function toJrSpec(widget: Widget): Spec | null {
         };
         return key;
       }
+      case 'EntityCloud': {
+        const rawPoints = Array.isArray(node.points)
+          ? (node.points as Array<Record<string, unknown>>)
+          : [];
+        const points = rawPoints.map((p) => ({
+          id: String(p.id ?? ''),
+          label: String(p.label ?? ''),
+          x: typeof p.x === 'number' ? p.x : 0,
+          y: typeof p.y === 'number' ? p.y : 0,
+          kind: p.kind != null ? String(p.kind) : undefined,
+        }));
+        const highlight =
+          node.highlight && typeof node.highlight === 'object'
+            ? (node.highlight as Record<string, boolean>)
+            : null;
+        // Per-point ActionBindings — the registry's
+        // `emit('point:<id>')` resolves through these to fire
+        // `interact` with the point's id baked in.
+        const on: Record<string, unknown> = {};
+        for (const p of points) {
+          on[`point:${p.id}`] = {
+            action: 'interact',
+            params: {
+              widgetId,
+              surfaceId,
+              buttonId: `point:${p.id}`,
+              action: 'select',
+              data: { pointId: p.id },
+            },
+          };
+        }
+        elements[key] = {
+          type: 'EntityCloud',
+          props: { points, highlight },
+          on,
+        } as UIElement;
+        return key;
+      }
       default: {
         // Unknown — fall back to a Text node showing the raw JSON so
         // we can see what we missed instead of blowing up silently.

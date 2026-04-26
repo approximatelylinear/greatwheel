@@ -1,5 +1,6 @@
 import { defineRegistry } from '@json-render/react';
 import { spikeCatalog } from './catalog';
+import { EntityCloudWidget } from '../widgets/EntityCloudWidget';
 
 function formatCell(v: unknown): string {
   if (v == null) return '—';
@@ -85,6 +86,18 @@ const built = defineRegistry(spikeCatalog, {
           <pre className="a2ui-query-error">{props.error}</pre>
         )}
       </div>
+    ),
+    EntityCloud: ({ props, emit }) => (
+      <EntityCloudWidget
+        points={props.points}
+        highlight={props.highlight ?? null}
+        onPointClick={(id) => {
+          // Per-point ActionBinding registered by the translator;
+          // names match `point:<id>` so each click routes through
+          // the catalog's `interact` action with the paper id.
+          emit(`point:${id}`);
+        }}
+      />
     ),
   },
   actions: {

@@ -679,6 +679,57 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
   font: 11px/1.4 var(--font-mono); white-space: pre-wrap;
 }
 
+/* ─── EntityCloud (literature-assistant scatter) ─────────────── */
+
+.entity-cloud {
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--surface); overflow: hidden;
+  display: flex; flex-direction: column;
+}
+.entity-cloud-empty {
+  padding: 22px 14px; color: var(--muted); font-style: italic;
+  font-size: 12px;
+}
+.entity-cloud-svg {
+  width: 100%; height: auto; display: block;
+  background: var(--bg-soft);
+  cursor: crosshair;
+}
+.cloud-axis {
+  stroke: var(--border); stroke-width: 1; stroke-dasharray: 3 3;
+  opacity: 0.4;
+}
+.cloud-point { cursor: pointer; }
+.cloud-point circle {
+  fill: var(--accent); stroke: var(--bg-soft); stroke-width: 2;
+  transition: r 100ms, fill 100ms;
+}
+.cloud-point .cloud-point-core {
+  fill: white; stroke: none; pointer-events: none;
+}
+.cloud-point:hover > circle:first-child {
+  r: 9;
+  fill: var(--accent-strong);
+}
+.cloud-point.hi > circle:first-child {
+  fill: var(--warm);
+  filter: drop-shadow(0 0 6px var(--warm-soft));
+}
+.cloud-point-author > circle:first-child { fill: #b48cde; }
+.cloud-point-concept > circle:first-child { fill: #7bd38f; }
+.cloud-point-method > circle:first-child { fill: #d6a56e; }
+.cloud-point-dataset > circle:first-child { fill: #6ec3d2; }
+.cloud-tooltip text {
+  fill: var(--fg); font: 11px/1.2 var(--font-ui);
+  pointer-events: none;
+  paint-order: stroke; stroke: var(--bg-soft); stroke-width: 4px;
+}
+.entity-cloud-legend {
+  padding: 6px 14px; border-top: 1px solid var(--border);
+  font: 10.5px/1.3 var(--font-mono); color: var(--muted);
+  letter-spacing: 0.04em;
+}
+
 .debug-toolcall.running { border-color: var(--accent); }
 .debug-toolcall .debug-toolcall-name {
   font-family: var(--font-mono); color: var(--fg); font-size: 11px;

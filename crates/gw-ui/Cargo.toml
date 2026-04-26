@@ -46,3 +46,7 @@ path = "examples/frankenstein_server.rs"
 [[example]]
 name = "data_explorer"
 path = "examples/data_explorer.rs"
+
+[[example]]
+name = "literature_assistant"
+path = "examples/literature_assistant.rs"
