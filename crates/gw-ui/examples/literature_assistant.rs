@@ -200,18 +200,22 @@ impl Plugin for LiteraturePlugin {
 
     fn init(&self, ctx: &mut PluginContext) -> Result<(), PluginError> {
         let http = self.http.clone();
-        ctx.register_host_fn_async("arxiv_search", None, move |_args, kwargs| {
+        ctx.register_host_fn_async("arxiv_search", None, move |args, kwargs| {
             let http = http.clone();
             async move {
-                let query = kwargs
-                    .get("query")
+                // Accept positional or kwarg `query`, same convention
+                // as run_sql in the data explorer.
+                let query = args
+                    .first()
                     .and_then(|v| v.as_str())
+                    .or_else(|| kwargs.get("query").and_then(|v| v.as_str()))
                     .ok_or_else(|| PluginError::HostFunction("query required (string)".into()))?
                     .trim()
                     .to_string();
-                let max_results = kwargs
-                    .get("max_results")
+                let max_results = args
+                    .get(1)
                     .and_then(|v| v.as_u64())
+                    .or_else(|| kwargs.get("max_results").and_then(|v| v.as_u64()))
                     .unwrap_or(30)
                     .min(50) as usize;
                 arxiv_search(&http, &query, max_results)
@@ -221,13 +225,18 @@ impl Plugin for LiteraturePlugin {
         });
 
         let embedder = self.embedder.clone();
-        ctx.register_host_fn_async("embed_papers", None, move |_args, kwargs| {
+        ctx.register_host_fn_async("embed_papers", None, move |args, kwargs| {
             let embedder = embedder.clone();
             async move {
-                let texts = kwargs
-                    .get("texts")
-                    .and_then(|v| v.as_array())
-                    .ok_or_else(|| PluginError::HostFunction("texts required (list[str])".into()))?
+                let texts_value = args
+                    .first()
+                    .or_else(|| kwargs.get("texts"))
+                    .ok_or_else(|| PluginError::HostFunction("texts required (list[str])".into()))?;
+                let texts = texts_value
+                    .as_array()
+                    .ok_or_else(|| {
+                        PluginError::HostFunction("texts must be a list of strings".into())
+                    })?
                     .iter()
                     .map(|v| v.as_str().unwrap_or("").to_string())
                     .collect::<Vec<_>>();
@@ -246,12 +255,16 @@ impl Plugin for LiteraturePlugin {
             }
         });
 
-        ctx.register_host_fn_sync("project_2d", None, move |_args, kwargs| {
-            let raw = kwargs
-                .get("vectors")
-                .and_then(|v| v.as_array())
+        ctx.register_host_fn_sync("project_2d", None, move |args, kwargs| {
+            let raw = args
+                .first()
+                .or_else(|| kwargs.get("vectors"))
                 .ok_or_else(|| {
                     PluginError::HostFunction("vectors required (list[list[float]])".into())
+                })?
+                .as_array()
+                .ok_or_else(|| {
+                    PluginError::HostFunction("vectors must be a list of lists of floats".into())
                 })?;
             let vectors: Vec<Vec<f32>> = raw
                 .iter()
