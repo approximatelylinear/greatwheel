@@ -271,6 +271,42 @@ enum Command {
         max_per_topic: Option<usize>,
     },
 
+    /// Phase B: extract typed entities from already-ingested chunks
+    /// via the LLM, canonicalise across mentions, and write rows to
+    /// `kb_entities` + `kb_chunk_entity_links`. Optionally rebuilds
+    /// the entity link graph and the topic↔entity bridge afterwards.
+    ExtractEntities {
+        /// Limit to chunks belonging to one source (UUID or prefix).
+        /// Without this, scans every chunk in the KB — expensive
+        /// because each chunk costs one LLM call.
+        #[arg(long)]
+        source: Option<String>,
+        /// Cosine threshold for canonicalisation. Mentions whose
+        /// canonical_form embedding cosine ≥ this against an existing
+        /// entity (or in-batch cluster) collapse together.
+        #[arg(long, default_value_t = 0.9)]
+        merge_threshold: f32,
+        /// After persisting, rebuild kb_entity_links and
+        /// kb_topic_entity_links. Off by default so a series of
+        /// per-source extracts don't each pay for a full link rebuild.
+        #[arg(long, default_value_t = false)]
+        rebuild_links: bool,
+    },
+
+    /// Rebuild the entity link graph (kb_entity_links) and the
+    /// topic↔entity bridge (kb_topic_entity_links) from current state.
+    /// Run after a batch of `extract-entities` calls.
+    LinkEntities {
+        #[arg(long, default_value_t = 1)]
+        min_shared: i64,
+        #[arg(long, default_value_t = 0.70)]
+        min_cosine: f32,
+        #[arg(long, default_value_t = 0.10)]
+        min_confidence: f32,
+        #[arg(long)]
+        max_per_entity: Option<usize>,
+    },
+
     /// Spreading-activation discovery from a free-text query.
     /// Picks the nearest topics as seeds, then walks the link graph.
     Explore {
@@ -981,6 +1017,93 @@ async fn main() -> Result<(), KbError> {
             println!("  cooccurrence_pairs = {}", report.cooccurrence_pairs);
             println!("  embedding_pairs    = {}", report.embedding_pairs);
             println!("  edges_written      = {}", report.edges_written);
+        }
+        Command::ExtractEntities {
+            source,
+            merge_threshold,
+            rebuild_links,
+        } => {
+            let stores = stores.as_ref().expect("stores built above");
+            let opts = gw_kb::entities::CanonicalizeOpts {
+                merge_threshold,
+                ..Default::default()
+            };
+            let report = if let Some(source_str) = source {
+                let source_id = gw_kb::source::resolve_source_id(&stores.pg, &source_str).await?;
+                gw_kb::entities::extract_and_persist_entities_for_source(
+                    stores, source_id, &opts,
+                )
+                .await?
+            } else {
+                // No source filter — pull every chunk_id and run
+                // through the chunk-list path. Skips chunks already
+                // covered for that batch (canonicalize_and_persist
+                // dedups against existing kb_entities by cosine).
+                let chunk_ids: Vec<uuid::Uuid> =
+                    sqlx::query_scalar("SELECT chunk_id FROM kb_chunks")
+                        .fetch_all(&stores.pg)
+                        .await?;
+                gw_kb::entities::extract_and_persist_entities_for_chunks(
+                    stores,
+                    &chunk_ids,
+                    &opts,
+                )
+                .await?
+            };
+            println!("extract-entities report:");
+            println!("  mentions_in        = {}", report.mentions_in);
+            println!("  entities_created   = {}", report.entities_created);
+            println!("  entities_updated   = {}", report.entities_updated);
+            println!("  links_created      = {}", report.links_created);
+            if rebuild_links {
+                let er = gw_kb::linking::link_entities(
+                    &stores.pg,
+                    gw_kb::linking::LinkEntitiesOpts::default(),
+                )
+                .await?;
+                let tr = gw_kb::linking::link_topic_entities(
+                    &stores.pg,
+                    gw_kb::linking::LinkTopicEntitiesOpts::default(),
+                )
+                .await?;
+                println!(
+                    "rebuilt links: entity-entity={} topic-entity={}",
+                    er.edges_written, tr.edges_written
+                );
+            }
+        }
+        Command::LinkEntities {
+            min_shared,
+            min_cosine,
+            min_confidence,
+            max_per_entity,
+        } => {
+            let stores = stores.as_ref().expect("stores built above");
+            let er = gw_kb::linking::link_entities(
+                &stores.pg,
+                gw_kb::linking::LinkEntitiesOpts {
+                    min_shared_chunks: min_shared,
+                    min_cosine,
+                    min_confidence,
+                    max_per_entity,
+                },
+            )
+            .await?;
+            let tr = gw_kb::linking::link_topic_entities(
+                &stores.pg,
+                gw_kb::linking::LinkTopicEntitiesOpts {
+                    min_shared_chunks: min_shared,
+                    min_confidence,
+                },
+            )
+            .await?;
+            println!("link-entities report:");
+            println!("  entities_seen        = {}", er.entities_seen);
+            println!("  entity_pairs (cooc)  = {}", er.cooccurrence_pairs);
+            println!("  entity_pairs (embed) = {}", er.embedding_pairs);
+            println!("  entity_edges_written = {}", er.edges_written);
+            println!("  topic-entity pairs   = {}", tr.pairs_considered);
+            println!("  topic-entity edges   = {}", tr.edges_written);
         }
         Command::Explore {
             query,

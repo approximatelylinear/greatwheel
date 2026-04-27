@@ -593,6 +593,113 @@ pub async fn canonicalize_and_persist(
     Ok(report)
 }
 
+// ─── Driver: load chunks, extract, canonicalise ─────────────────────
+//
+// Glue between step 2 (per-chunk LLM extraction) and step 3
+// (cross-chunk canonicalisation + persistence). One LLM call per
+// chunk; sequential rather than parallel because the local Ollama
+// path is single-threaded under the hood and parallel calls would
+// just queue. Failures on individual chunks are logged and skipped
+// — better to ingest 28 of 30 papers' worth of entities than to fail
+// the whole batch on a flaky chunk.
+//
+// Two entry points:
+//   - `extract_and_persist_entities_for_source` — all chunks of one
+//     source. Used by per-paper ingest flows (e.g. literature_assistant
+//     after `arxiv_search` has populated kb_sources).
+//   - `extract_and_persist_entities_for_chunks` — explicit chunk-id
+//     list. Used by the CLI for backfills and by tests.
+
+#[derive(sqlx::FromRow)]
+struct ExtractChunkRow {
+    chunk_id: Uuid,
+    title: String,
+    heading_path: Vec<String>,
+    content: String,
+}
+
+/// Run extraction over every chunk of `source_id`, canonicalise the
+/// results, and persist. Skips chunks that error during extraction.
+pub async fn extract_and_persist_entities_for_source(
+    stores: &KbStores,
+    source_id: Uuid,
+    opts: &CanonicalizeOpts,
+) -> Result<EntityIngestReport, KbError> {
+    let rows: Vec<ExtractChunkRow> = sqlx::query_as(
+        r#"
+        SELECT c.chunk_id, s.title, c.heading_path, c.content
+        FROM kb_chunks c
+        JOIN kb_sources s ON s.source_id = c.source_id
+        WHERE c.source_id = $1
+        ORDER BY c.ordinal
+        "#,
+    )
+    .bind(source_id)
+    .fetch_all(&stores.pg)
+    .await?;
+    extract_and_persist_for_rows(stores, rows, opts).await
+}
+
+/// Run extraction over a specific list of chunk ids. Useful for
+/// backfilling: e.g. "extract entities for the 200 newest chunks".
+pub async fn extract_and_persist_entities_for_chunks(
+    stores: &KbStores,
+    chunk_ids: &[Uuid],
+    opts: &CanonicalizeOpts,
+) -> Result<EntityIngestReport, KbError> {
+    if chunk_ids.is_empty() {
+        return Ok(EntityIngestReport::default());
+    }
+    let rows: Vec<ExtractChunkRow> = sqlx::query_as(
+        r#"
+        SELECT c.chunk_id, s.title, c.heading_path, c.content
+        FROM kb_chunks c
+        JOIN kb_sources s ON s.source_id = c.source_id
+        WHERE c.chunk_id = ANY($1)
+        "#,
+    )
+    .bind(chunk_ids)
+    .fetch_all(&stores.pg)
+    .await?;
+    extract_and_persist_for_rows(stores, rows, opts).await
+}
+
+async fn extract_and_persist_for_rows(
+    stores: &KbStores,
+    rows: Vec<ExtractChunkRow>,
+    opts: &CanonicalizeOpts,
+) -> Result<EntityIngestReport, KbError> {
+    if rows.is_empty() {
+        return Ok(EntityIngestReport::default());
+    }
+    let mut bundles: Vec<ChunkEntities> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let heading_str = row.heading_path.join(" > ");
+        let ctx = ChunkContext {
+            source_title: &row.title,
+            heading_path: &heading_str,
+            content: &row.content,
+        };
+        match extract_entities_for_chunk(&stores.llm, ctx).await {
+            Ok(entities) if !entities.is_empty() => {
+                bundles.push(ChunkEntities {
+                    chunk_id: row.chunk_id,
+                    entities,
+                });
+            }
+            Ok(_) => { /* nothing useful from this chunk */ }
+            Err(e) => {
+                tracing::warn!(
+                    chunk_id = %row.chunk_id,
+                    error = %e,
+                    "entity extraction failed; skipping chunk"
+                );
+            }
+        }
+    }
+    canonicalize_and_persist(stores, &bundles, opts).await
+}
+
 // ─── Internal: clustering scratchpads ───────────────────────────────
 
 #[derive(Debug, Clone)]

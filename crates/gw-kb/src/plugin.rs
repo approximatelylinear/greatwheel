@@ -84,6 +84,8 @@ impl Plugin for KbPlugin {
                 "host_fn:kb_explore".into(),
                 "host_fn:kb_topic".into(),
                 "host_fn:kb_topics".into(),
+                "host_fn:kb_entities".into(),
+                "host_fn:kb_entity".into(),
             ],
             requires: vec![],
             priority: 50,
@@ -261,9 +263,288 @@ impl Plugin for KbPlugin {
             },
         );
 
-        debug!("kb plugin registered 4 host functions");
+        // kb_entities(kind: str | None = None, limit: int = 50) -> list[dict]
+        // List entities, optionally filtered by kind. Used to populate
+        // an entity browser at session start.
+        let stores = Arc::clone(&self.stores);
+        ctx.register_host_fn_async(
+            "kb_entities",
+            Some(KB_READ_CAPABILITY),
+            move |args, kwargs| {
+                let stores = Arc::clone(&stores);
+                async move {
+                    let kind = get_str(&args, &kwargs, 0, "kind");
+                    let limit = get_optional_i64(&args, &kwargs, 1, "limit").unwrap_or(50);
+                    let rows = list_entity_summaries(&stores.pg, kind.as_deref(), limit)
+                        .await
+                        .map_err(|e| PluginError::HostFunction(format!("kb.entities: {e}")))?;
+                    let out: Vec<Value> = rows
+                        .into_iter()
+                        .map(|e| {
+                            json!({
+                                "entity_id": e.entity_id.to_string(),
+                                "label": e.label,
+                                "slug": e.slug,
+                                "kind": e.kind,
+                                "mentions": e.mentions,
+                                "aliases": e.aliases,
+                                "summary": e.summary,
+                                "last_seen": e.last_seen.to_rfc3339(),
+                            })
+                        })
+                        .collect();
+                    Ok(Value::Array(out))
+                }
+            },
+        );
+
+        // kb_entity(slug: str) -> dict | None
+        // Full entity record + linked topics + linked entities + sample
+        // chunks. Returns None if not found. Mirrors kb_topic.
+        let stores = Arc::clone(&self.stores);
+        ctx.register_host_fn_async(
+            "kb_entity",
+            Some(KB_READ_CAPABILITY),
+            move |args, kwargs| {
+                let stores = Arc::clone(&stores);
+                async move {
+                    let slug = get_required_str(&args, &kwargs, 0, "slug")?;
+                    match fetch_entity_detail(&stores.pg, &slug).await {
+                        Ok(Some(detail)) => Ok(detail),
+                        Ok(None) => Ok(Value::Null),
+                        Err(e) => Err(PluginError::HostFunction(format!("kb.entity: {e}"))),
+                    }
+                }
+            },
+        );
+
+        debug!("kb plugin registered 6 host functions");
         Ok(())
     }
+}
+
+// ─── Entity-side query helpers ──────────────────────────────────────
+//
+// Kept module-local to plugin.rs because they exist purely to shape
+// JSON for the host-fn surface. The canonical CRUD lives in
+// `entities.rs`; if any of these grow beyond their current shape,
+// promote them there.
+
+#[derive(Debug, Clone)]
+struct EntitySummary {
+    entity_id: uuid::Uuid,
+    label: String,
+    slug: String,
+    kind: String,
+    mentions: i32,
+    aliases: Vec<String>,
+    summary: Option<String>,
+    last_seen: chrono::DateTime<chrono::Utc>,
+}
+
+async fn list_entity_summaries(
+    pool: &sqlx::PgPool,
+    kind: Option<&str>,
+    limit: i64,
+) -> Result<Vec<EntitySummary>, crate::KbError> {
+    // Two SQL paths because sqlx's query_as doesn't compose cleanly
+    // with optional filters at the type-tuple level. The shape is
+    // identical otherwise.
+    type Row = (
+        uuid::Uuid,
+        String,
+        String,
+        String,
+        i32,
+        Vec<String>,
+        Option<String>,
+        chrono::DateTime<chrono::Utc>,
+    );
+    let rows: Vec<Row> = if let Some(k) = kind {
+        sqlx::query_as(
+            r#"
+            SELECT entity_id, label, slug, kind, mentions, aliases, summary, last_seen
+            FROM kb_entities
+            WHERE kind = $1
+            ORDER BY mentions DESC, last_seen DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(k)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as(
+            r#"
+            SELECT entity_id, label, slug, kind, mentions, aliases, summary, last_seen
+            FROM kb_entities
+            ORDER BY mentions DESC, last_seen DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    };
+    Ok(rows
+        .into_iter()
+        .map(
+            |(entity_id, label, slug, kind, mentions, aliases, summary, last_seen)| {
+                EntitySummary {
+                    entity_id,
+                    label,
+                    slug,
+                    kind,
+                    mentions,
+                    aliases,
+                    summary,
+                    last_seen,
+                }
+            },
+        )
+        .collect())
+}
+
+/// Fetch one entity by slug along with its topic neighbours, entity
+/// neighbours, and a small set of sample-chunk excerpts. Returns
+/// Ok(None) when the slug doesn't resolve.
+async fn fetch_entity_detail(
+    pool: &sqlx::PgPool,
+    slug: &str,
+) -> Result<Option<Value>, crate::KbError> {
+    type EntityHead = (
+        uuid::Uuid,
+        String,
+        String,
+        String,
+        Vec<String>,
+        i32,
+        Option<String>,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+    );
+    let head: Option<EntityHead> = sqlx::query_as(
+        r#"
+        SELECT entity_id, label, slug, kind, aliases, mentions,
+               summary, first_seen, last_seen
+        FROM kb_entities WHERE slug = $1
+        "#,
+    )
+    .bind(slug)
+    .fetch_optional(pool)
+    .await?;
+    let Some((entity_id, label, slug, kind, aliases, mentions, summary, first_seen, last_seen)) =
+        head
+    else {
+        return Ok(None);
+    };
+
+    // Topic neighbours (top-25 by confidence).
+    let topic_rows: Vec<(uuid::Uuid, String, String, i32, f32)> = sqlx::query_as(
+        r#"
+        SELECT t.topic_id, t.label, t.slug, t.chunk_count, l.confidence
+        FROM kb_topic_entity_links l
+        JOIN kb_topics t ON t.topic_id = l.topic_id
+        WHERE l.entity_id = $1
+        ORDER BY l.confidence DESC
+        LIMIT 25
+        "#,
+    )
+    .bind(entity_id)
+    .fetch_all(pool)
+    .await?;
+    let topics_json: Vec<Value> = topic_rows
+        .into_iter()
+        .map(|(tid, tlabel, tslug, tcount, conf)| {
+            json!({
+                "topic_id": tid.to_string(),
+                "label": tlabel,
+                "slug": tslug,
+                "chunk_count": tcount,
+                "confidence": conf,
+            })
+        })
+        .collect();
+
+    // Entity neighbours (symmetric — walk both sides of the CHECK
+    // (entity_id_a < entity_id_b) constraint).
+    let neighbour_rows: Vec<(uuid::Uuid, String, String, String, i32, f32, String)> =
+        sqlx::query_as(
+            r#"
+            SELECT e.entity_id, e.label, e.slug, e.kind, e.mentions, l.confidence, l.relation
+            FROM kb_entity_links l
+            JOIN kb_entities e
+              ON e.entity_id = CASE WHEN l.entity_id_a = $1 THEN l.entity_id_b ELSE l.entity_id_a END
+            WHERE l.entity_id_a = $1 OR l.entity_id_b = $1
+            ORDER BY l.confidence DESC
+            LIMIT 25
+            "#,
+        )
+        .bind(entity_id)
+        .fetch_all(pool)
+        .await?;
+    let neighbours_json: Vec<Value> = neighbour_rows
+        .into_iter()
+        .map(
+            |(eid, elabel, eslug, ekind, ementions, conf, relation)| {
+                json!({
+                    "entity_id": eid.to_string(),
+                    "label": elabel,
+                    "slug": eslug,
+                    "kind": ekind,
+                    "mentions": ementions,
+                    "confidence": conf,
+                    "relation": relation,
+                })
+            },
+        )
+        .collect();
+
+    // Sample chunks: a few short excerpts so the agent / UI can
+    // ground entity claims.
+    let sample_rows: Vec<(uuid::Uuid, uuid::Uuid, String, String)> = sqlx::query_as(
+        r#"
+        SELECT c.chunk_id, c.source_id, s.title, c.content
+        FROM kb_chunk_entity_links l
+        JOIN kb_chunks c  ON c.chunk_id = l.chunk_id
+        JOIN kb_sources s ON s.source_id = c.source_id
+        WHERE l.entity_id = $1
+        ORDER BY c.created_at DESC
+        LIMIT 5
+        "#,
+    )
+    .bind(entity_id)
+    .fetch_all(pool)
+    .await?;
+    let samples_json: Vec<Value> = sample_rows
+        .into_iter()
+        .map(|(cid, sid, stitle, content)| {
+            // Truncate excerpts so the host-fn payload doesn't balloon.
+            let excerpt: String = content.chars().take(280).collect();
+            json!({
+                "chunk_id": cid.to_string(),
+                "source_id": sid.to_string(),
+                "source_title": stitle,
+                "excerpt": excerpt,
+            })
+        })
+        .collect();
+
+    Ok(Some(json!({
+        "entity_id": entity_id.to_string(),
+        "label": label,
+        "slug": slug,
+        "kind": kind,
+        "aliases": aliases,
+        "mentions": mentions,
+        "summary": summary,
+        "first_seen": first_seen.to_rfc3339(),
+        "last_seen": last_seen.to_rfc3339(),
+        "topics": topics_json,
+        "neighbours": neighbours_json,
+        "sample_chunks": samples_json,
+    })))
 }
 
 // ─── Arg-extraction helpers ─────────────────────────────────────────────────
