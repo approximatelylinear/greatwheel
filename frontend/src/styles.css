@@ -88,25 +88,72 @@ html, body, #root {
 
 .app-main {
   display: grid; min-height: 0;
+  /* Three columns: chat | splitter | canvas. The chat column width
+     comes from --chat-w (settable per layout below or by the
+     DragSplitter component); the canvas takes whatever's left. */
+  grid-template-columns: var(--chat-w) 6px minmax(0, 1fr);
 }
 /* Default: chat fills, canvas is a narrow right rail (Frankenstein,
    echo-server, anything with compact canvas content). */
 .app-main-chat-primary,
 .app-main:not(.app-main-canvas-primary) {
-  grid-template-columns: 1fr 380px;
+  --chat-w: calc(100% - 380px - 6px);
 }
 /* Canvas-primary: canvas fills, chat is a narrow left rail. The
    data-explorer demo uses this so the DataTable has room.
    Also reorders so chat sits on the left, canvas on the right. */
 .app-main-canvas-primary {
-  grid-template-columns: 380px 1fr;
+  --chat-w: 380px;
 }
+
+/* Vertical drag splitter sitting between the two panes. Quiet by
+   default, brightens on hover/drag. The wider invisible hit area is
+   a `::before` so the visible bar can stay 1px without making the
+   target finicky to grab. */
+.app-splitter {
+  position: relative;
+  cursor: col-resize;
+  background: transparent;
+  user-select: none;
+  z-index: 2;
+}
+.app-splitter::before {
+  content: "";
+  position: absolute; inset: 0 -3px;
+}
+.app-splitter::after {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0; left: 50%;
+  width: 1px; transform: translateX(-50%);
+  background: var(--border);
+  transition: background-color 120ms ease, width 120ms ease;
+}
+.app-splitter:hover::after,
+.app-splitter.dragging::after {
+  background: var(--accent);
+  width: 2px;
+}
+.app-splitter.dragging {
+  cursor: col-resize;
+}
+/* While dragging, freeze any text-selection / iframe pointer-events
+   on the page so the cursor stays a resize indicator the whole drag. */
+body.app-resizing,
+body.app-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+/* In canvas-primary the chat sits on the left and canvas on the
+   right. The DragSplitter draws the dividing line for both layouts,
+   so neither pane needs its own border-edge — keeping them would
+   stack two lines next to the splitter's. */
 .app-main-canvas-primary .canvas-pane {
-  border-left: 1px solid var(--border);
+  border-left: 0;
   border-right: 0;
 }
 .app-main-canvas-primary .chat-pane {
-  border-right: 1px solid var(--border);
+  border-right: 0;
 }
 
 /* In canvas-primary, the chat is a record of questions / answers
@@ -512,7 +559,7 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
 /* ─── Canvas pane ────────────────────────────────────────────── */
 
 .canvas-pane {
-  border-left: 1px solid var(--border);
+  /* Edge border removed — DragSplitter draws the dividing line. */
   background: var(--bg-soft);
   padding: 24px 18px; overflow-y: auto;
 }

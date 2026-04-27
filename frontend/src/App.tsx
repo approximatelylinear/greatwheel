@@ -8,6 +8,7 @@ import { ChatPane } from './components/ChatPane';
 import { CanvasPane } from './components/CanvasPane';
 import { DebugPane } from './components/DebugPane';
 import { MessageInput } from './components/MessageInput';
+import { DragSplitter } from './components/DragSplitter';
 import { registry } from './jr/registry';
 import type { Widget } from './types';
 import {
@@ -191,6 +192,7 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
           onSuggest={onSend}
           onRepin={onRepin}
         />
+        <DragSplitter storageKey={`app.chatW.${layout}`} />
         <CanvasPane />
       </main>
       {debug && (
