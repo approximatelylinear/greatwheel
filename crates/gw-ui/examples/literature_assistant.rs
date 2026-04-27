@@ -19,7 +19,7 @@
 //! See `docs/design-demo-literature-assistant.md` for design details.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use gw_core::{LoopEvent, Plugin, PluginContext, PluginError, PluginManifest, SessionId};
 use gw_engine::GreatWheelEngine;
@@ -52,6 +52,9 @@ const SYSTEM_PROMPT: &str = r###"You are a literature scout exploring arXiv. The
 Data host functions:
   - arxiv_search(query: str, max_results: int = 30) -> list[{"id", "title", "summary", "authors", "published", "category", "url"}]
       Hits the public arXiv API. Returns up to max_results papers most-relevant to the query.
+      As a side effect, every returned paper is cached server-side keyed by `id` so you can look it up later via get_paper.
+  - get_paper(arxiv_id: str) -> {"id", "title", "summary", "authors", "published", "category", "url"}
+      Reads from the server-side cache populated by arxiv_search. Use this on click drill-downs — it's free (no network), and the IDE-style Python REPL in this harness has NO `data` variable injected, so you must look papers up by id rather than receive them inline.
   - embed_papers(texts: list[str]) -> list[list[float]]
       Returns one vector per text. Wraps the local Ollama embedding endpoint.
   - project_2d(vectors: list[list[float]]) -> list[[float, float]]
@@ -66,8 +69,8 @@ UI host functions (same as the other demos):
 
 The frontend's json-render catalog includes one literature-specific widget type:
 
-  - EntityCloud: payload {"type": "EntityCloud", "points": [{"id", "label", "x", "y", "kind"?, "meta"?: {...}}, ...], "highlight"?: {<id>: true}}.
-    Each point is rendered at its (x, y) position. Click emits an interaction with `data = {"pointId": <id>, "point": <the entire point object you originally emitted, including meta>}` — so you can drill in WITHOUT re-fetching the paper. Always stash everything you'll want on click into `meta` at emission time.
+  - EntityCloud: payload {"type": "EntityCloud", "points": [{"id", "label", "x", "y", "kind"?}, ...], "highlight"?: {<id>: true}}.
+    Each point is rendered at its (x, y) position. Click delivers a `[widget-event] action=select data={"pointId": "<arxiv_id>", "point": {...}}` line into your conversation context — read the `pointId` value out of that text and call `get_paper(<that id>)` to retrieve the full paper.
 
 # Turn 1 — user asks a topic question
 
@@ -103,18 +106,9 @@ for p, (x, y) in zip(papers, coords):
         "x": x,
         "y": y,
         "kind": "paper",
-        # Stash the paper data inline so click handlers don't need
-        # to re-fetch. arXiv's API doesn't support `id:<arxiv_id>`
-        # as a search_query — re-fetch via re-search 400s.
-        "meta": {
-            "title": p["title"],
-            "summary": p["summary"],
-            "authors": p["authors"],
-            "published": p["published"],
-            "category": p["category"],
-            "url": p["url"],
-        },
     })
+# (No meta on points — papers are already cached server-side by
+# arxiv_search; click handlers retrieve them via get_paper(id).)
 
 result = emit_widget(
     session_id=gw_session_id,
@@ -129,26 +123,30 @@ FINAL(f"Plotted {len(points)} arXiv papers on the topic. Click a point to read i
 
 # Turn 2+ — user clicked a point in the cloud
 
-Each click delivers a WidgetInteraction with `data = {"pointId": <arxiv_id>, "point": {...}}`. The full point object — including the `meta` you stashed on emit — round-trips back. Single iteration is fine; no re-fetch needed.
+You'll see a line in your conversation context like:
+
+  [widget-event] action=select data={"pointId": "2504.13684", "point": {...}}
+
+**Read the `pointId` value** out of that text and substitute it as a literal in your code below. There is NO `data` variable in the Python REPL — you must hardcode the arxiv id you saw in the message.
+
+Single iteration is fine; the paper is already cached server-side from the original arxiv_search.
 
 ```python
-# `data` is the click payload; pull the full point from it.
-point = data["point"]
-meta = point.get("meta", {})
-arxiv_id = data["pointId"]
+paper = get_paper("<paste-the-pointId-here>")  # e.g. get_paper("2504.13684")
 
-# Build a rich detail Column from the stashed meta.
-authors = meta.get("authors", [])
+authors = paper.get("authors", [])
 authors_line = ", ".join(authors[:6]) + (" et al." if len(authors) > 6 else "")
+arxiv_id = paper["id"]
+
 detail = {
     "type": "Column",
     "children": [
-        {"type": "Text", "text": meta.get("title", arxiv_id)},
+        {"type": "Text", "text": paper["title"]},
         {"type": "Text", "text": authors_line},
         {"type": "Text",
-         "text": f"arXiv {arxiv_id} · {meta.get('published', '')[:10]} · {meta.get('category', '')}"},
-        {"type": "Text", "text": meta.get("summary", "")},
-        {"type": "Text", "text": meta.get("url", "")},
+         "text": f"arXiv {arxiv_id} · {paper.get('published', '')[:10]} · {paper.get('category', '')}"},
+        {"type": "Text", "text": paper.get("summary", "")},
+        {"type": "Text", "text": paper.get("url", "")},
     ],
 }
 result = emit_widget(
@@ -159,7 +157,7 @@ result = emit_widget(
 )
 pin_below_canvas(widget_id=result["widget_id"])  # AUX slot — the detail sits below the cloud
 
-FINAL(f"Pinned {meta.get('title', arxiv_id)[:60]}…")
+FINAL(f"Pinned {paper['title'][:60]}…")
 ```
 
 # Turn N — user types a follow-up text question
@@ -181,6 +179,12 @@ If the user types something like "show me the most recent ones" or "what cluster
 struct LiteraturePlugin {
     http: Arc<reqwest::Client>,
     embedder: Arc<OllamaClient>,
+    /// Per-session paper cache. Every `arxiv_search` call inserts
+    /// each returned paper keyed by arxiv_id. `get_paper(arxiv_id)`
+    /// reads from here so the agent doesn't need to round-trip a
+    /// huge `meta` blob through click events. Never cleared — at
+    /// our demo scale (≤50 papers per query) the cache stays small.
+    paper_cache: Arc<StdMutex<HashMap<String, serde_json::Value>>>,
 }
 
 impl LiteraturePlugin {
@@ -193,6 +197,7 @@ impl LiteraturePlugin {
                     .expect("reqwest client"),
             ),
             embedder,
+            paper_cache: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 }
@@ -209,6 +214,7 @@ impl Plugin for LiteraturePlugin {
                 "host_fn:literature.arxiv_search".into(),
                 "host_fn:literature.embed_papers".into(),
                 "host_fn:literature.project_2d".into(),
+                "host_fn:literature.get_paper".into(),
             ],
             requires: vec![],
             priority: 0,
@@ -217,8 +223,10 @@ impl Plugin for LiteraturePlugin {
 
     fn init(&self, ctx: &mut PluginContext) -> Result<(), PluginError> {
         let http = self.http.clone();
+        let cache = self.paper_cache.clone();
         ctx.register_host_fn_async("arxiv_search", None, move |args, kwargs| {
             let http = http.clone();
+            let cache = cache.clone();
             async move {
                 // Accept positional or kwarg `query`, same convention
                 // as run_sql in the data explorer.
@@ -235,9 +243,41 @@ impl Plugin for LiteraturePlugin {
                     .or_else(|| kwargs.get("max_results").and_then(|v| v.as_u64()))
                     .unwrap_or(30)
                     .min(50) as usize;
-                arxiv_search(&http, &query, max_results)
+                let result = arxiv_search(&http, &query, max_results)
                     .await
-                    .map_err(|e| PluginError::HostFunction(format!("arxiv_search: {e}")))
+                    .map_err(|e| PluginError::HostFunction(format!("arxiv_search: {e}")))?;
+                // Populate the per-session paper cache so subsequent
+                // get_paper(arxiv_id) calls can pull metadata without
+                // a round trip.
+                if let Value::Array(papers) = &result {
+                    if let Ok(mut cache) = cache.lock() {
+                        for paper in papers {
+                            if let Some(id) = paper.get("id").and_then(|v| v.as_str()) {
+                                cache.insert(id.to_string(), paper.clone());
+                            }
+                        }
+                    }
+                }
+                Ok(result)
+            }
+        });
+
+        let cache = self.paper_cache.clone();
+        ctx.register_host_fn_sync("get_paper", None, move |args, kwargs| {
+            let id = args
+                .first()
+                .and_then(|v| v.as_str())
+                .or_else(|| kwargs.get("arxiv_id").and_then(|v| v.as_str()))
+                .ok_or_else(|| PluginError::HostFunction("arxiv_id required (string)".into()))?
+                .to_string();
+            let cache = cache
+                .lock()
+                .map_err(|_| PluginError::HostFunction("paper cache poisoned".into()))?;
+            match cache.get(&id) {
+                Some(paper) => Ok(paper.clone()),
+                None => Err(PluginError::HostFunction(format!(
+                    "no paper cached for {id}; run arxiv_search first"
+                ))),
             }
         });
 
@@ -767,6 +807,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "arxiv_search".into(),
         "embed_papers".into(),
         "project_2d".into(),
+        "get_paper".into(),
     ];
     let mut repl = ReplAgent::new(external_fns, Box::new(conv_bridge));
     repl.set_variable("gw_session_id", Object::String(session_id.0.to_string()))
