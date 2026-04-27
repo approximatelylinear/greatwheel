@@ -162,6 +162,9 @@ export function toJrSpec(widget: Widget): Spec | null {
         const rawPoints = Array.isArray(node.points)
           ? (node.points as Array<Record<string, unknown>>)
           : [];
+        // Render-side props: only what the SVG widget actually
+        // displays. Extra fields (like `meta`) ride along the wire
+        // for click bindings but the renderer doesn't need them.
         const points = rawPoints.map((p) => ({
           id: String(p.id ?? ''),
           label: String(p.label ?? ''),
@@ -175,17 +178,20 @@ export function toJrSpec(widget: Widget): Spec | null {
             : null;
         // Per-point ActionBindings — the registry's
         // `emit('point:<id>')` resolves through these to fire
-        // `interact` with the point's id baked in.
+        // `interact` with the WHOLE raw point (including any `meta`
+        // the agent attached) baked in. Click handlers can then
+        // build detail widgets without re-fetching.
         const on: Record<string, unknown> = {};
-        for (const p of points) {
-          on[`point:${p.id}`] = {
+        for (const raw of rawPoints) {
+          const id = String(raw.id ?? '');
+          on[`point:${id}`] = {
             action: 'interact',
             params: {
               widgetId,
               surfaceId,
-              buttonId: `point:${p.id}`,
+              buttonId: `point:${id}`,
               action: 'select',
-              data: { pointId: p.id },
+              data: { pointId: id, point: raw },
             },
           };
         }

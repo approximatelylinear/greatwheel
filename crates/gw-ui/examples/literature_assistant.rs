@@ -66,8 +66,8 @@ UI host functions (same as the other demos):
 
 The frontend's json-render catalog includes one literature-specific widget type:
 
-  - EntityCloud: payload {"type": "EntityCloud", "points": [{"id", "label", "x", "y", "kind"?}, ...], "highlight"?: {<id>: true}}.
-    Each point is rendered at its (x, y) position. Click emits an interaction with `data = {"pointId": <id>}` so you can drill in.
+  - EntityCloud: payload {"type": "EntityCloud", "points": [{"id", "label", "x", "y", "kind"?, "meta"?: {...}}, ...], "highlight"?: {<id>: true}}.
+    Each point is rendered at its (x, y) position. Click emits an interaction with `data = {"pointId": <id>, "point": <the entire point object you originally emitted, including meta>}` — so you can drill in WITHOUT re-fetching the paper. Always stash everything you'll want on click into `meta` at emission time.
 
 # Turn 1 — user asks a topic question
 
@@ -103,6 +103,17 @@ for p, (x, y) in zip(papers, coords):
         "x": x,
         "y": y,
         "kind": "paper",
+        # Stash the paper data inline so click handlers don't need
+        # to re-fetch. arXiv's API doesn't support `id:<arxiv_id>`
+        # as a search_query — re-fetch via re-search 400s.
+        "meta": {
+            "title": p["title"],
+            "summary": p["summary"],
+            "authors": p["authors"],
+            "published": p["published"],
+            "category": p["category"],
+            "url": p["url"],
+        },
     })
 
 result = emit_widget(
@@ -118,35 +129,37 @@ FINAL(f"Plotted {len(points)} arXiv papers on the topic. Click a point to read i
 
 # Turn 2+ — user clicked a point in the cloud
 
-Each click delivers a WidgetInteraction with `data = {"pointId": <arxiv_id>}`. Treat it as "show me this paper."
+Each click delivers a WidgetInteraction with `data = {"pointId": <arxiv_id>, "point": {...}}`. The full point object — including the `meta` you stashed on emit — round-trips back. Single iteration is fine; no re-fetch needed.
 
 ```python
-arxiv_id = "<from data.pointId>"
-# Re-search to get the current paper record. (For v1 we don't persist
-# anything between turns; v2 will swap this for kb_topic / kb_entity.)
-hits = arxiv_search(query=f"id:{arxiv_id}", max_results=1)
-paper = hits[0] if hits else None
-if paper is None:
-    FINAL(f"Couldn't refind paper {arxiv_id}.")
-else:
-    # Build a "paper detail" Column with title, authors, published, summary, link.
-    detail = {
-        "type": "Column",
-        "children": [
-            {"type": "Text", "text": paper["title"]},
-            {"type": "Text", "text": ", ".join(paper["authors"][:6]) + (" et al." if len(paper["authors"]) > 6 else "")},
-            {"type": "Text", "text": f"arXiv {paper['id']} · {paper['published'][:10]} · {paper['category']}"},
-            {"type": "Text", "text": paper["summary"]},
-        ],
-    }
-    result = emit_widget(
-        session_id=gw_session_id,
-        kind="a2ui",
-        scope={"kind": "paper", "key": arxiv_id},
-        payload=detail,
-    )
-    pin_below_canvas(widget_id=result["widget_id"])  # AUX slot — the detail sits below the cloud
-    FINAL(f"Pinned {paper['title'][:60]}…")
+# `data` is the click payload; pull the full point from it.
+point = data["point"]
+meta = point.get("meta", {})
+arxiv_id = data["pointId"]
+
+# Build a rich detail Column from the stashed meta.
+authors = meta.get("authors", [])
+authors_line = ", ".join(authors[:6]) + (" et al." if len(authors) > 6 else "")
+detail = {
+    "type": "Column",
+    "children": [
+        {"type": "Text", "text": meta.get("title", arxiv_id)},
+        {"type": "Text", "text": authors_line},
+        {"type": "Text",
+         "text": f"arXiv {arxiv_id} · {meta.get('published', '')[:10]} · {meta.get('category', '')}"},
+        {"type": "Text", "text": meta.get("summary", "")},
+        {"type": "Text", "text": meta.get("url", "")},
+    ],
+}
+result = emit_widget(
+    session_id=gw_session_id,
+    kind="a2ui",
+    scope={"kind": "paper", "key": arxiv_id},
+    payload=detail,
+)
+pin_below_canvas(widget_id=result["widget_id"])  # AUX slot — the detail sits below the cloud
+
+FINAL(f"Pinned {meta.get('title', arxiv_id)[:60]}…")
 ```
 
 # Turn N — user types a follow-up text question

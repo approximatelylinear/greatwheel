@@ -57,18 +57,24 @@ export const spikeCatalog = defineCatalog(schema, {
     EntityCloud: {
       props: z.object({
         points: z.array(
-          z.object({
-            id: z.string(),
-            label: z.string(),
-            x: z.number(),
-            y: z.number(),
-            kind: z.string().optional(),
-          }),
+          z
+            .object({
+              id: z.string(),
+              label: z.string(),
+              x: z.number(),
+              y: z.number(),
+              kind: z.string().optional(),
+              meta: z.record(z.string(), z.unknown()).optional(),
+            })
+            // Allow arbitrary extra fields on each point (the agent
+            // stashes paper metadata so click handlers don't need to
+            // re-fetch).
+            .loose(),
         ),
         highlight: z.record(z.string(), z.boolean()).nullable().optional(),
       }),
       description:
-        '2D scatter plot of typed entities/papers; click a point to drill in',
+        '2D scatter plot of typed entities/papers; click a point to drill in. Each point may carry a `meta` object that round-trips back in the click event.',
     },
   },
   actions: {
