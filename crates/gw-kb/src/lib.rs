@@ -7,6 +7,7 @@ pub mod classify;
 pub mod clean;
 pub mod digest;
 pub mod embed;
+pub mod entities;
 pub mod error;
 pub mod extract;
 pub mod feeds;
