@@ -170,8 +170,84 @@ html, body, #root {
   to   { opacity: 1; transform: translateY(0); }
 }
 
-.message, .widget-inline, .message-followups, .message-typing {
+.message, .widget-inline, .message-followups, .message-typing, .message-log {
   animation: rise-in 240ms cubic-bezier(0.2, 0.8, 0.25, 1) both;
+}
+
+/* Compact log entry — used for short, single-line assistant turns
+   (pin acknowledgements, "summarised X", etc). De-emphasised so they
+   read as a quiet timeline beside the conversation. The leading
+   bracket is a CSS pseudo so the agent doesn't have to format it. */
+.message-log {
+  font: 12.5px/1.45 var(--font-mono);
+  color: var(--muted-strong);
+  letter-spacing: 0.005em;
+  padding: 2px 0 2px 14px;
+  position: relative;
+  margin: -10px 0;
+  /* Tighten vertical rhythm vs. full bubbles so a pin → narration →
+     pin sequence reads as one fluid stream. */
+}
+.message-log::before {
+  content: "›";
+  position: absolute;
+  left: 0;
+  top: 2px;
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.45;
+}
+/* Clickable pin acknowledgement — same compact rhythm as plain log
+   lines but with hover affordance and a tighter 2-column layout
+   (label tag + title). Matches the timeline's `›` glyph at left. */
+button.message-log-repin {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px;
+  align-items: baseline;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  padding: 2px 0 2px 14px;
+  font: inherit;
+  color: inherit;
+  border-radius: var(--radius-sm);
+  transition: background-color 120ms ease, color 120ms ease;
+}
+button.message-log-repin:hover {
+  background: var(--surface-hi);
+  color: var(--fg);
+}
+button.message-log-repin:hover .message-log-prefix {
+  color: var(--accent);
+}
+.message-log-prefix {
+  font: 600 10.5px/1.45 var(--font-ui);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted-strong);
+}
+.message-log-title {
+  font: 13px/1.4 var(--font-serif);
+  color: var(--fg-dim);
+  letter-spacing: -0.005em;
+  /* Single-line ellipsis — full title is in the tooltip. Keeps the
+     timeline visually scannable even with 80-char paper titles. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+button.message-log-repin:hover .message-log-title {
+  color: var(--fg);
+}
+/* Stack: when two log lines come in a row, kill the extra gap so
+   the timeline reads as one block, not two near-empty rows. */
+.message-log + .message-log,
+div:has(> .message-log) + div:has(> .message-log) {
+  margin-top: -12px;
 }
 
 /* Assistant — typographic, no bubble. */
@@ -376,6 +452,29 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
 }
 .a2ui-card.pressed .a2ui-card-sub { color: rgba(255, 255, 255, 0.82); }
 .a2ui-widget.terminal .a2ui-card.pressed { text-decoration: none; }
+
+.a2ui-heading {
+  font-family: var(--font-serif);
+  color: var(--fg);
+  letter-spacing: -0.01em;
+  margin: 0 0 6px;
+  text-transform: none;
+  line-height: 1.25;
+  font-weight: 500;
+}
+.a2ui-heading-l1 { font-size: 19px; }
+.a2ui-heading-l2 { font-size: 16px; }
+.a2ui-heading-l3 { font-size: 14px; font-family: var(--font-ui); font-weight: 600; }
+/* When a Heading is the FIRST child of canvas-aux, it owns the
+   "title of this card" slot — drop the small-caps label inheritance
+   that the picker layout assumes. The thin border underneath echoes
+   the canvas-pane title rule so a paper detail card and the canvas
+   header read as siblings. */
+.canvas-aux .a2ui-column > .a2ui-heading:first-child {
+  padding-bottom: 8px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
 
 .a2ui-link {
   color: var(--accent);

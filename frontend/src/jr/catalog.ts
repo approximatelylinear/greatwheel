@@ -18,6 +18,14 @@ export const spikeCatalog = defineCatalog(schema, {
       props: z.object({ text: z.string() }),
       description: 'Plain text',
     },
+    Heading: {
+      props: z.object({
+        text: z.string(),
+        level: z.number().int().min(1).max(3).optional(),
+      }),
+      description:
+        'Serif title heading. Use as the FIRST child of a detail Column when the content is a real "title-of-thing" (paper title, person name, dataset name) — not a small-caps section label. Level 1 is largest (default).',
+    },
     Link: {
       props: z.object({
         url: z.string(),

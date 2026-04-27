@@ -19,6 +19,13 @@ const built = defineRegistry(spikeCatalog, {
     Column: ({ children }) => <div className="a2ui-column">{children}</div>,
     Row: ({ children }) => <div className="a2ui-row">{children}</div>,
     Text: ({ props }) => <span className="a2ui-text">{props.text}</span>,
+    Heading: ({ props }) => {
+      const lvl = props.level ?? 1;
+      const cls = `a2ui-heading a2ui-heading-l${lvl}`;
+      if (lvl === 2) return <h2 className={cls}>{props.text}</h2>;
+      if (lvl === 3) return <h3 className={cls}>{props.text}</h3>;
+      return <h1 className={cls}>{props.text}</h1>;
+    },
     Link: ({ props }) => (
       <a
         className="a2ui-link"

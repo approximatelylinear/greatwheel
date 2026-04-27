@@ -62,9 +62,10 @@ Data host functions:
       Reads from the server-side cache populated by arxiv_search. Use this on click drill-downs — it's free (no network), and the IDE-style Python REPL in this harness has NO `data` variable injected, so you must look papers up by id rather than receive them inline.
   - embed_papers(texts: list[str], ids: list[str] = None) -> list[list[float]]
       Returns one vector per text. Wraps the local Ollama embedding endpoint. **When called with `ids=[...]` (parallel to texts), the resulting vectors are cached server-side keyed by id — REQUIRED if you want nearest_neighbors to work later.**
-  - project_2d(vectors: list[list[float]], labels: list[int] = None, alpha: float = 0.5) -> list[[float, float]]
+  - project_2d(vectors: list[list[float]], labels: list[int] = None, alpha: float = 0.5, mode: str = "blend") -> list[[float, float]]
       Hand-rolled PCA. Returns one (x, y) per input vector, deterministic, scaled to roughly [-1, 1].
-      If `labels` is supplied (parallel to vectors), each point is pulled `alpha` of the way toward its cluster's 2D mean — so cluster colours land in coherent visual regions instead of scattering across the canvas. Pass labels from cluster_papers; alpha=0.5 is a good default.
+      `mode="blend"` (default): pull each point `alpha` toward its cluster's 2D mean — preserves PCA's within-cluster distance structure but compacts each cluster.
+      `mode="ring"`: decorative layout — cluster centroids come from PCA on per-cluster mean vectors; members evenly distribute on a circle around their centroid (radius scales with √cluster_size). Use this when the cloud is for browsing and faithful within-cluster distances don't matter; reads as a tidy constellation rather than a scatter plot. Within-cluster order is preserved, so the highest-relevance paper in each cluster lands near 12 o'clock.
   - nearest_neighbors(arxiv_id: str, k: int = 5) -> list[paper + {"similarity": float}]
       Top-k cosine-similar papers to the focal paper. Reads from the vector cache populated by embed_papers(ids=...). Each result is the full paper dict with an extra `similarity` field in [-1, 1].
   - fetch_paper_text(arxiv_id: str, max_chars: int = 60000) -> {"id", "text", "char_count", "truncated", "source"}
@@ -101,7 +102,7 @@ vectors = embed_papers(texts, ids=ids)
 #    and unsupervised PCA disagree about where clusters live —
 #    passing labels into project_2d reconciles them).
 labels = cluster_papers(vectors, k=6)
-coords = project_2d(vectors, labels=labels)
+coords = project_2d(vectors, labels=labels, mode="ring")
 
 # Print 2-3 sample titles per cluster so iter 2's LLM can read them
 # and pick a short name per cluster.
@@ -125,7 +126,7 @@ texts = [f"{p['title']}. {p['summary'][:400]}" for p in papers]
 ids = [p["id"] for p in papers]
 vectors = embed_papers(texts, ids=ids)
 labels = cluster_papers(vectors, k=6)
-coords = project_2d(vectors, labels=labels)
+coords = project_2d(vectors, labels=labels, mode="ring")
 
 # YOUR NAMES — fill in based on the CLUSTER_N print blocks from iter 1.
 # 2-4 words each, lowercase, the kind of label that'd appear on a
@@ -252,7 +253,10 @@ followups = {
 detail = {
     "type": "Column",
     "children": [
-        {"type": "Text", "text": paper["title"]},
+        # Heading (not Text) for the title — gets a serif title style
+        # in the canvas-aux slot instead of inheriting the small-caps
+        # picker-label cascade. Always the FIRST child.
+        {"type": "Heading", "text": paper["title"]},
         {"type": "Text", "text": authors_line},
         {"type": "Text",
          "text": f"arXiv {arxiv_id} · {paper.get('published', '')[:10]} · {paper.get('category', '')}"},
@@ -278,7 +282,9 @@ emit_widget(
     payload=followups,
 )
 
-FINAL(f"Pinned {paper['title'][:60]}… · {len(neighbors)} neighbors listed below.")
+# Frontend parses this prefix to render the log line as a clickable
+# re-pin button. Keep the "arxiv:" tag literal — that's the marker.
+FINAL(f"Pinned · arxiv:{arxiv_id} · {paper['title']}")
 ```
 
 # Turn N — user types a follow-up text question
@@ -590,14 +596,6 @@ impl Plugin for LiteraturePlugin {
                         .unwrap_or_default()
                 })
                 .collect();
-            let mut coords = pca_project_2d(&vectors);
-
-            // Optional cluster-aware blending: pull each point a fraction `alpha`
-            // of the way toward its cluster's 2D mean. Without this, semantic
-            // k-means in 1024-d space and unsupervised PCA disagree about where
-            // clusters live, so colours scatter across the canvas. Default
-            // alpha=0.5 keeps PCA's within-cluster structure but compacts each
-            // cluster into a recognisable visual blob.
             let labels: Option<Vec<usize>> = kwargs.get("labels").and_then(|v| v.as_array()).map(
                 |arr| {
                     arr.iter()
@@ -610,27 +608,49 @@ impl Plugin for LiteraturePlugin {
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.5)
                 .clamp(0.0, 1.0) as f32;
-            if let Some(labels) = labels {
-                if labels.len() == coords.len() && alpha > 0.0 {
-                    let mut sums: std::collections::HashMap<usize, (f32, f32, usize)> =
-                        std::collections::HashMap::new();
-                    for (&c, &(x, y)) in labels.iter().zip(coords.iter()) {
-                        let entry = sums.entry(c).or_insert((0.0, 0.0, 0));
-                        entry.0 += x;
-                        entry.1 += y;
-                        entry.2 += 1;
-                    }
-                    let centroids: std::collections::HashMap<usize, (f32, f32)> = sums
-                        .into_iter()
-                        .map(|(c, (sx, sy, n))| {
-                            let n = n.max(1) as f32;
-                            (c, (sx / n, sy / n))
-                        })
-                        .collect();
-                    for (i, (x, y)) in coords.iter_mut().enumerate() {
-                        if let Some(&(cx, cy)) = centroids.get(&labels[i]) {
-                            *x = (1.0 - alpha) * *x + alpha * cx;
-                            *y = (1.0 - alpha) * *y + alpha * cy;
+            // Layout mode: "blend" (default) preserves geometry —
+            // PCA + pull-toward-cluster-mean. "ring" is decorative —
+            // cluster centroids come from PCA on per-cluster mean
+            // vectors, then members evenly distribute on a circle
+            // around their centroid. Use ring when the cloud is for
+            // browsing and faithful within-cluster distance doesn't
+            // matter.
+            let mode = kwargs
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("blend")
+                .to_string();
+
+            let mut coords = if mode == "ring" {
+                cluster_ring_layout(&vectors, labels.as_deref())
+            } else {
+                pca_project_2d(&vectors)
+            };
+
+            // Cluster-aware blending only applies in "blend" mode.
+            if mode != "ring" {
+                if let Some(labels) = labels.as_ref() {
+                    if labels.len() == coords.len() && alpha > 0.0 {
+                        let mut sums: std::collections::HashMap<usize, (f32, f32, usize)> =
+                            std::collections::HashMap::new();
+                        for (&c, &(x, y)) in labels.iter().zip(coords.iter()) {
+                            let entry = sums.entry(c).or_insert((0.0, 0.0, 0));
+                            entry.0 += x;
+                            entry.1 += y;
+                            entry.2 += 1;
+                        }
+                        let centroids: std::collections::HashMap<usize, (f32, f32)> = sums
+                            .into_iter()
+                            .map(|(c, (sx, sy, n))| {
+                                let n = n.max(1) as f32;
+                                (c, (sx / n, sy / n))
+                            })
+                            .collect();
+                        for (i, (x, y)) in coords.iter_mut().enumerate() {
+                            if let Some(&(cx, cy)) = centroids.get(&labels[i]) {
+                                *x = (1.0 - alpha) * *x + alpha * cx;
+                                *y = (1.0 - alpha) * *y + alpha * cy;
+                            }
                         }
                     }
                 }
@@ -1205,6 +1225,141 @@ fn percent_encode_query(s: &str) -> String {
 /// Whitening matters: the top eigenvalue often eats most of the
 /// variance, leaving axis-2 with sub-pixel spread. Dividing each
 /// projected axis by its std-dev gives a balanced layout.
+/// Decorative cluster-ring layout. Each cluster's mean vector goes
+/// through PCA to get a 2D centroid, then members distribute evenly on
+/// a circle around that centroid. Sacrifices within-cluster distance
+/// fidelity for visual cleanliness — useful when the cloud is for
+/// browsing and the actual within-cluster geometry doesn't matter.
+///
+/// Ring radius scales with √cluster_size so a 12-paper cluster reads
+/// visibly larger than a 3-paper one without the ring eating its
+/// neighbours. Within-cluster ordering is preserved (12 o'clock = first
+/// member); for arxiv_search results this means the highest-relevance
+/// paper in each cluster lands at the top of its ring.
+fn cluster_ring_layout(vectors: &[Vec<f32>], labels: Option<&[usize]>) -> Vec<(f32, f32)> {
+    let n = vectors.len();
+    let Some(labels) = labels else {
+        return pca_project_2d(vectors);
+    };
+    if labels.len() != n || n == 0 {
+        return pca_project_2d(vectors);
+    }
+    let dim = vectors.first().map(Vec::len).unwrap_or(0);
+    let k = labels.iter().copied().max().map(|m| m + 1).unwrap_or(0);
+    if k == 0 || dim == 0 {
+        return pca_project_2d(vectors);
+    }
+
+    // Per-cluster mean vector (in the original embedding space).
+    let mut means = vec![vec![0.0f32; dim]; k];
+    let mut counts = vec![0usize; k];
+    for (i, v) in vectors.iter().enumerate() {
+        let c = labels[i];
+        if v.len() == dim {
+            for (j, x) in v.iter().enumerate() {
+                means[c][j] += x;
+            }
+        }
+        counts[c] += 1;
+    }
+    for (c, m) in means.iter_mut().enumerate() {
+        if counts[c] > 0 {
+            for x in m.iter_mut() {
+                *x /= counts[c] as f32;
+            }
+        }
+    }
+
+    // PCA-place centroids in 2D. With small k (typically 6) PCA on
+    // means is cheap and gives a sensible spread that mirrors topical
+    // similarity between clusters.
+    let mut cluster_centers = pca_project_2d(&means);
+
+    // Per-cluster ring radius (also used by the repulsion pass below
+    // so the min-separation honours the actual rendered rings).
+    let radii: Vec<f32> = (0..k).map(|c| ring_radius(counts[c])).collect();
+
+    // Pairwise repulsion — when two cluster means are topical
+    // neighbours, PCA puts them close enough that their rings stack
+    // visually. Iterate up to ~80 passes pushing any pair closer than
+    // `radius_i + radius_j + padding` apart along their connecting
+    // axis. Converges fast (typically 5-15 passes) for k=6.
+    let padding = 0.08;
+    for _ in 0..80 {
+        let mut moved = false;
+        for i in 0..cluster_centers.len() {
+            for j in (i + 1)..cluster_centers.len() {
+                let dx = cluster_centers[j].0 - cluster_centers[i].0;
+                let dy = cluster_centers[j].1 - cluster_centers[i].1;
+                let dist = (dx * dx + dy * dy).sqrt();
+                let min_dist = radii[i] + radii[j] + padding;
+                if dist < min_dist {
+                    // Pick a push direction: use the connecting axis
+                    // when it exists, otherwise nudge along x so two
+                    // exactly-coincident centers separate at all.
+                    let (nx, ny) = if dist > 1e-6 {
+                        (dx / dist, dy / dist)
+                    } else {
+                        let theta = (i + j) as f32 * 1.7;
+                        (theta.cos(), theta.sin())
+                    };
+                    let half_push = (min_dist - dist.max(1e-6)) * 0.5 + 1e-4;
+                    cluster_centers[i].0 -= nx * half_push;
+                    cluster_centers[i].1 -= ny * half_push;
+                    cluster_centers[j].0 += nx * half_push;
+                    cluster_centers[j].1 += ny * half_push;
+                    moved = true;
+                }
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+
+    let mut indices_by_cluster: Vec<Vec<usize>> = vec![Vec::new(); k];
+    for (i, &c) in labels.iter().enumerate() {
+        indices_by_cluster[c].push(i);
+    }
+
+    let mut coords = vec![(0.0f32, 0.0f32); n];
+    for (c, indices) in indices_by_cluster.iter().enumerate() {
+        let center = cluster_centers.get(c).copied().unwrap_or((0.0, 0.0));
+        let m = indices.len();
+        if m == 0 {
+            continue;
+        }
+        if m == 1 {
+            coords[indices[0]] = center;
+            continue;
+        }
+        let radius = radii[c];
+        // Offset start angle by cluster id so adjacent clusters don't
+        // all have a member at 12 o'clock — a small visual flourish.
+        let phase = (c as f32) * 0.37;
+        for (k_idx, &point_idx) in indices.iter().enumerate() {
+            let angle =
+                phase + (k_idx as f32 / m as f32) * std::f32::consts::TAU;
+            coords[point_idx] = (
+                center.0 + radius * angle.cos(),
+                center.1 + radius * angle.sin(),
+            );
+        }
+    }
+    coords
+}
+
+/// Visible ring radius for a cluster of `m` papers. Singletons get a
+/// zero-radius ring (just the centroid). Sqrt scaling keeps small
+/// clusters tight and big clusters legible without exploding.
+fn ring_radius(m: usize) -> f32 {
+    if m <= 1 {
+        0.0
+    } else {
+        0.10 + (m as f32).sqrt() * 0.045
+    }
+}
+
 fn pca_project_2d(vectors: &[Vec<f32>]) -> Vec<(f32, f32)> {
     let n = vectors.len();
     if n == 0 {

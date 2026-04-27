@@ -63,6 +63,16 @@ export function toJrSpec(widget: Widget): Spec | null {
         };
         return key;
       }
+      case 'Heading': {
+        elements[key] = {
+          type: 'Heading',
+          props: {
+            text: String(node.text ?? ''),
+            level: typeof node.level === 'number' ? node.level : 1,
+          },
+        };
+        return key;
+      }
       case 'Button': {
         const id = String(node.id ?? key);
         elements[key] = {

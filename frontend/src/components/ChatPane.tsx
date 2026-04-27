@@ -11,6 +11,10 @@ interface Props {
   running: boolean;
   messageFollowUps: Record<string, string[]>;
   onSuggest: (content: string) => void;
+  /** Re-pin a paper by replaying the EntityCloud's point-click event.
+   *  Called from a log-line click when the message matches the
+   *  `Pinned · arxiv:<id> · <title>` shape. */
+  onRepin: (arxivId: string) => void;
 }
 
 interface Welcome {
@@ -35,6 +39,7 @@ export function ChatPane({
   running,
   messageFollowUps,
   onSuggest,
+  onRepin,
 }: Props) {
   // Widget records, order, and pinned set now live in the json-render
   // StateStore (populated by STATE_SNAPSHOT + STATE_DELTA). Components
@@ -62,34 +67,64 @@ export function ChatPane({
     <div className="chat-pane">
       {isEmpty && <EmptyState welcome={welcome} onSuggest={onSuggest} />}
       <div className="messages">
-        {messages.map((m) => (
-          <div key={m.id}>
-            <div className={`message message-${m.role}`}>
-              <div className="message-role">{m.role}</div>
-              <div className="message-content">
-                {m.role === 'assistant' ? (
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    rehypePlugins={[rehypeRaw]}
-                  >
-                    {pullQuote(normaliseNewlines(m.content))}
-                  </ReactMarkdown>
-                ) : (
-                  m.content
-                )}
-              </div>
+        {messages.map((m) => {
+          const followUps = messageFollowUps[m.id] ?? [];
+          // A "log line" is a short assistant turn with no markdown
+          // structure (no headers / lists / code) and no anchored
+          // follow-up widgets. Pin acknowledgements like
+          // "Pinned X · 5 neighbors listed below." land here and get
+          // rendered as a quiet timeline entry instead of a full
+          // bubble — so a long click-drilldown session stays readable.
+          const isAssistantLogLine =
+            m.role === 'assistant' &&
+            followUps.length === 0 &&
+            isShortPlainText(m.content);
+          const repin = isAssistantLogLine
+            ? parseRepinLogLine(m.content)
+            : null;
+          return (
+            <div key={m.id}>
+              {isAssistantLogLine && repin ? (
+                <button
+                  type="button"
+                  className="message-log message-log-repin"
+                  onClick={() => onRepin(repin.arxivId)}
+                  title={`Re-pin ${repin.title}`}
+                >
+                  <span className="message-log-prefix">Pinned</span>
+                  <span className="message-log-title">{repin.title}</span>
+                </button>
+              ) : isAssistantLogLine ? (
+                <div className="message-log">{m.content.trim()}</div>
+              ) : (
+                <div className={`message message-${m.role}`}>
+                  <div className="message-role">{m.role}</div>
+                  <div className="message-content">
+                    {m.role === 'assistant' ? (
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        rehypePlugins={[rehypeRaw]}
+                      >
+                        {pullQuote(normaliseNewlines(m.content))}
+                      </ReactMarkdown>
+                    ) : (
+                      m.content
+                    )}
+                  </div>
+                </div>
+              )}
+              {m.role === 'assistant' && followUps.length > 0 && (
+                <div className="message-followups">
+                  {followUps.map((wid) => {
+                    const w = widgets[wid];
+                    if (!w) return null;
+                    return <WidgetRenderer key={wid} widget={w} />;
+                  })}
+                </div>
+              )}
             </div>
-            {m.role === 'assistant' && (messageFollowUps[m.id]?.length ?? 0) > 0 && (
-              <div className="message-followups">
-                {messageFollowUps[m.id]!.map((wid) => {
-                  const w = widgets[wid];
-                  if (!w) return null;
-                  return <WidgetRenderer key={wid} widget={w} />;
-                })}
-              </div>
-            )}
-          </div>
-        ))}
+          );
+        })}
         {showTyping && <TypingBubble />}
         {inlineIds.map((id) => {
           const w = widgets[id];
@@ -107,6 +142,29 @@ export function ChatPane({
 
 function normaliseNewlines(text: string): string {
   return text.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+}
+
+/** Parse the literature_assistant pin acknowledgement convention,
+ *  `Pinned · arxiv:<id> · <title>`. Returns null for log lines that
+ *  don't fit (so non-pin one-liners stay non-clickable). */
+function parseRepinLogLine(
+  text: string,
+): { arxivId: string; title: string } | null {
+  const m = text.trim().match(/^Pinned\s*·\s*arxiv:(\S+)\s*·\s*(.+)$/i);
+  if (!m) return null;
+  return { arxivId: m[1]!, title: m[2]!.trim() };
+}
+
+/** True when the message is short and contains no markdown structure
+ *  (heading, list, code fence, blockquote). Used to demote pin
+ *  acknowledgements into a compact log-line style. */
+function isShortPlainText(text: string): boolean {
+  const t = text.trim();
+  if (t.length === 0 || t.length > 200) return false;
+  if (t.includes('\n')) return false;
+  if (/^(#|>|\*\s|-\s|\d+\.\s|```)/.test(t)) return false;
+  if (t.includes('```')) return false;
+  return true;
 }
 
 /**
