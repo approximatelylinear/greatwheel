@@ -38,7 +38,11 @@ use uuid::Uuid;
 
 const OLLAMA_URL: &str = "http://localhost:11434";
 const OLLAMA_MODEL: &str = "qwen3.5:9b";
-const EMBEDDING_MODEL: &str = "nomic-embed-text-v1.5";
+/// Ollama's tag for nomic-embed-text v1.5 is unversioned (just
+/// `nomic-embed-text`). Override with `LITERATURE_EMBED_MODEL=...`
+/// to use a different bundled embedder (e.g. `bge-m3` or
+/// `mxbai-embed-large`).
+const DEFAULT_EMBEDDING_MODEL: &str = "nomic-embed-text";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4";
 
 const SYSTEM_PROMPT: &str = r###"You are a literature scout exploring arXiv. The user asks about a research topic; you search arXiv, embed the abstracts, project them to 2D, and emit an EntityCloud widget so the user can browse the result spatially. Click a point to inspect a paper.
@@ -247,6 +251,24 @@ impl Plugin for LiteraturePlugin {
                     .embed(&texts)
                     .await
                     .map_err(|e| PluginError::HostFunction(format!("embed: {e}")))?;
+                // gw-llm's embed() falls back to zero-vectors on
+                // per-doc failure (designed for resilient batch
+                // indexing). For the literature demo that's
+                // catastrophic — all-zero input collapses PCA to
+                // origin — so surface a hard error if every vector
+                // came back zero. Most likely cause: embedding model
+                // not pulled in Ollama. The startup banner prints
+                // the active model name to make diagnosis quick.
+                let all_zero = !vectors.is_empty()
+                    && vectors
+                        .iter()
+                        .all(|v| v.iter().all(|&x| x.abs() < 1e-9));
+                if all_zero {
+                    return Err(PluginError::HostFunction(
+                        "embed_papers: every vector is zero — embedding model probably not pulled. Try `ollama pull nomic-embed-text` (or set LITERATURE_EMBED_MODEL to a model you have)."
+                            .into(),
+                    ));
+                }
                 let json_vectors: Vec<Value> = vectors
                     .into_iter()
                     .map(|v| Value::Array(v.into_iter().map(num).collect()))
@@ -652,15 +674,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    // Embedder: always go via Ollama (nomic-embed-text-v1.5), because
-    // OpenAI text-embedding-3-small produces 1536-dim vectors which
-    // would slow PCA down for no demo benefit. The chat LLM can still
-    // be OpenAI if OPENAI_API_KEY is set.
+    // Embedder: always go via Ollama. The chat LLM can still be
+    // OpenAI if OPENAI_API_KEY is set.
+    let embedding_model =
+        std::env::var("LITERATURE_EMBED_MODEL").unwrap_or_else(|_| DEFAULT_EMBEDDING_MODEL.into());
+    println!("embed model: {embedding_model}");
     let embedder = Arc::new(OllamaClient::new(
         OLLAMA_URL.into(),
         OLLAMA_URL.into(),
         OLLAMA_MODEL.into(),
-        EMBEDDING_MODEL.into(),
+        embedding_model.clone(),
     ));
 
     let (chat_client, model_label) = if let Ok(key) = std::env::var("OPENAI_API_KEY") {
@@ -672,7 +695,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             OLLAMA_URL.into(),
             OLLAMA_URL.into(),
             OLLAMA_MODEL.into(),
-            EMBEDDING_MODEL.into(),
+            embedding_model.clone(),
         );
         (ollama, format!("ollama:{OLLAMA_MODEL}"))
     };
