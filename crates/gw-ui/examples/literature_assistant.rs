@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use gw_core::{LoopEvent, Plugin, PluginContext, PluginError, PluginManifest, SessionId};
 use gw_engine::GreatWheelEngine;
+use gw_kb::ingest::{ingest_inline, KbStores};
 use gw_llm::OllamaClient;
 use gw_loop::bridge::{new_ask_handle, ConversationBridge};
 use gw_loop::{ConversationLoop, LoopConfig, OllamaLlmClient, SnapshotPolicy};
@@ -70,6 +71,8 @@ Data host functions:
       Top-k cosine-similar papers to the focal paper. Reads from the vector cache populated by embed_papers(ids=...). Each result is the full paper dict with an extra `similarity` field in [-1, 1].
   - fetch_paper_text(arxiv_id: str, max_chars: int = 60000) -> {"id", "text", "char_count", "truncated", "source"}
       Fetches the FULL paper body from ar5iv (arXiv's LaTeX→HTML projection) and returns it as plain text. Use this when the user asks a grounded question that requires more than the abstract — e.g. "what method does X use", "what are the actual results", "compare X and Y in detail". Cached per id, so repeat calls are free. `truncated=True` means the paper is longer than max_chars and got cut at the end; bump max_chars (≤200000) or grep for the section you care about. Errors with a clear message if ar5iv has no HTML rendering for that paper (rare but possible — older or heavily LaTeX-customised papers).
+  - kb_paper_count() -> {"configured": bool, "sources": int}
+      Returns the size of the persistent gw-kb corpus (papers ingested across all past sessions). Every successful `arxiv_search` adds its results to the KB as a side effect, so this number grows with use. Mention it in your FINAL on the first turn ("…across N papers in your library") when `configured=True`. If `configured=False` the KB isn't wired up; just omit the line.
 
 UI host functions (same as the other demos):
   - emit_widget(session_id, kind, payload, multi_use=False, follow_up=False, scope=None) -> {"widget_id"}
@@ -324,6 +327,12 @@ struct LiteraturePlugin {
     /// the agent can ask multiple grounded questions about the same
     /// paper without re-fetching.
     text_cache: Arc<StdMutex<HashMap<String, String>>>,
+    /// Optional gw-kb stores. When present, every successful
+    /// `arxiv_search` ingests the discovered papers as kb_sources +
+    /// kb_chunks so the corpus persists across sessions. None when
+    /// `DATABASE_URL` etc. aren't configured — demo still runs without
+    /// KB, just stateless.
+    kb: Option<Arc<KbStores>>,
 }
 
 impl LiteraturePlugin {
@@ -339,7 +348,13 @@ impl LiteraturePlugin {
             paper_cache: Arc::new(StdMutex::new(HashMap::new())),
             vector_cache: Arc::new(StdMutex::new(HashMap::new())),
             text_cache: Arc::new(StdMutex::new(HashMap::new())),
+            kb: None,
         }
+    }
+
+    fn with_kb(mut self, kb: Arc<KbStores>) -> Self {
+        self.kb = Some(kb);
+        self
     }
 }
 
@@ -359,6 +374,7 @@ impl Plugin for LiteraturePlugin {
                 "host_fn:literature.nearest_neighbors".into(),
                 "host_fn:literature.cluster_papers".into(),
                 "host_fn:literature.fetch_paper_text".into(),
+                "host_fn:literature.kb_paper_count".into(),
             ],
             requires: vec![],
             priority: 0,
@@ -368,9 +384,11 @@ impl Plugin for LiteraturePlugin {
     fn init(&self, ctx: &mut PluginContext) -> Result<(), PluginError> {
         let http = self.http.clone();
         let cache = self.paper_cache.clone();
+        let kb = self.kb.clone();
         ctx.register_host_fn_async("arxiv_search", None, move |args, kwargs| {
             let http = http.clone();
             let cache = cache.clone();
+            let kb = kb.clone();
             async move {
                 // Accept positional or kwarg `query`, same convention
                 // as run_sql in the data explorer.
@@ -402,6 +420,79 @@ impl Plugin for LiteraturePlugin {
                         }
                     }
                 }
+
+                // Best-effort gw-kb ingest. Each paper's title +
+                // abstract becomes a kb_source / kb_chunk so the
+                // corpus persists across sessions; later phases will
+                // graduate the cloud to render from the KB instead of
+                // re-fetching arXiv. Failures are logged but never
+                // bubble up — the demo must keep working without the
+                // KB. Fire each ingest sequentially: arXiv returns ≤50
+                // papers per query and ingest_inline is fast enough
+                // (no HTTP fetch — text is in hand).
+                if let (Some(kb), Value::Array(papers)) = (kb.as_ref(), &result) {
+                    let mut new_count = 0usize;
+                    let mut existing_count = 0usize;
+                    let mut failed = 0usize;
+                    for paper in papers {
+                        let id = paper
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        if id.is_empty() {
+                            continue;
+                        }
+                        let title = paper
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let summary = paper
+                            .get("summary")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if summary.trim().is_empty() {
+                            continue;
+                        }
+                        // Canonical arXiv URL — `ingest_inline`'s
+                        // upsert_source dedups by URL, so re-running
+                        // the same search is a no-op (just bumps
+                        // last_seen).
+                        let url = format!("https://arxiv.org/abs/{id}");
+                        // Frontmatter lets `ingest_inline` parse the
+                        // title cleanly; the abstract becomes the body.
+                        let body = format!("---\ntitle: {title}\n---\n\n{summary}\n");
+                        let metadata = json!({
+                            "arxiv_id": id,
+                            "category": paper.get("category").cloned().unwrap_or(Value::Null),
+                            "published": paper.get("published").cloned().unwrap_or(Value::Null),
+                            "authors": paper.get("authors").cloned().unwrap_or(Value::Null),
+                        });
+                        match ingest_inline(kb, &url, &body, Some(metadata)).await {
+                            Ok(report) => {
+                                use gw_kb::source::UpsertOutcome;
+                                match report.outcome {
+                                    UpsertOutcome::Inserted => new_count += 1,
+                                    UpsertOutcome::Updated | UpsertOutcome::Unchanged => {
+                                        existing_count += 1
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                failed += 1;
+                                tracing::warn!(arxiv_id = id, error = %e, "kb ingest failed");
+                            }
+                        }
+                    }
+                    tracing::info!(
+                        new = new_count,
+                        existing = existing_count,
+                        failed,
+                        "kb ingest summary"
+                    );
+                }
+
                 Ok(result)
             }
         });
@@ -735,6 +826,32 @@ impl Plugin for LiteraturePlugin {
                     "truncated": truncated,
                     "source": "ar5iv",
                 }))
+            }
+        });
+
+        // kb_paper_count() -> {"sources": int, "configured": bool}
+        // Quick readout of the persistent KB's paper count. The agent
+        // calls this in its FINAL so the user can see the corpus
+        // growing across sessions. When KB isn't configured, returns
+        // {"configured": false} and the agent can omit the line.
+        let kb_count = self.kb.clone();
+        ctx.register_host_fn_async("kb_paper_count", None, move |_args, _kwargs| {
+            let kb = kb_count.clone();
+            async move {
+                let Some(kb) = kb.as_ref() else {
+                    return Ok(json!({ "configured": false, "sources": 0 }));
+                };
+                let row: Result<(i64,), _> =
+                    sqlx::query_as("SELECT COUNT(*)::bigint FROM kb_sources")
+                        .fetch_one(&kb.pg)
+                        .await;
+                match row {
+                    Ok((n,)) => Ok(json!({ "configured": true, "sources": n })),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "kb_paper_count query failed");
+                        Ok(json!({ "configured": true, "sources": 0, "error": e.to_string() }))
+                    }
+                }
             }
         });
 
@@ -1191,6 +1308,62 @@ fn html_to_plaintext(html: &str) -> String {
     collapsed.trim().to_string()
 }
 
+/// Build the gw-kb store bundle from environment, returning Ok(None)
+/// when the user hasn't configured a database (so the demo can keep
+/// running stateless). Defaults match the `gw_kb` CLI: lance under
+/// `data/kb-lancedb`, tantivy under `data/kb-tantivy`, embedding model
+/// `nomic-ai/nomic-embed-text-v1.5` (768-dim).
+async fn build_kb_stores() -> Result<Option<KbStores>, Box<dyn std::error::Error>> {
+    use gw_kb::embed::Embedder;
+    use gw_kb::index::{KbLanceStore, KbTantivyStore};
+    use sqlx::postgres::PgPoolOptions;
+
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        return Ok(None);
+    };
+    let lance_path =
+        std::env::var("KB_LANCE_PATH").unwrap_or_else(|_| "data/kb-lancedb".into());
+    let tantivy_path =
+        std::env::var("KB_TANTIVY_PATH").unwrap_or_else(|_| "data/kb-tantivy".into());
+    let embedding_model = std::env::var("KB_EMBEDDING_MODEL")
+        .unwrap_or_else(|_| "nomic-ai/nomic-embed-text-v1.5".into());
+    let embedding_dim: i32 = std::env::var("KB_EMBEDDING_DIM")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(768);
+    let ollama_url = std::env::var("KB_OLLAMA_URL").unwrap_or_else(|_| OLLAMA_URL.into());
+
+    let pg = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    // Apply gw-kb's schema migrations against this Postgres. The
+    // sqlx::migrate! macro embeds the *.sql files at compile time and
+    // tracks applied versions in a `_sqlx_migrations` table, so this
+    // is idempotent: a fresh database gets all 12 migrations, an
+    // already-bootstrapped one (e.g. from BrowseComp work) is a no-op.
+    sqlx::migrate!("../../migrations").run(&pg).await?;
+    let lance = Arc::new(KbLanceStore::open(&lance_path, embedding_dim).await?);
+    let tantivy = Arc::new(KbTantivyStore::open(std::path::Path::new(&tantivy_path))?);
+    let embedder = Arc::new(Embedder::new(embedding_model));
+    // The chat LLM here is only used by gw-kb's organize/synthesize
+    // pipelines, which the literature demo doesn't run. Plumb a
+    // placeholder so the type-checks stay satisfied.
+    let llm = Arc::new(OllamaClient::new(
+        ollama_url.clone(),
+        ollama_url,
+        OLLAMA_MODEL.into(),
+        "unused".into(),
+    ));
+    Ok(Some(KbStores {
+        pg,
+        lance,
+        tantivy,
+        embedder,
+        llm,
+    }))
+}
+
 fn percent_encode_query(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -1564,7 +1737,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let loop_llm: Box<dyn gw_loop::LlmClient> =
         Box::new(OllamaLlmClient::new(chat_client).with_think(Some(false)));
 
-    let lit = LiteraturePlugin::new(embedder);
+    // Best-effort gw-kb setup. When DATABASE_URL is set we wire up
+    // Postgres + LanceDB + tantivy + a sentence-transformers embedder
+    // and pass them to LiteraturePlugin. Every arxiv_search then
+    // persists discovered papers to the KB. If anything fails, log
+    // and continue stateless — the demo doesn't depend on KB at this
+    // phase.
+    let kb_stores: Option<Arc<KbStores>> = match build_kb_stores().await {
+        Ok(Some(s)) => {
+            tracing::info!("gw-kb stores ready — arxiv_search will persist results");
+            Some(Arc::new(s))
+        }
+        Ok(None) => {
+            tracing::info!("gw-kb not configured (DATABASE_URL unset); running stateless");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "gw-kb setup failed; running stateless");
+            None
+        }
+    };
+
+    let mut lit = LiteraturePlugin::new(embedder);
+    if let Some(kb) = kb_stores.clone() {
+        lit = lit.with_kb(kb);
+    }
 
     let engine = GreatWheelEngine::new()
         .add_plugin(UiPlugin)
@@ -1630,6 +1827,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "nearest_neighbors".into(),
         "cluster_papers".into(),
         "fetch_paper_text".into(),
+        "kb_paper_count".into(),
     ];
     let mut repl = ReplAgent::new(external_fns, Box::new(conv_bridge));
     repl.set_variable("gw_session_id", Object::String(session_id.0.to_string()))

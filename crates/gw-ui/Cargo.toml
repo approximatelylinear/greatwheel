@@ -22,12 +22,14 @@ uuid = { workspace = true }
 [dev-dependencies]
 dotenvy = "0.15"
 gw-engine = { workspace = true }
+gw-kb = { workspace = true }
 gw-llm = { workspace = true }
 gw-loop = { workspace = true }
 gw-runtime = { workspace = true }
 ouros = { workspace = true }
 reqwest = { workspace = true }
 rusqlite = { version = "0.32", features = ["bundled"] }
+sqlx = { workspace = true }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing-subscriber = { workspace = true }
 
