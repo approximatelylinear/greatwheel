@@ -9,6 +9,7 @@ import { CanvasPane } from './components/CanvasPane';
 import { DebugPane } from './components/DebugPane';
 import { MessageInput } from './components/MessageInput';
 import { registry } from './jr/registry';
+import type { Widget } from './types';
 import {
   INITIAL_CANONICAL_STATE,
   applyAgUiEventToStore,
@@ -148,12 +149,33 @@ interface AppShellProps {
  * data demos.
  */
 function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProps) {
-  // useStateValue reads a single key at the path it's given; it
-  // doesn't drill into nested objects, so we read the whole
-  // /branding object and pluck `.layout` ourselves. (The header
-  // does the same thing for `.title` / `.subtitle` in BrandedTitle.)
   const branding = useStateValue<{ layout?: string | null }>('/branding');
   const layout = branding?.layout ?? 'chat-primary';
+  // Widget map + canvas slot — read here so log-line "re-pin" clicks
+  // can find the EntityCloud widget and replay the same widget event
+  // a point click would have fired.
+  const widgets = useStateValue<Record<string, Widget>>('/widgets') ?? {};
+  const canvasSlot = useStateValue<string | null>('/canvasSlot') ?? null;
+
+  const onRepin = useCallback(
+    (arxivId: string) => {
+      const cloud = findEntityCloud(widgets, canvasSlot);
+      if (!cloud) return;
+      void postWidgetEvent(sessionId, {
+        widget_id: cloud.id,
+        surface_id: cloud.surface_id,
+        action: 'select',
+        data: {
+          pointId: arxivId,
+          scope: { kind: 'paper', key: arxivId },
+        },
+      }).catch(() => {
+        /* surfaced via stream-error path on next event */
+      });
+    },
+    [sessionId, widgets, canvasSlot],
+  );
+
   return (
     <div className={`app app-${layout}`}>
       <header className="app-header">
@@ -167,6 +189,7 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
           running={state.running}
           messageFollowUps={state.messageFollowUps}
           onSuggest={onSend}
+          onRepin={onRepin}
         />
         <CanvasPane />
       </main>
@@ -178,6 +201,33 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
       </footer>
     </div>
   );
+}
+
+/**
+ * Find the EntityCloud widget in the canonical state so we can replay
+ * its point-click events from elsewhere in the UI (e.g. a "re-pin"
+ * log-line click in the chat rail). Prefers the widget pinned to the
+ * primary canvas slot — the literature_assistant pins the cloud there
+ * with `multi_use=True` precisely so its action surface stays
+ * available across drill-downs.
+ */
+function findEntityCloud(
+  widgets: Record<string, Widget>,
+  canvasSlot: string | null,
+): Widget | null {
+  const isCloud = (w?: Widget): boolean => {
+    if (!w || w.kind !== 'A2ui') return false;
+    if (!('Inline' in w.payload)) return false;
+    const inner = (w.payload as { Inline: unknown }).Inline as
+      | { type?: unknown }
+      | null;
+    return !!inner && (inner as { type?: unknown }).type === 'EntityCloud';
+  };
+  if (canvasSlot && isCloud(widgets[canvasSlot])) return widgets[canvasSlot]!;
+  for (const w of Object.values(widgets)) {
+    if (isCloud(w)) return w;
+  }
+  return null;
 }
 
 /**
