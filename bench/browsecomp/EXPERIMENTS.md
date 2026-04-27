@@ -221,6 +221,48 @@ accuracy, not timeout artifacts.
 ### Key insight
 86% of failures are **retrieval** (right documents never found), not extraction. The 9B model reasons well once it has the right documents. Dense vector search doesn't help — but ColBERT reranking of a wider BM25 pool does, because the right documents are often in BM25's top-200 but ranked too low for the agent to see.
 
+### Supervisor K=3 batch 2 (apr27) — symmetric saturation, config space exhausted
+
+Second parallel batch testing the *opposite* direction of batch 1: "less is more"
+along every dimension batch 1 widened. All three regressed too.
+
+| Slug | Dimension | Delta | Exact | Fuzzy | Tokens |
+|---|---|---|---|---|---|
+| `coverage-per1` | coverage **narrowness** | per_query=1 (5-doc) | 5/29 | 7/29 | 51K |
+| `narrow-q3` | breadth **narrowness** | n_presearch_queries=3 | 4/29 | 7/29 | 72K |
+| `prf-light` | expansion **minimalism** | prf 3/0 (vs 5/3) | 3/29 | 3/29 | 65K |
+
+**Combined with batch 1 — sweet spots are crisp at default:**
+
+| Dimension | Low | **Default** | High |
+|---|---|---|---|
+| Breadth (n_presearch_queries) | 4/7 (q=3) | **11/13 (q=5)** | 6/8 (q=7) |
+| Depth (coverage per_query) | 5/7 (per=1) | **9/12 (per=2 — S5-lite)** | 6/7 (per=3) |
+| Expansion (PRF + round-2) | 3/3 (light) | **11/13 (default)** | 6/6 (strong) |
+
+Symmetric regression in both directions on every dimension. Token usage drops
+in proportion to regression severity in BOTH directions — narrower pools make
+the agent terminate early on insufficient evidence; wider pools make it
+terminate early on noisy evidence. The default config sits at a sharp local
+optimum.
+
+**Decisive finding: config-space exploration is exhausted.** Six experiments
+(2 batches × 3 dimensions × 2 directions each) all regressed. Further
+fan-out via the supervisor skill on these dimensions is no longer
+high-value — the next ~1pt of fuzzy accuracy will not come from any single
+TOML knob.
+
+**Implication for next experiments**: structural changes only.
+1. **Different selectors over the same pool** — S1 MMR with rare-term Jaccard;
+   S6 channel union over BM25/passage/coverage outputs.
+2. **Different rerankers** — M1 monoT5-3B (Meng et al.'s big lever); narrows
+   from a 200-pool to a 10-pool, doesn't widen.
+3. **Different recipe** — P7 Meng-style passages (250 words, sentence-bounded,
+   title-prepended). The current 4096-byte chunks may be the limiter.
+4. **Different agent dynamics** — Q2Q reformulation (M2) requires neural
+   reranker first; agent-side ensemble routing across the 4-way correct-set
+   union (20/30 known ceiling).
+
 ### Supervisor K=3 batch (apr26) — pre-search saturation
 
 First parallel fan-out via the `browsecomp-supervisor` skill. Three hypotheses,
@@ -935,6 +977,10 @@ Six independent threads:
 | ~~done~~ | ~~presearch-q7. Pre-search breadth (sup-batch)~~ | | | **Done apr26 — 8/29 fuzzy. Pre-search saturated at 5 sub-queries on this stack.** |
 | ~~done~~ | ~~coverage-per3. Coverage depth (sup-batch)~~ | | | **Done apr26 — 7/29 fuzzy. 15 docs overflow 9B attention; coverage saturated at per_query=2.** |
 | ~~done~~ | ~~prf-strong. Expansion aggressiveness (sup-batch)~~ | | | **Done apr26 — 6/29 fuzzy. More PRF + more round-2 = noise that drowns signal.** |
+| ~~done~~ | ~~coverage-per1. Coverage narrowness (sup-batch 2)~~ | | | **Done apr27 — 7/29 fuzzy. 5 docs too few; per_query=2 is the sweet spot.** |
+| ~~done~~ | ~~narrow-q3. Pre-search narrowness (sup-batch 2)~~ | | | **Done apr27 — 7/29 fuzzy. 3 sub-queries undercoverage; default 5 is the sweet spot.** |
+| ~~done~~ | ~~prf-light. Expansion minimalism (sup-batch 2)~~ | | | **Done apr27 — 3/29 fuzzy. Worst result of any experiment. Cuts off pre-search candidate generation entirely.** |
+| ~~exhausted~~ | ~~Single-knob TOML sweeps~~ | | | **Six experiments (2 batches × 3 dimensions × 2 directions) all regressed. Default config is at a sharp sweet spot. Frontier requires structural changes.** |
 | ~~done~~ | ~~R8. Qwen3-Embedding (Phase 1: R@k)~~ | | | **Done apr17 — R@200=24/30 (vs BM25 12/30, ColBERT 25/30) at 54ms p50. Hypothesis confirmed.** |
 | ~~done~~ | ~~R4. BM25 + blob rerank~~ | | | **Done — 7/30 (+2 over 5/30 baseline). Complementary to Qdrant. Union=14/30.** |
 | ~~done~~ | ~~KB eval harness~~ | | | **Done — 3 ablations, all below baseline** |
