@@ -178,12 +178,16 @@ export function toJrSpec(widget: Widget): Spec | null {
             : null;
         // Per-point ActionBindings — the registry's
         // `emit('point:<id>')` resolves through these to fire
-        // `interact` with the WHOLE raw point (including any `meta`
-        // the agent attached) baked in. Click handlers can then
-        // build detail widgets without re-fetching.
+        // `interact` with the point baked in. Click data also
+        // includes `scope: {kind: "paper", key: <id>}` so the
+        // server's extract_scope_update flips
+        // `/focusedScope/paper` to this id; any drill-down widget
+        // emitted with the matching scope then becomes visible
+        // (and prior detail widgets auto-hide).
         const on: Record<string, unknown> = {};
         for (const raw of rawPoints) {
           const id = String(raw.id ?? '');
+          const kind = raw.kind != null ? String(raw.kind) : 'paper';
           on[`point:${id}`] = {
             action: 'interact',
             params: {
@@ -191,7 +195,11 @@ export function toJrSpec(widget: Widget): Spec | null {
               surfaceId,
               buttonId: `point:${id}`,
               action: 'select',
-              data: { pointId: id, point: raw },
+              data: {
+                pointId: id,
+                point: raw,
+                scope: { kind, key: id },
+              },
             },
           };
         }

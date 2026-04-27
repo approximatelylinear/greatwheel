@@ -55,10 +55,12 @@ Data host functions:
       As a side effect, every returned paper is cached server-side keyed by `id` so you can look it up later via get_paper.
   - get_paper(arxiv_id: str) -> {"id", "title", "summary", "authors", "published", "category", "url"}
       Reads from the server-side cache populated by arxiv_search. Use this on click drill-downs — it's free (no network), and the IDE-style Python REPL in this harness has NO `data` variable injected, so you must look papers up by id rather than receive them inline.
-  - embed_papers(texts: list[str]) -> list[list[float]]
-      Returns one vector per text. Wraps the local Ollama embedding endpoint.
+  - embed_papers(texts: list[str], ids: list[str] = None) -> list[list[float]]
+      Returns one vector per text. Wraps the local Ollama embedding endpoint. **When called with `ids=[...]` (parallel to texts), the resulting vectors are cached server-side keyed by id — REQUIRED if you want nearest_neighbors to work later.**
   - project_2d(vectors: list[list[float]]) -> list[[float, float]]
       Hand-rolled PCA. Returns one (x, y) per input vector, deterministic, scaled to roughly [-1, 1].
+  - nearest_neighbors(arxiv_id: str, k: int = 5) -> list[paper + {"similarity": float}]
+      Top-k cosine-similar papers to the focal paper. Reads from the vector cache populated by embed_papers(ids=...). Each result is the full paper dict with an extra `similarity` field in [-1, 1].
 
 UI host functions (same as the other demos):
   - emit_widget(session_id, kind, payload, multi_use=False, follow_up=False, scope=None) -> {"widget_id"}
@@ -81,10 +83,11 @@ Use **two iterations**.
 ```python
 # 1. Search arXiv. Pull the topic from the user's last message verbatim.
 papers = arxiv_search(query="<the user's topic, lightly cleaned>", max_results=30)
-# 2. Build one short string per paper for embedding (title + first sentence of abstract is enough).
+# 2. Build one short string per paper for embedding.
 texts = [f"{p['title']}. {p['summary'][:400]}" for p in papers]
-# 3. Embed.
-vectors = embed_papers(texts)
+ids = [p["id"] for p in papers]
+# 3. Embed (with ids=... so vectors are cached for nearest_neighbors).
+vectors = embed_papers(texts, ids=ids)
 # 4. Project.
 coords = project_2d(vectors)
 print("PIPELINE_OK", len(papers), "papers")
@@ -95,7 +98,8 @@ print("PIPELINE_OK", len(papers), "papers")
 ```python
 papers = arxiv_search(query="<same topic>", max_results=30)
 texts = [f"{p['title']}. {p['summary'][:400]}" for p in papers]
-vectors = embed_papers(texts)
+ids = [p["id"] for p in papers]
+vectors = embed_papers(texts, ids=ids)
 coords = project_2d(vectors)
 
 points = []
@@ -125,19 +129,59 @@ FINAL(f"Plotted {len(points)} arXiv papers on the topic. Click a point to read i
 
 You'll see a line in your conversation context like:
 
-  [widget-event] action=select data={"pointId": "2504.13684", "point": {...}}
+  [widget-event] action=select data={"pointId": "2504.13684", "point": {...}, "scope": {...}}
 
-**Read the `pointId` value** out of that text and substitute it as a literal in your code below. There is NO `data` variable in the Python REPL — you must hardcode the arxiv id you saw in the message.
+**Read the `pointId` value** out of that text and substitute it as a literal below. There is NO `data` variable in the Python REPL — you must hardcode the arxiv id you saw in the message.
 
-Single iteration is fine; the paper is already cached server-side from the original arxiv_search.
+Single iteration. The paper is in the cache from arxiv_search; vectors are in the cache from embed_papers(ids=...).
 
 ```python
-paper = get_paper("<paste-the-pointId-here>")  # e.g. get_paper("2504.13684")
+arxiv_id = "<paste-the-pointId-here>"  # e.g. "2504.13684"
+paper = get_paper(arxiv_id)
+neighbors = nearest_neighbors(arxiv_id, k=5)  # 5 cosine-similar papers
 
+# Authors line
 authors = paper.get("authors", [])
 authors_line = ", ".join(authors[:6]) + (" et al." if len(authors) > 6 else "")
-arxiv_id = paper["id"]
 
+# Build neighbor cards. Each card click sends `data = {"pointId": <neighbor_id>, ...}`
+# which routes through the SAME drill-down flow you're in right now.
+neighbor_cards = []
+for n in neighbors:
+    neighbor_cards.append({
+        "type": "Card",
+        "id": f"nbr-{n['id']}",
+        "title": n["title"][:70],
+        "subtitle": f"sim={n['similarity']:.2f} · " + ", ".join(n.get("authors", [])[:2]),
+        "action": "select",
+        "data": {"pointId": n["id"], "scope": {"kind": "paper", "key": n["id"]}},
+    })
+
+# Build 3 follow-up question buttons (follow_up=True, anchored to chat).
+# Make them grounded in this paper specifically, not generic.
+followups = {
+    "type": "Column",
+    "children": [
+        {"type": "Text", "text": "Explore from here:"},
+        {"type": "Row", "children": [
+            {"type": "Button", "id": "fup-method",
+             "label": "Method details",
+             "action": "submit",
+             "data": {"ask": f"What method does {paper['title'][:50]} actually use?"}},
+            {"type": "Button", "id": "fup-compare",
+             "label": "Vs neighbors",
+             "action": "submit",
+             "data": {"ask": f"How does {paper['title'][:40]} compare to its neighbors in the cloud?"}},
+            {"type": "Button", "id": "fup-newer",
+             "label": "What followed",
+             "action": "submit",
+             "data": {"ask": f"What more recent work builds on or supersedes {paper['title'][:40]}?"}},
+        ]},
+    ],
+}
+
+# Detail Column. Order matters — title/authors/meta on top, abstract,
+# then a Text divider, then the neighbor list.
 detail = {
     "type": "Column",
     "children": [
@@ -147,17 +191,27 @@ detail = {
          "text": f"arXiv {arxiv_id} · {paper.get('published', '')[:10]} · {paper.get('category', '')}"},
         {"type": "Text", "text": paper.get("summary", "")},
         {"type": "Text", "text": paper.get("url", "")},
+        {"type": "Text", "text": "Nearest neighbors:"},
+        {"type": "Column", "children": neighbor_cards},
     ],
 }
 result = emit_widget(
     session_id=gw_session_id,
     kind="a2ui",
-    scope={"kind": "paper", "key": arxiv_id},
+    scope={"kind": "paper", "key": arxiv_id},  # auto-hides when user clicks a different paper
     payload=detail,
 )
-pin_below_canvas(widget_id=result["widget_id"])  # AUX slot — the detail sits below the cloud
+pin_below_canvas(widget_id=result["widget_id"])
 
-FINAL(f"Pinned {paper['title'][:60]}…")
+# Anchor the follow-up question buttons to the chat (not the canvas).
+emit_widget(
+    session_id=gw_session_id,
+    kind="a2ui",
+    follow_up=True,
+    payload=followups,
+)
+
+FINAL(f"Pinned {paper['title'][:60]}… · {len(neighbors)} neighbors listed below.")
 ```
 
 # Turn N — user types a follow-up text question
@@ -185,6 +239,11 @@ struct LiteraturePlugin {
     /// huge `meta` blob through click events. Never cleared — at
     /// our demo scale (≤50 papers per query) the cache stays small.
     paper_cache: Arc<StdMutex<HashMap<String, serde_json::Value>>>,
+    /// Per-session vector cache, keyed by arxiv_id. Populated by
+    /// `embed_papers` when called with an `ids` kwarg. Used by
+    /// `nearest_neighbors` to compute cosine-similarity drill-downs
+    /// without re-embedding.
+    vector_cache: Arc<StdMutex<HashMap<String, Vec<f32>>>>,
 }
 
 impl LiteraturePlugin {
@@ -198,6 +257,7 @@ impl LiteraturePlugin {
             ),
             embedder,
             paper_cache: Arc::new(StdMutex::new(HashMap::new())),
+            vector_cache: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 }
@@ -215,6 +275,7 @@ impl Plugin for LiteraturePlugin {
                 "host_fn:literature.embed_papers".into(),
                 "host_fn:literature.project_2d".into(),
                 "host_fn:literature.get_paper".into(),
+                "host_fn:literature.nearest_neighbors".into(),
             ],
             requires: vec![],
             priority: 0,
@@ -282,8 +343,10 @@ impl Plugin for LiteraturePlugin {
         });
 
         let embedder = self.embedder.clone();
+        let vector_cache_w = self.vector_cache.clone();
         ctx.register_host_fn_async("embed_papers", None, move |args, kwargs| {
             let embedder = embedder.clone();
+            let vector_cache = vector_cache_w.clone();
             async move {
                 let texts_value = args
                     .first()
@@ -297,6 +360,16 @@ impl Plugin for LiteraturePlugin {
                     .iter()
                     .map(|v| v.as_str().unwrap_or("").to_string())
                     .collect::<Vec<_>>();
+                // Optional parallel `ids` kwarg: when present, the
+                // resulting vectors are cached server-side keyed by
+                // id, ready for `nearest_neighbors` lookups.
+                let ids: Option<Vec<String>> = kwargs.get("ids").and_then(|v| v.as_array()).map(
+                    |arr| {
+                        arr.iter()
+                            .map(|v| v.as_str().unwrap_or("").to_string())
+                            .collect()
+                    },
+                );
                 if texts.is_empty() {
                     return Ok(Value::Array(vec![]));
                 }
@@ -304,14 +377,6 @@ impl Plugin for LiteraturePlugin {
                     .embed(&texts)
                     .await
                     .map_err(|e| PluginError::HostFunction(format!("embed: {e}")))?;
-                // gw-llm's embed() falls back to zero-vectors on
-                // per-doc failure (designed for resilient batch
-                // indexing). For the literature demo that's
-                // catastrophic — all-zero input collapses PCA to
-                // origin — so surface a hard error if every vector
-                // came back zero. Most likely cause: embedding model
-                // not pulled in Ollama. The startup banner prints
-                // the active model name to make diagnosis quick.
                 let all_zero = !vectors.is_empty()
                     && vectors
                         .iter()
@@ -322,12 +387,68 @@ impl Plugin for LiteraturePlugin {
                             .into(),
                     ));
                 }
+                if let Some(ids) = ids.as_ref() {
+                    if ids.len() == vectors.len() {
+                        if let Ok(mut cache) = vector_cache.lock() {
+                            for (id, vec) in ids.iter().zip(vectors.iter()) {
+                                cache.insert(id.clone(), vec.clone());
+                            }
+                        }
+                    }
+                }
                 let json_vectors: Vec<Value> = vectors
                     .into_iter()
                     .map(|v| Value::Array(v.into_iter().map(num).collect()))
                     .collect();
                 Ok(Value::Array(json_vectors))
             }
+        });
+
+        let vector_cache_n = self.vector_cache.clone();
+        let paper_cache_n = self.paper_cache.clone();
+        ctx.register_host_fn_sync("nearest_neighbors", None, move |args, kwargs| {
+            let id = args
+                .first()
+                .and_then(|v| v.as_str())
+                .or_else(|| kwargs.get("arxiv_id").and_then(|v| v.as_str()))
+                .ok_or_else(|| PluginError::HostFunction("arxiv_id required (string)".into()))?
+                .to_string();
+            let k = args
+                .get(1)
+                .and_then(|v| v.as_u64())
+                .or_else(|| kwargs.get("k").and_then(|v| v.as_u64()))
+                .unwrap_or(5)
+                .min(20) as usize;
+            let vectors = vector_cache_n
+                .lock()
+                .map_err(|_| PluginError::HostFunction("vector cache poisoned".into()))?;
+            let papers = paper_cache_n
+                .lock()
+                .map_err(|_| PluginError::HostFunction("paper cache poisoned".into()))?;
+            let focal = vectors.get(&id).cloned().ok_or_else(|| {
+                PluginError::HostFunction(format!(
+                    "no vector cached for {id}; call embed_papers with ids=[...] first"
+                ))
+            })?;
+            let mut scored: Vec<(String, f32)> = vectors
+                .iter()
+                .filter(|(other, _)| **other != id)
+                .map(|(other, vec)| (other.clone(), cosine(&focal, vec)))
+                .collect();
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            scored.truncate(k);
+            let result: Vec<Value> = scored
+                .into_iter()
+                .filter_map(|(nid, score)| {
+                    let paper = papers.get(&nid)?.clone();
+                    let mut entry = paper;
+                    if let Value::Object(ref mut map) = entry {
+                        map.insert("similarity".into(), num(score));
+                    }
+                    Some(entry)
+                })
+                .collect();
+            Ok(Value::Array(result))
         });
 
         ctx.register_host_fn_sync("project_2d", None, move |args, kwargs| {
@@ -370,6 +491,17 @@ fn num(f: f32) -> Value {
     serde_json::Number::from_f64(f as f64)
         .map(Value::Number)
         .unwrap_or(Value::Null)
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na > 0.0 && nb > 0.0 {
+        dot / (na * nb)
+    } else {
+        0.0
+    }
 }
 
 // ── arXiv search ─────────────────────────────────────────────────────
@@ -808,6 +940,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "embed_papers".into(),
         "project_2d".into(),
         "get_paper".into(),
+        "nearest_neighbors".into(),
     ];
     let mut repl = ReplAgent::new(external_fns, Box::new(conv_bridge));
     repl.set_variable("gw_session_id", Object::String(session_id.0.to_string()))
