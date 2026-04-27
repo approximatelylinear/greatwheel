@@ -59,10 +59,18 @@ pub fn canonical_state(
         .collect();
 
     let branding_value = branding.map(|b| {
+        let welcome = b.welcome.as_ref().map(|w| {
+            json!({
+                "heading": w.heading,
+                "body": w.body,
+                "suggestions": w.suggestions,
+            })
+        });
         json!({
             "title": b.title,
             "subtitle": b.subtitle,
             "layout": b.layout,
+            "welcome": welcome,
         })
     });
 

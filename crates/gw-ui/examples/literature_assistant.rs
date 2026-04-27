@@ -49,6 +49,11 @@ const SYSTEM_PROMPT: &str = r###"You are a literature scout exploring arXiv. The
 
 **Output format (CRITICAL):** Every response you produce MUST be a single fenced Python code block, i.e. starts with ```python on its own line and ends with ``` on its own line. Do NOT use OpenAI tool-calling syntax. The harness only executes Python in fenced code blocks.
 
+**Python dialect (ouros sandbox limitations):** the REPL parses a restricted Python and will refuse some constructs. Stick to:
+  - One module per `import` statement: `import json` then `import os` on the next line. NEVER `import os, json` or `import a, b, c` — that's a parse error ("multi-module import statements"). `from x import a, b` is fine.
+  - No starred imports, no relative imports.
+  - If you hit a parse error, actually rewrite the offending line — don't just claim you fixed it and resend the same code.
+
 Data host functions:
   - arxiv_search(query: str, max_results: int = 30) -> list[{"id", "title", "summary", "authors", "published", "category", "url"}]
       Hits the public arXiv API. Returns up to max_results papers most-relevant to the query.
@@ -57,10 +62,13 @@ Data host functions:
       Reads from the server-side cache populated by arxiv_search. Use this on click drill-downs — it's free (no network), and the IDE-style Python REPL in this harness has NO `data` variable injected, so you must look papers up by id rather than receive them inline.
   - embed_papers(texts: list[str], ids: list[str] = None) -> list[list[float]]
       Returns one vector per text. Wraps the local Ollama embedding endpoint. **When called with `ids=[...]` (parallel to texts), the resulting vectors are cached server-side keyed by id — REQUIRED if you want nearest_neighbors to work later.**
-  - project_2d(vectors: list[list[float]]) -> list[[float, float]]
+  - project_2d(vectors: list[list[float]], labels: list[int] = None, alpha: float = 0.5) -> list[[float, float]]
       Hand-rolled PCA. Returns one (x, y) per input vector, deterministic, scaled to roughly [-1, 1].
+      If `labels` is supplied (parallel to vectors), each point is pulled `alpha` of the way toward its cluster's 2D mean — so cluster colours land in coherent visual regions instead of scattering across the canvas. Pass labels from cluster_papers; alpha=0.5 is a good default.
   - nearest_neighbors(arxiv_id: str, k: int = 5) -> list[paper + {"similarity": float}]
       Top-k cosine-similar papers to the focal paper. Reads from the vector cache populated by embed_papers(ids=...). Each result is the full paper dict with an extra `similarity` field in [-1, 1].
+  - fetch_paper_text(arxiv_id: str, max_chars: int = 60000) -> {"id", "text", "char_count", "truncated", "source"}
+      Fetches the FULL paper body from ar5iv (arXiv's LaTeX→HTML projection) and returns it as plain text. Use this when the user asks a grounded question that requires more than the abstract — e.g. "what method does X use", "what are the actual results", "compare X and Y in detail". Cached per id, so repeat calls are free. `truncated=True` means the paper is longer than max_chars and got cut at the end; bump max_chars (≤200000) or grep for the section you care about. Errors with a clear message if ar5iv has no HTML rendering for that paper (rare but possible — older or heavily LaTeX-customised papers).
 
 UI host functions (same as the other demos):
   - emit_widget(session_id, kind, payload, multi_use=False, follow_up=False, scope=None) -> {"widget_id"}
@@ -71,14 +79,14 @@ UI host functions (same as the other demos):
 
 The frontend's json-render catalog includes one literature-specific widget type:
 
-  - EntityCloud: payload {"type": "EntityCloud", "points": [{"id", "label", "x", "y", "kind"?}, ...], "highlight"?: {<id>: true}}.
-    Each point is rendered at its (x, y) position. Click delivers a `[widget-event] action=select data={"pointId": "<arxiv_id>", "point": {...}}` line into your conversation context — read the `pointId` value out of that text and call `get_paper(<that id>)` to retrieve the full paper.
+  - EntityCloud: payload {"type": "EntityCloud", "points": [{"id", "label", "x", "y", "kind"?, "cluster"?: int, "year"?: str, "category"?: str}, ...], "clusters"?: [{"id": int, "label": str, "x": float, "y": float}], "highlight"?: {<id>: true}}.
+    Each point renders at its (x, y) position; the `cluster` field colours it (palette cycles every 8). The optional `clusters` array adds faint always-on centroid labels (your short cluster names like "retrieval methods", "agent eval"). Send the FULL paper title in `label` — the frontend wraps it in a hover card. `year` and `category` (e.g. "2024", "cs.CL") show up in the hover meta row. Click delivers a `[widget-event] action=select data={"pointId": "<arxiv_id>", ...}` line into your context.
 
 # Turn 1 — user asks a topic question
 
 Use **two iterations**.
 
-**Iteration 1: search + embed + project. Don't FINAL.**
+**Iteration 1: search + embed + project + cluster. Print sample titles per cluster so you can name them in iteration 2. Don't FINAL.**
 
 ```python
 # 1. Search arXiv. Pull the topic from the user's last message verbatim.
@@ -88,41 +96,99 @@ texts = [f"{p['title']}. {p['summary'][:400]}" for p in papers]
 ids = [p["id"] for p in papers]
 # 3. Embed (with ids=... so vectors are cached for nearest_neighbors).
 vectors = embed_papers(texts, ids=ids)
-# 4. Project.
-coords = project_2d(vectors)
+# 4. Cluster, then project with cluster-aware blending so colours
+#    land in visually coherent regions (semantic k-means in 1024-d
+#    and unsupervised PCA disagree about where clusters live —
+#    passing labels into project_2d reconciles them).
+labels = cluster_papers(vectors, k=6)
+coords = project_2d(vectors, labels=labels)
+
+# Print 2-3 sample titles per cluster so iter 2's LLM can read them
+# and pick a short name per cluster.
+from collections import defaultdict
+groups = defaultdict(list)
+for i, p in enumerate(papers):
+    groups[labels[i]].append(p["title"])
+for c_id in sorted(groups.keys()):
+    titles = groups[c_id]
+    print(f"CLUSTER_{c_id} ({len(titles)} papers):")
+    for t in titles[:3]:
+        print(f"  - {t[:90]}")
 print("PIPELINE_OK", len(papers), "papers")
 ```
 
-**Iteration 2: build the widget payload + emit + FINAL.**
+**Iteration 2: re-do the pipeline (caches make it cheap), name the clusters from iter 1's prints, compute centroids, emit + FINAL.**
 
 ```python
 papers = arxiv_search(query="<same topic>", max_results=30)
 texts = [f"{p['title']}. {p['summary'][:400]}" for p in papers]
 ids = [p["id"] for p in papers]
 vectors = embed_papers(texts, ids=ids)
-coords = project_2d(vectors)
+labels = cluster_papers(vectors, k=6)
+coords = project_2d(vectors, labels=labels)
+
+# YOUR NAMES — fill in based on the CLUSTER_N print blocks from iter 1.
+# 2-4 words each, lowercase, the kind of label that'd appear on a
+# paper-survey diagram. Examples: "retrieval methods", "agent eval",
+# "rag systems", "reasoning surveys". Skip cluster ids that came back
+# empty (rare with k=6 / n=30 but possible).
+cluster_names = {
+    0: "<your name for cluster 0>",
+    1: "<your name for cluster 1>",
+    2: "<your name for cluster 2>",
+    3: "<your name for cluster 3>",
+    4: "<your name for cluster 4>",
+    5: "<your name for cluster 5>",
+}
+
+# Compute 2D centroid per cluster (mean of member points).
+from collections import defaultdict
+xs_by, ys_by = defaultdict(list), defaultdict(list)
+for i, (x, y) in enumerate(coords):
+    c = labels[i]
+    xs_by[c].append(x)
+    ys_by[c].append(y)
+clusters = []
+for c in sorted(xs_by.keys()):
+    if not xs_by[c]:
+        continue
+    clusters.append({
+        "id": int(c),
+        "label": cluster_names.get(c, f"Cluster {c}"),
+        "x": sum(xs_by[c]) / len(xs_by[c]),
+        "y": sum(ys_by[c]) / len(ys_by[c]),
+    })
 
 points = []
-for p, (x, y) in zip(papers, coords):
+for p, (x, y), c in zip(papers, coords, labels):
+    # Note: send the FULL title (not truncated) — the hover card
+    # wraps it to a 4-line clamp on the frontend. `year` and
+    # `category` show up in the hover meta row.
     points.append({
         "id": p["id"],
-        "label": p["title"][:80],
+        "label": p["title"],
         "x": x,
         "y": y,
         "kind": "paper",
+        "cluster": int(c),
+        "year": (p.get("published") or "")[:4],
+        "category": p.get("category", ""),
     })
-# (No meta on points — papers are already cached server-side by
-# arxiv_search; click handlers retrieve them via get_paper(id).)
 
 result = emit_widget(
     session_id=gw_session_id,
     kind="a2ui",
-    multi_use=True,  # the cloud is a persistent palette — clicks don't terminate it
-    payload={"type": "EntityCloud", "points": points},
+    multi_use=True,
+    payload={
+        "type": "EntityCloud",
+        "points": points,
+        "clusters": clusters,
+    },
 )
-pin_to_canvas(widget_id=result["widget_id"])  # PRIMARY slot — the cloud is the workspace
+pin_to_canvas(widget_id=result["widget_id"])
 
-FINAL(f"Plotted {len(points)} arXiv papers on the topic. Click a point to read its abstract; nearby points are semantically related.")
+cluster_summary = ", ".join(c["label"] for c in clusters)
+FINAL(f"Plotted {len(points)} papers across {len(clusters)} clusters: {cluster_summary}. Click a point to drill in.")
 ```
 
 # Turn 2+ — user clicked a point in the cloud
@@ -151,7 +217,8 @@ for n in neighbors:
     neighbor_cards.append({
         "type": "Card",
         "id": f"nbr-{n['id']}",
-        "title": n["title"][:70],
+        # Send the FULL title — Card CSS wraps long titles.
+        "title": n["title"],
         "subtitle": f"sim={n['similarity']:.2f} · " + ", ".join(n.get("authors", [])[:2]),
         "action": "select",
         "data": {"pointId": n["id"], "scope": {"kind": "paper", "key": n["id"]}},
@@ -190,7 +257,7 @@ detail = {
         {"type": "Text",
          "text": f"arXiv {arxiv_id} · {paper.get('published', '')[:10]} · {paper.get('category', '')}"},
         {"type": "Text", "text": paper.get("summary", "")},
-        {"type": "Text", "text": paper.get("url", "")},
+        {"type": "Link", "url": paper.get("url", ""), "label": "View on arXiv ↗"},
         {"type": "Text", "text": "Nearest neighbors:"},
         {"type": "Column", "children": neighbor_cards},
     ],
@@ -226,6 +293,7 @@ If the user types something like "show me the most recent ones" or "what cluster
   - Cap max_results at 50; arXiv pagination kicks in past that.
   - If arxiv_search returns 0 papers, FINAL gracefully: "No papers found for that query — try a broader topic."
   - Never write Python that prints large blobs (full abstracts × 30 = a lot of stdout). Print summary lines only.
+  - **When to fetch the full paper.** Abstracts are great for "show me the landscape" but lie by omission about methods and results. If the user asks a grounded follow-up — "what method does X use", "what is the result of X", "compare X and Y in detail", any of the click-button follow-ups (Method details / Vs neighbors / What followed) — call `fetch_paper_text(arxiv_id)` first, then write a 2–3 sentence answer that quotes or paraphrases the actual paper body. Don't fetch the full text for landscape questions; it's wasted context.
 "###;
 
 // ── Literature plugin ───────────────────────────────────────────────
@@ -244,6 +312,12 @@ struct LiteraturePlugin {
     /// `nearest_neighbors` to compute cosine-similarity drill-downs
     /// without re-embedding.
     vector_cache: Arc<StdMutex<HashMap<String, Vec<f32>>>>,
+    /// Per-session full-text cache, keyed by arxiv_id. Populated by
+    /// `fetch_paper_text` after a successful ar5iv fetch + HTML strip.
+    /// ar5iv conversion is slow on first hit; we cache the plaintext so
+    /// the agent can ask multiple grounded questions about the same
+    /// paper without re-fetching.
+    text_cache: Arc<StdMutex<HashMap<String, String>>>,
 }
 
 impl LiteraturePlugin {
@@ -258,6 +332,7 @@ impl LiteraturePlugin {
             embedder,
             paper_cache: Arc::new(StdMutex::new(HashMap::new())),
             vector_cache: Arc::new(StdMutex::new(HashMap::new())),
+            text_cache: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 }
@@ -276,6 +351,8 @@ impl Plugin for LiteraturePlugin {
                 "host_fn:literature.project_2d".into(),
                 "host_fn:literature.get_paper".into(),
                 "host_fn:literature.nearest_neighbors".into(),
+                "host_fn:literature.cluster_papers".into(),
+                "host_fn:literature.fetch_paper_text".into(),
             ],
             requires: vec![],
             priority: 0,
@@ -404,6 +481,44 @@ impl Plugin for LiteraturePlugin {
             }
         });
 
+        ctx.register_host_fn_sync("cluster_papers", None, move |args, kwargs| {
+            let raw = args
+                .first()
+                .or_else(|| kwargs.get("vectors"))
+                .ok_or_else(|| {
+                    PluginError::HostFunction("vectors required (list[list[float]])".into())
+                })?
+                .as_array()
+                .ok_or_else(|| {
+                    PluginError::HostFunction("vectors must be a list of lists of floats".into())
+                })?;
+            let vectors: Vec<Vec<f32>> = raw
+                .iter()
+                .map(|row| {
+                    row.as_array()
+                        .map(|cells| {
+                            cells
+                                .iter()
+                                .map(|c| c.as_f64().unwrap_or(0.0) as f32)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                })
+                .collect();
+            let k = args
+                .get(1)
+                .and_then(|v| v.as_u64())
+                .or_else(|| kwargs.get("k").and_then(|v| v.as_u64()))
+                .unwrap_or(6)
+                .clamp(1, 20) as usize;
+            let labels = kmeans(&vectors, k);
+            let out: Vec<Value> = labels
+                .into_iter()
+                .map(|c| Value::Number(serde_json::Number::from(c as u64)))
+                .collect();
+            Ok(Value::Array(out))
+        });
+
         let vector_cache_n = self.vector_cache.clone();
         let paper_cache_n = self.paper_cache.clone();
         ctx.register_host_fn_sync("nearest_neighbors", None, move |args, kwargs| {
@@ -475,12 +590,132 @@ impl Plugin for LiteraturePlugin {
                         .unwrap_or_default()
                 })
                 .collect();
-            let coords = pca_project_2d(&vectors);
+            let mut coords = pca_project_2d(&vectors);
+
+            // Optional cluster-aware blending: pull each point a fraction `alpha`
+            // of the way toward its cluster's 2D mean. Without this, semantic
+            // k-means in 1024-d space and unsupervised PCA disagree about where
+            // clusters live, so colours scatter across the canvas. Default
+            // alpha=0.5 keeps PCA's within-cluster structure but compacts each
+            // cluster into a recognisable visual blob.
+            let labels: Option<Vec<usize>> = kwargs.get("labels").and_then(|v| v.as_array()).map(
+                |arr| {
+                    arr.iter()
+                        .map(|c| c.as_u64().unwrap_or(0) as usize)
+                        .collect()
+                },
+            );
+            let alpha = kwargs
+                .get("alpha")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.5)
+                .clamp(0.0, 1.0) as f32;
+            if let Some(labels) = labels {
+                if labels.len() == coords.len() && alpha > 0.0 {
+                    let mut sums: std::collections::HashMap<usize, (f32, f32, usize)> =
+                        std::collections::HashMap::new();
+                    for (&c, &(x, y)) in labels.iter().zip(coords.iter()) {
+                        let entry = sums.entry(c).or_insert((0.0, 0.0, 0));
+                        entry.0 += x;
+                        entry.1 += y;
+                        entry.2 += 1;
+                    }
+                    let centroids: std::collections::HashMap<usize, (f32, f32)> = sums
+                        .into_iter()
+                        .map(|(c, (sx, sy, n))| {
+                            let n = n.max(1) as f32;
+                            (c, (sx / n, sy / n))
+                        })
+                        .collect();
+                    for (i, (x, y)) in coords.iter_mut().enumerate() {
+                        if let Some(&(cx, cy)) = centroids.get(&labels[i]) {
+                            *x = (1.0 - alpha) * *x + alpha * cx;
+                            *y = (1.0 - alpha) * *y + alpha * cy;
+                        }
+                    }
+                }
+            }
+
             let out: Vec<Value> = coords
                 .into_iter()
                 .map(|(x, y)| json!([f64::from(x).clamp(-2.0, 2.0), f64::from(y).clamp(-2.0, 2.0)]))
                 .collect();
             Ok(Value::Array(out))
+        });
+
+        let http_t = self.http.clone();
+        let text_cache = self.text_cache.clone();
+        ctx.register_host_fn_async("fetch_paper_text", None, move |args, kwargs| {
+            let http = http_t.clone();
+            let text_cache = text_cache.clone();
+            async move {
+                let arxiv_id = args
+                    .first()
+                    .and_then(|v| v.as_str())
+                    .or_else(|| kwargs.get("arxiv_id").and_then(|v| v.as_str()))
+                    .ok_or_else(|| {
+                        PluginError::HostFunction("arxiv_id required (string)".into())
+                    })?
+                    .trim()
+                    .to_string();
+                // Default 60K chars ≈ ~15K tokens — fits comfortably
+                // alongside the rest of the agent context. Agent can
+                // override but we hard-cap at 200K so a single fetch
+                // can never blow the window on a long survey paper.
+                let max_chars = args
+                    .get(1)
+                    .and_then(|v| v.as_u64())
+                    .or_else(|| kwargs.get("max_chars").and_then(|v| v.as_u64()))
+                    .unwrap_or(60_000)
+                    .min(200_000) as usize;
+
+                if let Some(cached) = text_cache.lock().ok().and_then(|m| m.get(&arxiv_id).cloned())
+                {
+                    let truncated = cached.chars().count() > max_chars;
+                    let text: String = cached.chars().take(max_chars).collect();
+                    return Ok(json!({
+                        "id": arxiv_id,
+                        "text": text,
+                        "char_count": cached.chars().count(),
+                        "truncated": truncated,
+                        "source": "cache",
+                    }));
+                }
+
+                let url = format!("https://ar5iv.labs.arxiv.org/html/{arxiv_id}");
+                let resp = http.get(&url).send().await.map_err(|e| {
+                    PluginError::HostFunction(format!("ar5iv fetch failed: {e}"))
+                })?;
+                if !resp.status().is_success() {
+                    return Err(PluginError::HostFunction(format!(
+                        "ar5iv returned HTTP {} for {arxiv_id} (paper may not have an HTML rendering — try a different paper)",
+                        resp.status()
+                    )));
+                }
+                let html = resp.text().await.map_err(|e| {
+                    PluginError::HostFunction(format!("ar5iv body read failed: {e}"))
+                })?;
+                let plain = html_to_plaintext(&html);
+                if plain.trim().is_empty() {
+                    return Err(PluginError::HostFunction(format!(
+                        "ar5iv returned an empty body for {arxiv_id}"
+                    )));
+                }
+
+                if let Ok(mut m) = text_cache.lock() {
+                    m.insert(arxiv_id.clone(), plain.clone());
+                }
+                let total = plain.chars().count();
+                let truncated = total > max_chars;
+                let text: String = plain.chars().take(max_chars).collect();
+                Ok(json!({
+                    "id": arxiv_id,
+                    "text": text,
+                    "char_count": total,
+                    "truncated": truncated,
+                    "source": "ar5iv",
+                }))
+            }
         });
 
         Ok(())
@@ -502,6 +737,113 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
     } else {
         0.0
     }
+}
+
+/// Cosine k-means on the input vectors. Returns one cluster id per
+/// vector in 0..k. Pure Rust, no deps.
+///
+/// Pipeline: L2-normalise each row → k-means++ init (first centroid
+/// is point 0; each subsequent is the point furthest from any
+/// existing centroid by cosine distance) → Lloyd iteration with
+/// re-normalised centroids (cosine k-means).
+fn kmeans(vectors: &[Vec<f32>], k: usize) -> Vec<usize> {
+    let n = vectors.len();
+    if n == 0 {
+        return vec![];
+    }
+    let k = k.min(n).max(1);
+    let d = vectors[0].len();
+    if d == 0 {
+        return vec![0; n];
+    }
+
+    let normed: Vec<Vec<f32>> = vectors
+        .iter()
+        .map(|v| {
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm < 1e-12 {
+                v.clone()
+            } else {
+                v.iter().map(|x| x / norm).collect()
+            }
+        })
+        .collect();
+
+    // K-means++ init.
+    let mut centroid_indices: Vec<usize> = vec![0];
+    while centroid_indices.len() < k {
+        let mut best_idx = 0usize;
+        let mut best_min_dist = -1.0_f32;
+        for (i, v) in normed.iter().enumerate() {
+            if centroid_indices.contains(&i) {
+                continue;
+            }
+            let min_d = centroid_indices
+                .iter()
+                .map(|&c_idx| 1.0 - cosine(v, &normed[c_idx]))
+                .fold(f32::INFINITY, f32::min);
+            if min_d > best_min_dist {
+                best_min_dist = min_d;
+                best_idx = i;
+            }
+        }
+        centroid_indices.push(best_idx);
+    }
+    let mut centroids: Vec<Vec<f32>> = centroid_indices
+        .iter()
+        .map(|&i| normed[i].clone())
+        .collect();
+
+    let mut labels = vec![0usize; n];
+    let max_iter = 50;
+    for _ in 0..max_iter {
+        // Assign each point to the nearest centroid (highest cosine).
+        let mut changed = false;
+        for (i, v) in normed.iter().enumerate() {
+            let new_label = (0..k)
+                .max_by(|&a, &b| {
+                    let da = cosine(v, &centroids[a]);
+                    let db = cosine(v, &centroids[b]);
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or(0);
+            if labels[i] != new_label {
+                labels[i] = new_label;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+
+        // Update centroids = mean of members, then re-normalise.
+        for (c, centroid) in centroids.iter_mut().enumerate().take(k) {
+            let mut new_c = vec![0.0f32; d];
+            let mut count = 0usize;
+            for (i, v) in normed.iter().enumerate() {
+                if labels[i] == c {
+                    for (j, x) in v.iter().enumerate() {
+                        new_c[j] += x;
+                    }
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                continue;
+            }
+            for x in &mut new_c {
+                *x /= count as f32;
+            }
+            let norm: f32 = new_c.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 1e-12 {
+                for x in &mut new_c {
+                    *x /= norm;
+                }
+            }
+            *centroid = new_c;
+        }
+    }
+    labels
 }
 
 // ── arXiv search ─────────────────────────────────────────────────────
@@ -646,7 +988,187 @@ fn split_tags(xml: &str, tag: &str) -> Vec<String> {
 }
 
 fn collapse_ws(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    decode_xml_entities(&s.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// Decode the handful of XML/HTML entities arXiv's Atom feed actually
+/// uses in `<title>` and `<summary>` text. Without this, an ampersand
+/// in a paper title arrives as the literal four characters `&amp;`.
+/// Covers named entities (amp/lt/gt/quot/apos) and numeric escapes
+/// (`&#NN;`, `&#xHH;`).
+fn decode_xml_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp + 1..];
+        match after.find(';') {
+            Some(end) => {
+                let entity = &after[..end];
+                let decoded: Option<char> = if let Some(rest_e) = entity.strip_prefix('#') {
+                    let (radix, digits) = match rest_e.strip_prefix(['x', 'X']) {
+                        Some(hex) => (16u32, hex),
+                        None => (10u32, rest_e),
+                    };
+                    u32::from_str_radix(digits, radix).ok().and_then(char::from_u32)
+                } else {
+                    match entity {
+                        "amp" => Some('&'),
+                        "lt" => Some('<'),
+                        "gt" => Some('>'),
+                        "quot" => Some('"'),
+                        "apos" => Some('\''),
+                        _ => None,
+                    }
+                };
+                match decoded {
+                    Some(c) => {
+                        out.push(c);
+                        rest = &after[end + 1..];
+                    }
+                    None => {
+                        out.push('&');
+                        rest = after;
+                    }
+                }
+            }
+            None => {
+                out.push('&');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Strip HTML tags from an ar5iv document and return readable plain
+/// text. Skips the contents of `<script>`, `<style>`, `<head>`, `<nav>`,
+/// `<footer>`, and ar5iv's `<div class="ltx_bibliography">` block (the
+/// agent rarely needs the full bibliography and it's most of the page).
+/// Block-level tags become single newlines so paragraph structure
+/// survives; inline entities are decoded via `decode_xml_entities`.
+/// This is a deliberately simple lexer — ar5iv's output is well-formed
+/// XHTML, so we don't need a full DOM.
+fn html_to_plaintext(html: &str) -> String {
+    let bytes = html.as_bytes();
+    let mut out = String::with_capacity(html.len() / 2);
+    let mut i = 0;
+    let drop_tags: &[&[u8]] = &[
+        b"script",
+        b"style",
+        b"head",
+        b"nav",
+        b"footer",
+        b"figure",
+        b"math",
+    ];
+    let block_tags: &[&[u8]] = &[
+        b"p", b"div", b"li", b"h1", b"h2", b"h3", b"h4", b"h5", b"h6", b"br", b"section",
+        b"article", b"tr", b"table", b"blockquote",
+    ];
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            // Skip comments.
+            if bytes[i..].starts_with(b"<!--") {
+                if let Some(end) = html[i..].find("-->") {
+                    i += end + 3;
+                    continue;
+                } else {
+                    break;
+                }
+            }
+            // Find tag end.
+            let Some(end_rel) = html[i..].find('>') else {
+                break;
+            };
+            let tag_block = &html[i + 1..i + end_rel];
+            let tag_block_bytes = tag_block.as_bytes();
+            // Skip the bibliography section by sniffing the class attr.
+            if tag_block_bytes.first() == Some(&b'd')
+                && tag_block.starts_with("div")
+                && tag_block.contains("ltx_bibliography")
+            {
+                if let Some(close_rel) = html[i..].find("</div>") {
+                    i += close_rel + "</div>".len();
+                    continue;
+                }
+            }
+            // Determine tag name (strip leading '/' and read until
+            // whitespace or '>').
+            let (is_close, name_start) = if tag_block_bytes.first() == Some(&b'/') {
+                (true, 1)
+            } else {
+                (false, 0)
+            };
+            let name_end = tag_block_bytes[name_start..]
+                .iter()
+                .position(|&b| b == b' ' || b == b'\t' || b == b'/')
+                .map(|p| name_start + p)
+                .unwrap_or(tag_block_bytes.len());
+            let name: Vec<u8> = tag_block_bytes[name_start..name_end]
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
+
+            // For drop_tags, fast-forward to the matching close tag.
+            if !is_close && drop_tags.iter().any(|t| t == &name.as_slice()) {
+                let close = format!("</{}", std::str::from_utf8(&name).unwrap_or(""));
+                if let Some(close_rel) = html[i..].find(&close) {
+                    if let Some(gt) = html[i + close_rel..].find('>') {
+                        i += close_rel + gt + 1;
+                        continue;
+                    }
+                }
+                break;
+            }
+
+            if block_tags.iter().any(|t| t == &name.as_slice()) {
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            } else {
+                // inline tag — emit a space so adjacent words don't fuse.
+                if !out.ends_with(char::is_whitespace) {
+                    out.push(' ');
+                }
+            }
+            i += end_rel + 1;
+        } else {
+            // Append text run up to the next '<'.
+            let next = html[i..].find('<').map(|p| i + p).unwrap_or(bytes.len());
+            out.push_str(&decode_xml_entities(&html[i..next]));
+            i = next;
+        }
+    }
+
+    // Collapse runs of whitespace, but preserve blank-line paragraph
+    // boundaries: turn 3+ newlines into 2, and trim leading/trailing.
+    let mut collapsed = String::with_capacity(out.len());
+    let mut last_was_space = false;
+    let mut newlines = 0usize;
+    for c in out.chars() {
+        if c == '\n' {
+            newlines += 1;
+            last_was_space = true;
+            continue;
+        }
+        if newlines > 0 {
+            collapsed.push_str(if newlines >= 2 { "\n\n" } else { "\n" });
+            newlines = 0;
+            last_was_space = true;
+        }
+        if c.is_whitespace() {
+            if !last_was_space {
+                collapsed.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            collapsed.push(c);
+            last_was_space = false;
+        }
+    }
+    collapsed.trim().to_string()
 }
 
 fn percent_encode_query(s: &str) -> String {
@@ -904,6 +1426,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let adapter = Arc::new(AgUiAdapter::new(&store));
     adapter.set_branding("ArxivCloud", "search · embed · explore");
     adapter.set_layout("canvas-primary");
+    adapter.set_welcome(
+        "A spatial map of arXiv, drawn for you on demand.",
+        "Name a research topic in plain language. The agent searches arXiv, embeds the abstracts, clusters them, and lays them out as a 2D cloud you can hover and click. Each cluster is auto-named; each point opens a paper synthesis with its nearest neighbours.",
+        [
+            "Survey of recent work on retrieval-augmented generation",
+            "What's new in LLM agent evaluation?",
+            "Diffusion models for code generation",
+            "Mechanistic interpretability of transformers",
+        ],
+    );
     let session_id = SessionId(Uuid::new_v4());
 
     let (tap_tx, mut tap_rx) = mpsc::unbounded_channel::<LoopEvent>();
@@ -941,6 +1473,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "project_2d".into(),
         "get_paper".into(),
         "nearest_neighbors".into(),
+        "cluster_papers".into(),
+        "fetch_paper_text".into(),
     ];
     let mut repl = ReplAgent::new(external_fns, Box::new(conv_bridge));
     repl.set_variable("gw_session_id", Object::String(session_id.0.to_string()))

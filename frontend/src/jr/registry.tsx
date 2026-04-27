@@ -19,6 +19,16 @@ const built = defineRegistry(spikeCatalog, {
     Column: ({ children }) => <div className="a2ui-column">{children}</div>,
     Row: ({ children }) => <div className="a2ui-row">{children}</div>,
     Text: ({ props }) => <span className="a2ui-text">{props.text}</span>,
+    Link: ({ props }) => (
+      <a
+        className="a2ui-link"
+        href={props.url}
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        {props.label ?? props.url}
+      </a>
+    ),
     Button: ({ props, emit }) => (
       <button
         type="button"
@@ -90,6 +100,7 @@ const built = defineRegistry(spikeCatalog, {
     EntityCloud: ({ props, emit }) => (
       <EntityCloudWidget
         points={props.points}
+        clusters={props.clusters ?? null}
         highlight={props.highlight ?? null}
         onPointClick={(id) => {
           // Per-point ActionBinding registered by the translator;

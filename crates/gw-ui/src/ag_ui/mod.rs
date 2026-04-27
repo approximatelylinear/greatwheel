@@ -8,7 +8,7 @@ pub mod codec;
 pub mod events;
 pub mod state;
 
-pub use adapter::{AgUiAdapter, Branding};
+pub use adapter::{AgUiAdapter, Branding, Welcome};
 pub use codec::loop_event_to_ag_ui;
 pub use events::{AgUiEvent, PostMessageBody};
 pub use state::{canonical_state, notification_session, notification_to_patches};

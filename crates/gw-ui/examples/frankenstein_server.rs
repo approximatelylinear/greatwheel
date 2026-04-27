@@ -382,6 +382,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // AG-UI
     let adapter = Arc::new(AgUiAdapter::new(&store));
     adapter.set_branding("Frankenstein", "a conversational reading companion");
+    adapter.set_welcome(
+        "An agent reading <em>Frankenstein</em> with you.",
+        "Ask about the novel in plain language. Pick a chapter from the list on the right and you'll get a summary grounded in the actual text — with follow-up questions and the characters who appear in that section ready to click.",
+        [
+            "Summarize Chapter 5",
+            "Who is Robert Walton?",
+            "What themes run through the novel?",
+        ],
+    );
     let session_id = SessionId(Uuid::new_v4());
 
     // Channels + tap (same pattern as llm_server)

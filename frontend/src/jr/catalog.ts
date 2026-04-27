@@ -18,6 +18,14 @@ export const spikeCatalog = defineCatalog(schema, {
       props: z.object({ text: z.string() }),
       description: 'Plain text',
     },
+    Link: {
+      props: z.object({
+        url: z.string(),
+        label: z.string().nullable().optional(),
+      }),
+      description:
+        'External hyperlink rendered as a real <a target="_blank">. Use for URLs (paper PDFs, project pages) instead of putting them in a Text node.',
+    },
     Button: {
       props: z.object({
         label: z.string(),
@@ -64,6 +72,9 @@ export const spikeCatalog = defineCatalog(schema, {
               x: z.number(),
               y: z.number(),
               kind: z.string().optional(),
+              cluster: z.number().int().optional(),
+              year: z.string().optional(),
+              category: z.string().optional(),
               meta: z.record(z.string(), z.unknown()).optional(),
             })
             // Allow arbitrary extra fields on each point (the agent
@@ -71,10 +82,21 @@ export const spikeCatalog = defineCatalog(schema, {
             // re-fetch).
             .loose(),
         ),
+        clusters: z
+          .array(
+            z.object({
+              id: z.number().int(),
+              label: z.string(),
+              x: z.number(),
+              y: z.number(),
+            }),
+          )
+          .nullable()
+          .optional(),
         highlight: z.record(z.string(), z.boolean()).nullable().optional(),
       }),
       description:
-        '2D scatter plot of typed entities/papers; click a point to drill in. Each point may carry a `meta` object that round-trips back in the click event.',
+        '2D scatter plot of typed entities/papers; click a point to drill in. Each point may carry a `cluster` id (color), and the optional top-level `clusters` array provides faint always-on centroid labels.',
     },
   },
   actions: {

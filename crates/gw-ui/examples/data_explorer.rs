@@ -494,6 +494,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let adapter = Arc::new(AgUiAdapter::new(&store));
     adapter.set_branding("Bookshop", "a SQL data explorer");
     adapter.set_layout("canvas-primary");
+    adapter.set_welcome(
+        "Ask the bookshop database in plain English.",
+        "The agent translates your question to SQL, runs it against a small bookshop schema (orders, books, customers), and pins the query + result table to the canvas. Each answer is grounded in actual rows — no hallucinated totals.",
+        [
+            "Top 5 best-selling genres by revenue",
+            "Which customers ordered the most this year?",
+            "Average order size by month",
+        ],
+    );
     let session_id = SessionId(Uuid::new_v4());
 
     let (tap_tx, mut tap_rx) = mpsc::unbounded_channel::<LoopEvent>();
