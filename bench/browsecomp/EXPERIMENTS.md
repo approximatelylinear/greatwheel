@@ -221,6 +221,44 @@ accuracy, not timeout artifacts.
 ### Key insight
 86% of failures are **retrieval** (right documents never found), not extraction. The 9B model reasons well once it has the right documents. Dense vector search doesn't help — but ColBERT reranking of a wider BM25 pool does, because the right documents are often in BM25's top-200 but ranked too low for the agent to see.
 
+### Supervisor K=3 batch (apr26) — pre-search saturation
+
+First parallel fan-out via the `browsecomp-supervisor` skill. Three hypotheses,
+each probing a different "more X" axis on the passage+doc-RRF winner stack
+(11/29 exact, 13/29 fuzzy baseline).
+
+| Slug | Dimension | Delta | Exact | Fuzzy | Tokens | Verdict |
+|---|---|---|---|---|---|---|
+| `presearch-q7` | sub-query **breadth** | n_presearch_queries 5→7 | 6/29 | 8/29 | 79K | regress -3/-5 |
+| `coverage-per3` | coverage **depth** | per_query 2→3 (S5-lite) | 6/29 | 7/29 | 67K | regress -3/-5 |
+| `prf-strong` | query **expansion** | PRF + round-2 widened | 6/29 | 6/29 | 89K | regress -5/-7 |
+
+**Strong convergence**: every direction that adds more documents to the
+pre-search pool regressed. Token usage dropped 26-44% from baseline as the
+agent terminated early on weaker evidence — the same signature as the earlier
+k=15 widening (6/29). The 9B + passage stack appears saturated at default
+settings (5 sub-queries × 5 hits + 1 PRF × 3 + round-2 3×5 ≈ 30-35 candidates,
+filtered to ~15, presented as ~10 final to the agent).
+
+**Audit findings surfaced by the batch:**
+- 9 BenchConfig fields were declared but unused (n_presearch_queries,
+  presearch_k, prf_top_n, prf_term_count, prf_k, round2_keep_max,
+  round2_new_queries, round2_k, context_snippet_chars). Fixed in
+  commit 507981e.
+- The pre-search prompt template hardcoded "output 5 SHORT BM25 keyword
+  search queries" — wiring `.take(N)` was insufficient. Fixed in 53a58ed.
+- The Agent tool's sandbox locked subagents to the parent's main checkout,
+  preventing them from operating in the spawned worktrees. The supervisor
+  skill's worktree-isolation pattern needs revisiting; for now, runs land
+  in `runs/sup-<slug>/` of main with config files committed in main.
+
+**What this means for next batches**: stop testing "more X" along any
+pre-search dimension. The next frontier is **better X, not more X**:
+- M1 monoT5-3B reranker — picks better 10 from a 200 pool (narrowing,
+  not widening).
+- S1 MMR diversification — different selection of the same-size pool.
+- Different agent dynamics (smaller k? different prompt? larger model?).
+
 ### Meng et al. 2026 — `Revisiting Text Ranking in Deep Research` (apr24)
 
 Independent study on the **same BrowseComp-Plus dataset** we use. Full 830
@@ -848,7 +886,7 @@ and ran three ablation variants against sample30 with qwen3.5:9b.
 
 ---
 
-## Priority Ranking (updated apr24 post-Meng)
+## Priority Ranking (updated apr26 post-supervisor-K3)
 
 Six independent threads:
 1. **Cross-encoder reranking (new, evidence from Meng et al.)** — the single biggest lever reported on BrowseComp-Plus (+20.5% acc with BM25+monoT5-3B at depth 50). Our prior ColBERT-rerank regression is likely specific to that reranker, not "reranking in general." M1 (monoT5 rerank) + M2 (Q2Q reformulation) together represent the most concrete unexplored direction with external evidence.
@@ -894,6 +932,9 @@ Six independent threads:
 | **26** | S9. Score normalization (arctan) | Enables others | Small | Infrastructure for S4 and weighted S6. Only worth doing if either shows promise. |
 | ~~done~~ | ~~R9. Qwen3 at k=50 diagnostic~~ | | | **Done apr19 — 4/29 exact, same as k=10. Agent can't recognize gold even with 5x candidates. Visibility not the bottleneck.** |
 | ~~done~~ | ~~S5-lite. Coverage pre-search~~ | | | **Done apr24 — 12/29 fuzzy on sample30, complementary channel (wins q1106, q625 no other config gets). 4-way union = 20/30.** |
+| ~~done~~ | ~~presearch-q7. Pre-search breadth (sup-batch)~~ | | | **Done apr26 — 8/29 fuzzy. Pre-search saturated at 5 sub-queries on this stack.** |
+| ~~done~~ | ~~coverage-per3. Coverage depth (sup-batch)~~ | | | **Done apr26 — 7/29 fuzzy. 15 docs overflow 9B attention; coverage saturated at per_query=2.** |
+| ~~done~~ | ~~prf-strong. Expansion aggressiveness (sup-batch)~~ | | | **Done apr26 — 6/29 fuzzy. More PRF + more round-2 = noise that drowns signal.** |
 | ~~done~~ | ~~R8. Qwen3-Embedding (Phase 1: R@k)~~ | | | **Done apr17 — R@200=24/30 (vs BM25 12/30, ColBERT 25/30) at 54ms p50. Hypothesis confirmed.** |
 | ~~done~~ | ~~R4. BM25 + blob rerank~~ | | | **Done — 7/30 (+2 over 5/30 baseline). Complementary to Qdrant. Union=14/30.** |
 | ~~done~~ | ~~KB eval harness~~ | | | **Done — 3 ablations, all below baseline** |
