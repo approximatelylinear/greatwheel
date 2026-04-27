@@ -13,11 +13,22 @@ interface Props {
   onSuggest: (content: string) => void;
 }
 
-const SUGGESTIONS: string[] = [
-  'Summarize Chapter 5',
-  'Who is Robert Walton?',
-  'What themes run through the novel?',
-];
+interface Welcome {
+  heading: string;
+  body: string;
+  suggestions: string[];
+}
+
+const FALLBACK_WELCOME: Welcome = {
+  heading: 'An agent reading <em>Frankenstein</em> with you.',
+  body:
+    "Ask about the novel in plain language. Pick a chapter from the list on the right and you'll get a summary grounded in the actual text — with follow-up questions and the characters who appear in that section ready to click.",
+  suggestions: [
+    'Summarize Chapter 5',
+    'Who is Robert Walton?',
+    'What themes run through the novel?',
+  ],
+};
 
 export function ChatPane({
   messages,
@@ -45,9 +56,11 @@ export function ChatPane({
   // (message, typing indicator, inline widget) appears.
   const isEmpty =
     messages.length === 0 && !running && inlineIds.length === 0;
+  const welcome =
+    useStateValue<Welcome | null>('/branding/welcome') ?? FALLBACK_WELCOME;
   return (
     <div className="chat-pane">
-      {isEmpty && <EmptyState onSuggest={onSuggest} />}
+      {isEmpty && <EmptyState welcome={welcome} onSuggest={onSuggest} />}
       <div className="messages">
         {messages.map((m) => (
           <div key={m.id}>
@@ -121,31 +134,37 @@ function pullQuote(text: string): string {
   return out;
 }
 
-function EmptyState({ onSuggest }: { onSuggest: (content: string) => void }) {
+function EmptyState({
+  welcome,
+  onSuggest,
+}: {
+  welcome: Welcome;
+  onSuggest: (content: string) => void;
+}) {
   return (
     <div className="empty-state">
-      <h1>An agent reading <em>Frankenstein</em> with you.</h1>
-      <p>
-        Ask about the novel in plain language. Pick a chapter from the
-        list on the right and you'll get a summary grounded in the
-        actual text — with follow-up questions and the characters who
-        appear in that section ready to click.
-      </p>
-      <div className="empty-suggestions">
-        <div className="empty-suggestions-label">Try asking</div>
-        <div className="empty-suggestions-list">
-          {SUGGESTIONS.map((s) => (
-            <button
-              key={s}
-              type="button"
-              className="empty-suggestion"
-              onClick={() => onSuggest(s)}
-            >
-              {s}
-            </button>
-          ))}
+      {/* heading + body are server-controlled and trusted (set per
+          example via AgUiAdapter::set_welcome). They support light HTML
+          so demos can italicise titles or bold a phrase. */}
+      <h1 dangerouslySetInnerHTML={{ __html: welcome.heading }} />
+      <p dangerouslySetInnerHTML={{ __html: welcome.body }} />
+      {welcome.suggestions.length > 0 && (
+        <div className="empty-suggestions">
+          <div className="empty-suggestions-label">Try asking</div>
+          <div className="empty-suggestions-list">
+            {welcome.suggestions.map((s) => (
+              <button
+                key={s}
+                type="button"
+                className="empty-suggestion"
+                onClick={() => onSuggest(s)}
+              >
+                {s}
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

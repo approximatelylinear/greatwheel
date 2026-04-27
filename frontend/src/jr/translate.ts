@@ -53,6 +53,16 @@ export function toJrSpec(widget: Widget): Spec | null {
         };
         return key;
       }
+      case 'Link': {
+        elements[key] = {
+          type: 'Link',
+          props: {
+            url: String(node.url ?? ''),
+            label: node.label != null ? String(node.label) : null,
+          },
+        };
+        return key;
+      }
       case 'Button': {
         const id = String(node.id ?? key);
         elements[key] = {
@@ -171,7 +181,18 @@ export function toJrSpec(widget: Widget): Spec | null {
           x: typeof p.x === 'number' ? p.x : 0,
           y: typeof p.y === 'number' ? p.y : 0,
           kind: p.kind != null ? String(p.kind) : undefined,
+          cluster: typeof p.cluster === 'number' ? p.cluster : undefined,
+          year: p.year != null ? String(p.year) : undefined,
+          category: p.category != null ? String(p.category) : undefined,
         }));
+        const clusters = Array.isArray(node.clusters)
+          ? (node.clusters as Array<Record<string, unknown>>).map((c) => ({
+              id: typeof c.id === 'number' ? c.id : 0,
+              label: String(c.label ?? ''),
+              x: typeof c.x === 'number' ? c.x : 0,
+              y: typeof c.y === 'number' ? c.y : 0,
+            }))
+          : null;
         const highlight =
           node.highlight && typeof node.highlight === 'object'
             ? (node.highlight as Record<string, boolean>)
@@ -205,7 +226,7 @@ export function toJrSpec(widget: Widget): Spec | null {
         }
         elements[key] = {
           type: 'EntityCloud',
-          props: { points, highlight },
+          props: { points, clusters, highlight },
           on,
         } as UIElement;
         return key;

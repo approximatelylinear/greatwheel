@@ -377,6 +377,20 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
 .a2ui-card.pressed .a2ui-card-sub { color: rgba(255, 255, 255, 0.82); }
 .a2ui-widget.terminal .a2ui-card.pressed { text-decoration: none; }
 
+.a2ui-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 13px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  transition: color 120ms ease, border-color 120ms ease;
+  align-self: flex-start;
+  word-break: break-all;
+}
+.a2ui-link:hover {
+  color: var(--fg);
+  border-bottom-color: var(--fg);
+}
+
 /* ─── Message-anchored follow-ups ────────────────────────────── */
 
 .message-followups {
@@ -446,6 +460,16 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
   text-transform: uppercase; letter-spacing: 0.14em;
   color: var(--muted); padding: 0 0 8px;
   border-bottom: none; margin-bottom: 0;
+}
+/* Body Texts in canvas-aux (anything after the first-child label):
+   undo the canvas-pane label-cascade so long-form prose like paper
+   abstracts reads as paragraphs, not as 11-px tracked-out labels. The
+   picker-style assumption "every Text is a label" is only valid in
+   the primary canvas; the aux slot shows scoped detail content. */
+.canvas-aux .a2ui-column > .a2ui-text:not(:first-child) {
+  font-size: 13.5px; font-weight: 400; color: var(--fg-dim);
+  text-transform: none; letter-spacing: normal; line-height: 1.55;
+  margin: 0;
 }
 .canvas-aux .a2ui-card {
   background: var(--bg-soft); border-color: var(--border);
@@ -699,30 +723,89 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
   stroke: var(--border); stroke-width: 1; stroke-dasharray: 3 3;
   opacity: 0.4;
 }
-.cloud-point { cursor: pointer; }
+.entity-cloud-stage {
+  position: relative;
+}
+.cloud-point { cursor: pointer; transition: opacity 140ms ease; }
 .cloud-point circle {
-  fill: var(--accent); stroke: var(--bg-soft); stroke-width: 2;
-  transition: r 100ms, fill 100ms;
+  stroke: var(--bg-soft); stroke-width: 2;
+  transition: r 120ms ease;
 }
 .cloud-point .cloud-point-core {
-  fill: white; stroke: none; pointer-events: none;
+  fill: white !important; stroke: none; pointer-events: none;
 }
-.cloud-point:hover > circle:first-child {
-  r: 9;
-  fill: var(--accent-strong);
+/* Hover dim/sibling/focal states. While any point is hovered, the
+   parent SVG carries pointer state via React-controlled classes:
+   - .focal  = the hovered point (expanded, full glow)
+   - .sib    = same-cluster sibling (kept legible to cue grouping)
+   - .dim    = different cluster (faded back so the focal cluster pops) */
+.cloud-point.dim { opacity: 0.28; }
+.cloud-point.sib { opacity: 0.85; }
+.cloud-point.focal > circle:first-child {
+  filter: brightness(1.25) drop-shadow(0 0 6px rgba(255, 255, 255, 0.35));
 }
 .cloud-point.hi > circle:first-child {
-  fill: var(--warm);
   filter: drop-shadow(0 0 6px var(--warm-soft));
 }
-.cloud-point-author > circle:first-child { fill: #b48cde; }
-.cloud-point-concept > circle:first-child { fill: #7bd38f; }
-.cloud-point-method > circle:first-child { fill: #d6a56e; }
-.cloud-point-dataset > circle:first-child { fill: #6ec3d2; }
-.cloud-tooltip text {
-  fill: var(--fg); font: 11px/1.2 var(--font-ui);
+/* Faint, large cluster centroid labels — sit behind the points. */
+.cloud-cluster-label {
+  font: 600 11px/1.2 var(--font-ui);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.32;
   pointer-events: none;
-  paint-order: stroke; stroke: var(--bg-soft); stroke-width: 4px;
+  paint-order: stroke;
+  stroke: var(--bg-soft);
+  stroke-width: 4px;
+  transition: opacity 140ms ease;
+}
+.cloud-cluster-label.faded { opacity: 0.12; }
+
+/* Hover card — HTML overlay anchored to the hovered point in SVG-%
+   coords. Wraps title to a readable column (240px) and shows a meta
+   row underneath. The .ha-* / .va-* modifiers flip the anchor so the
+   card never runs off-stage. */
+.cloud-hovercard {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  max-width: 240px;
+  min-width: 140px;
+  padding: 8px 10px 9px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  animation: cloud-hovercard-in 90ms ease-out both;
+}
+@keyframes cloud-hovercard-in {
+  from { opacity: 0; transform: translate(var(--tx, -50%), calc(var(--ty, 12px) + 4px)); }
+  to   { opacity: 1; transform: translate(var(--tx, -50%), var(--ty, 12px)); }
+}
+.cloud-hovercard.ha-center { --tx: -50%; }
+.cloud-hovercard.ha-left   { --tx: 14px; }
+.cloud-hovercard.ha-right  { --tx: calc(-100% - 14px); }
+.cloud-hovercard.va-below  { --ty: 14px; }
+.cloud-hovercard.va-above  { --ty: calc(-100% - 14px); }
+.cloud-hovercard {
+  transform: translate(var(--tx), var(--ty));
+}
+.cloud-hovercard-title {
+  font: 500 12.5px/1.35 var(--font-ui);
+  color: var(--fg);
+  /* Allow a long title to wrap; cap at 4 lines so the card stays
+     compact even for 200-char arXiv titles. */
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.cloud-hovercard-meta {
+  margin-top: 4px;
+  font: 500 10.5px/1.3 var(--font-mono);
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  text-transform: lowercase;
 }
 .entity-cloud-legend {
   padding: 6px 14px; border-top: 1px solid var(--border);

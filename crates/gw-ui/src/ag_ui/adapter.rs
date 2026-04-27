@@ -83,6 +83,20 @@ pub struct Branding {
     pub title: String,
     pub subtitle: String,
     pub layout: Option<String>,
+    /// Pre-session welcome copy + suggested starter prompts shown by
+    /// the frontend's empty-state landing page. None falls back to a
+    /// generic prompt; each example sets its own via `set_welcome`.
+    pub welcome: Option<Welcome>,
+}
+
+/// Landing-page copy for an example. Shipped alongside `Branding`
+/// inside `/branding/welcome` and consumed by `ChatPane` when there
+/// are no messages yet.
+#[derive(Debug, Clone)]
+pub struct Welcome {
+    pub heading: String,
+    pub body: String,
+    pub suggestions: Vec<String>,
 }
 
 /// Public-facing adapter. Construct once per gw instance and share.
@@ -163,11 +177,40 @@ impl AgUiAdapter {
     pub fn set_branding(&self, title: impl Into<String>, subtitle: impl Into<String>) {
         let mut b = self.state.branding.lock().expect("branding mutex poisoned");
         let prev_layout = b.as_ref().and_then(|b| b.layout.clone());
+        let prev_welcome = b.as_ref().and_then(|b| b.welcome.clone());
         *b = Some(Branding {
             title: title.into(),
             subtitle: subtitle.into(),
             layout: prev_layout,
+            welcome: prev_welcome,
         });
+    }
+
+    /// Set the empty-state landing copy for this demo. Heading + body
+    /// run above the input box; each `suggestions` string becomes a
+    /// click-to-submit chip. Call after `set_branding`.
+    pub fn set_welcome(
+        &self,
+        heading: impl Into<String>,
+        body: impl Into<String>,
+        suggestions: impl IntoIterator<Item = impl Into<String>>,
+    ) {
+        let mut b = self.state.branding.lock().expect("branding mutex poisoned");
+        let welcome = Welcome {
+            heading: heading.into(),
+            body: body.into(),
+            suggestions: suggestions.into_iter().map(Into::into).collect(),
+        };
+        if let Some(existing) = b.as_mut() {
+            existing.welcome = Some(welcome);
+        } else {
+            *b = Some(Branding {
+                title: String::new(),
+                subtitle: String::new(),
+                layout: None,
+                welcome: Some(welcome),
+            });
+        }
     }
 
     /// Override the layout hint. Call after `set_branding`. See
@@ -182,6 +225,7 @@ impl AgUiAdapter {
                 title: String::new(),
                 subtitle: String::new(),
                 layout: Some(layout),
+                welcome: None,
             });
         }
     }
