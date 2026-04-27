@@ -30,11 +30,18 @@
 //! topics want a closed vocabulary (existing labels in the corpus);
 //! entities want an open vocabulary with kind discipline.
 
+use std::collections::{HashMap, HashSet};
+
 use gw_llm::{Message, OllamaClient};
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
+use tracing::debug;
+use uuid::Uuid;
 
 use crate::error::KbError;
+use crate::ingest::KbStores;
 use crate::llm_parse::extract_json;
+use crate::topics::{bytes_to_vec, cosine, slugify, vec_to_bytes};
 
 /// Recommended `kind` taxonomy. Free-form on the database side
 /// (`kb_entities.kind TEXT`) but the prompt asks the model to pick
@@ -291,4 +298,645 @@ mod tests {
         let out = parse_extractor_output(raw).unwrap();
         assert!(out.is_empty());
     }
+
+    #[test]
+    fn pick_canonical_label_takes_longest() {
+        let mentions = ["P. Lewis", "Patrick Lewis", "Lewis"];
+        let canonical = pick_canonical_label(&mentions);
+        assert_eq!(canonical, "Patrick Lewis");
+    }
+
+    #[test]
+    fn aliases_excludes_canonical_and_dedups() {
+        let mentions = vec![
+            "Patrick Lewis".to_string(),
+            "P. Lewis".to_string(),
+            "patrick lewis".to_string(),
+            "Lewis".to_string(),
+        ];
+        let aliases = collect_aliases("Patrick Lewis", &mentions);
+        assert_eq!(aliases, vec!["P. Lewis".to_string(), "Lewis".to_string()]);
+    }
+}
+
+// ─── Step 3: canonicalise + persist ─────────────────────────────────
+//
+// The bridge from `RawEntity` (per-chunk extractor output) to
+// `kb_entities` (canonical persistent rows). Three responsibilities:
+//   1. Embed each mention's `canonical_form` in one batch.
+//   2. Cluster mentions across chunks by cosine, both against existing
+//      `kb_entities` rows and amongst themselves within the batch.
+//      Each cluster collapses to one canonical entity.
+//   3. Upsert entities (insert new clusters, update existing centroids
+//      and alias sets), then write `kb_chunk_entity_links` rows so the
+//      chunk → entity edges are queryable.
+//
+// Within-batch matching is greedy in mention order — first mention
+// sets the cluster's centroid, subsequent mentions either join an
+// existing cluster (if cosine ≥ threshold) or start a new one. Order
+// matters at the margin: ranking mentions by length (so the longer
+// surface form wins as canonical) is good enough at our scale.
+//
+// Cross-kind matching never happens — a "Patrick Lewis" `concept`
+// can't merge with a "Patrick Lewis" `author`.
+
+/// Bundle of entity mentions for one chunk. Pass a slice of these to
+/// `canonicalize_and_persist`.
+#[derive(Debug, Clone)]
+pub struct ChunkEntities {
+    pub chunk_id: Uuid,
+    pub entities: Vec<RawEntity>,
+}
+
+/// Tunable parameters for canonicalisation.
+#[derive(Debug, Clone)]
+pub struct CanonicalizeOpts {
+    /// Cosine threshold for both "match against existing entity" and
+    /// "merge two within-batch mentions". 0.9 is the design-doc
+    /// default; lower values aggressively collapse surface forms,
+    /// higher values keep more distinct entities.
+    pub merge_threshold: f32,
+    /// When true, also writes the canonical labels back to
+    /// `kb_chunks.entities TEXT[]` (the migration-010 column). Lets
+    /// callers bypass it during batch backfills if they're going to
+    /// rebuild that column separately.
+    pub write_chunk_entities_column: bool,
+}
+
+impl Default for CanonicalizeOpts {
+    fn default() -> Self {
+        Self {
+            merge_threshold: 0.9,
+            write_chunk_entities_column: true,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct EntityIngestReport {
+    pub mentions_in: usize,
+    pub entities_created: usize,
+    pub entities_updated: usize,
+    pub links_created: usize,
+}
+
+/// Top-level entry point for step 3. Embeds → clusters → upserts →
+/// links. Stores everything in one go; nothing here is transactional
+/// because each statement is idempotent (slug conflicts merge into
+/// the existing row; `kb_chunk_entity_links` is `ON CONFLICT DO
+/// NOTHING`).
+pub async fn canonicalize_and_persist(
+    stores: &KbStores,
+    chunks: &[ChunkEntities],
+    opts: &CanonicalizeOpts,
+) -> Result<EntityIngestReport, KbError> {
+    // 1. Flatten mentions into one parallel-array list.
+    let mut mentions: Vec<MentionRef> = Vec::new();
+    for c in chunks {
+        for raw in &c.entities {
+            mentions.push(MentionRef {
+                chunk_id: c.chunk_id,
+                raw: raw.clone(),
+            });
+        }
+    }
+    let mentions_in = mentions.len();
+    if mentions.is_empty() {
+        return Ok(EntityIngestReport::default());
+    }
+
+    // 2. Embed all canonical_forms in one batch. The embedder's
+    // sentence-transformers backend is loaded lazily on first call;
+    // batching keeps that one-time cost amortised.
+    let texts: Vec<String> = mentions.iter().map(|m| m.raw.canonical_form.clone()).collect();
+    let vectors = stores.embedder.embed_texts(&texts)?;
+    if vectors.len() != mentions.len() {
+        return Err(KbError::Other(format!(
+            "embedder returned {} vectors for {} mentions",
+            vectors.len(),
+            mentions.len()
+        )));
+    }
+
+    // 3. Group mention indices by kind so each kind clusters
+    // independently. Shared cosine threshold; per-kind threshold is a
+    // future tunable mentioned in the design doc.
+    let mut by_kind: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, m) in mentions.iter().enumerate() {
+        by_kind.entry(m.raw.kind.clone()).or_default().push(idx);
+    }
+
+    let mut report = EntityIngestReport {
+        mentions_in,
+        ..Default::default()
+    };
+    // mention index → assigned entity_id. Filled progressively as we
+    // cluster. Used in step 6 below to write the chunk-entity links.
+    let mut mention_entity: HashMap<usize, Uuid> = HashMap::new();
+
+    for (kind, indices) in by_kind {
+        // Sort within-kind by length descending so longer (more
+        // canonical) surface forms seed clusters first. A short
+        // mention arriving later then merges into the longer cluster
+        // and contributes its label as an alias.
+        let mut ordered = indices;
+        ordered.sort_by_key(|i| std::cmp::Reverse(mentions[*i].raw.canonical_form.len()));
+
+        let existing = load_entities_by_kind(&stores.pg, &kind).await?;
+
+        // Per-cluster accumulators (in-batch, brand-new clusters).
+        // existing-matching is handled separately below.
+        let mut new_clusters: Vec<NewCluster> = Vec::new();
+        // Updates to existing entity rows.
+        let mut existing_updates: HashMap<Uuid, ExistingUpdate> = HashMap::new();
+
+        for i in ordered {
+            let v = &vectors[i];
+            let raw = &mentions[i].raw;
+
+            // Best match across existing rows.
+            let mut best_existing: Option<(usize, f32)> = None;
+            for (j, e) in existing.iter().enumerate() {
+                if e.vector.is_empty() {
+                    continue;
+                }
+                let s = cosine(v, &e.vector);
+                if s >= opts.merge_threshold && best_existing.map(|(_, bs)| s > bs).unwrap_or(true) {
+                    best_existing = Some((j, s));
+                }
+            }
+            // Best match across in-batch new clusters.
+            let mut best_new: Option<(usize, f32)> = None;
+            for (j, c) in new_clusters.iter().enumerate() {
+                let s = cosine(v, &c.centroid);
+                if s >= opts.merge_threshold && best_new.map(|(_, bs)| s > bs).unwrap_or(true) {
+                    best_new = Some((j, s));
+                }
+            }
+
+            // Prefer attaching to an existing entity over creating a
+            // new in-batch cluster — keeps cross-batch consistency.
+            match (best_existing, best_new) {
+                (Some((j, _)), _) => {
+                    let entity_id = existing[j].entity_id;
+                    let upd = existing_updates
+                        .entry(entity_id)
+                        .or_insert_with(|| ExistingUpdate::seed(&existing[j]));
+                    upd.absorb(&raw.canonical_form, v);
+                    mention_entity.insert(i, entity_id);
+                }
+                (None, Some((j, _))) => {
+                    let cluster = &mut new_clusters[j];
+                    cluster.absorb(&raw.canonical_form, v);
+                    cluster.mention_indices.push(i);
+                }
+                (None, None) => {
+                    new_clusters.push(NewCluster::seed(kind.clone(), raw, v.clone(), i));
+                }
+            }
+        }
+
+        // Persist new clusters.
+        let mut used_slugs: HashSet<String> = existing.iter().map(|e| e.slug.clone()).collect();
+        for cluster in new_clusters {
+            let canonical = pick_canonical_label(
+                &cluster
+                    .surface_forms
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>(),
+            );
+            let aliases = collect_aliases(&canonical, &cluster.surface_forms);
+            let slug = unique_entity_slug(&canonical, &mut used_slugs);
+            let mention_count = cluster.mention_indices.len() as i32;
+            // Upsert form: ON CONFLICT (slug) merges into the existing
+            // row. Two batches that pick the same slug just collapse,
+            // matching what canonicalisation should do anyway.
+            let (entity_id, was_created) = upsert_entity(
+                &stores.pg,
+                &canonical,
+                &slug,
+                &cluster.kind,
+                &aliases,
+                &cluster.centroid,
+                mention_count,
+            )
+            .await?;
+            if was_created {
+                report.entities_created += 1;
+            } else {
+                report.entities_updated += 1;
+            }
+            for mi in cluster.mention_indices {
+                mention_entity.insert(mi, entity_id);
+            }
+        }
+
+        // Persist updates to existing entities.
+        for (entity_id, upd) in existing_updates {
+            update_entity_with_mentions(
+                &stores.pg,
+                entity_id,
+                &upd.centroid,
+                &upd.aliases_to_add,
+                upd.added_mentions,
+            )
+            .await?;
+            report.entities_updated += 1;
+        }
+    }
+
+    // 4. Write kb_chunk_entity_links and update kb_chunks.entities.
+    // Group by chunk so kb_chunks.entities batches a single UPDATE.
+    let mut by_chunk: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for (i, entity_id) in &mention_entity {
+        let chunk_id = mentions[*i].chunk_id;
+        if insert_chunk_entity_link(&stores.pg, chunk_id, *entity_id).await? {
+            report.links_created += 1;
+        }
+        by_chunk.entry(chunk_id).or_default().push(*entity_id);
+    }
+
+    if opts.write_chunk_entities_column {
+        // Replace kb_chunks.entities TEXT[] with the canonical labels
+        // for this batch's chunks. Pulls labels in one query so we
+        // don't fetch per-chunk.
+        let all_entity_ids: Vec<Uuid> = by_chunk.values().flatten().copied().collect();
+        if !all_entity_ids.is_empty() {
+            let labels = fetch_entity_labels(&stores.pg, &all_entity_ids).await?;
+            for (chunk_id, entity_ids) in &by_chunk {
+                let mut seen = HashSet::new();
+                let mut chunk_labels: Vec<String> = Vec::new();
+                for eid in entity_ids {
+                    if let Some(label) = labels.get(eid) {
+                        if seen.insert(label.clone()) {
+                            chunk_labels.push(label.clone());
+                        }
+                    }
+                }
+                sqlx::query("UPDATE kb_chunks SET entities = $2 WHERE chunk_id = $1")
+                    .bind(chunk_id)
+                    .bind(&chunk_labels)
+                    .execute(&stores.pg)
+                    .await?;
+            }
+        }
+    }
+
+    debug!(
+        mentions_in = report.mentions_in,
+        entities_created = report.entities_created,
+        entities_updated = report.entities_updated,
+        links_created = report.links_created,
+        "entity canonicalisation complete"
+    );
+    Ok(report)
+}
+
+// ─── Internal: clustering scratchpads ───────────────────────────────
+
+#[derive(Debug, Clone)]
+struct MentionRef {
+    chunk_id: Uuid,
+    raw: RawEntity,
+}
+
+/// In-batch cluster that hasn't been persisted yet.
+#[derive(Debug, Clone)]
+struct NewCluster {
+    kind: String,
+    surface_forms: Vec<String>,
+    centroid: Vec<f32>,
+    n: usize,
+    mention_indices: Vec<usize>,
+}
+
+impl NewCluster {
+    fn seed(kind: String, raw: &RawEntity, v: Vec<f32>, mention_idx: usize) -> Self {
+        Self {
+            kind,
+            surface_forms: vec![raw.canonical_form.clone()],
+            centroid: v,
+            n: 1,
+            mention_indices: vec![mention_idx],
+        }
+    }
+    fn absorb(&mut self, surface: &str, v: &[f32]) {
+        self.surface_forms.push(surface.to_string());
+        running_mean(&mut self.centroid, v, self.n);
+        self.n += 1;
+    }
+}
+
+/// Update accumulator for an existing kb_entities row that was matched
+/// against during this batch. We collect mentions here, then write a
+/// single UPDATE per row at the end of the kind's loop.
+#[derive(Debug, Clone)]
+struct ExistingUpdate {
+    centroid: Vec<f32>,
+    n: usize,
+    existing_label: String,
+    existing_aliases: HashSet<String>,
+    aliases_to_add: Vec<String>,
+    added_mentions: i32,
+}
+
+impl ExistingUpdate {
+    fn seed(row: &EntityRow) -> Self {
+        Self {
+            centroid: row.vector.clone(),
+            n: row.mentions.max(1) as usize,
+            existing_label: row.label.clone(),
+            existing_aliases: row.aliases.iter().cloned().collect(),
+            aliases_to_add: Vec::new(),
+            added_mentions: 0,
+        }
+    }
+    fn absorb(&mut self, surface: &str, v: &[f32]) {
+        running_mean(&mut self.centroid, v, self.n);
+        self.n += 1;
+        self.added_mentions += 1;
+        // Don't re-add the canonical label or already-known aliases.
+        if surface != self.existing_label
+            && !self.existing_aliases.contains(surface)
+            && !self.aliases_to_add.iter().any(|a| a == surface)
+        {
+            self.aliases_to_add.push(surface.to_string());
+        }
+    }
+}
+
+/// In-place running mean: `dst = (dst * n + v) / (n + 1)`.
+fn running_mean(dst: &mut [f32], v: &[f32], n: usize) {
+    if dst.len() != v.len() {
+        // Dimension mismatch — leave dst alone rather than panic.
+        // Shouldn't happen given we pull from one embedder run.
+        return;
+    }
+    let n_f = n as f32;
+    for (d, x) in dst.iter_mut().zip(v.iter()) {
+        *d = (*d * n_f + *x) / (n_f + 1.0);
+    }
+}
+
+/// Pick the longest surface form as the canonical label. Ties broken
+/// by lexicographic order so the choice is deterministic across runs.
+fn pick_canonical_label(mentions: &[&str]) -> String {
+    mentions
+        .iter()
+        .copied()
+        .max_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Aliases = unique surface forms minus the canonical, in order of
+/// first appearance. Case-sensitive equality with the canonical, but
+/// case-insensitive dedup amongst the rest (so "Lewis" and "lewis"
+/// don't both end up in the array).
+fn collect_aliases(canonical: &str, mentions: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen_lower: HashSet<String> = HashSet::new();
+    seen_lower.insert(canonical.to_lowercase());
+    for m in mentions {
+        if m == canonical {
+            continue;
+        }
+        let key = m.to_lowercase();
+        if seen_lower.insert(key) {
+            out.push(m.clone());
+        }
+    }
+    out
+}
+
+/// Pick a slug that doesn't collide with `used`; mutates `used`.
+fn unique_entity_slug(label: &str, used: &mut HashSet<String>) -> String {
+    let base = slugify(label);
+    if !used.contains(&base) {
+        used.insert(base.clone());
+        return base;
+    }
+    let mut n = 2;
+    loop {
+        let cand = format!("{base}-{n}");
+        if !used.contains(&cand) {
+            used.insert(cand.clone());
+            return cand;
+        }
+        n += 1;
+    }
+}
+
+// ─── Internal: SQL ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct EntityRow {
+    entity_id: Uuid,
+    label: String,
+    slug: String,
+    aliases: Vec<String>,
+    mentions: i32,
+    vector: Vec<f32>,
+}
+
+/// Raw row shape from `SELECT entity_id, label, slug, aliases,
+/// mentions, vector FROM kb_entities`. Pulled out as a type alias so
+/// the sqlx call site doesn't trip clippy::type_complexity.
+type EntityRowTuple = (Uuid, String, String, Vec<String>, i32, Option<Vec<u8>>);
+
+async fn load_entities_by_kind(pool: &PgPool, kind: &str) -> Result<Vec<EntityRow>, KbError> {
+    let rows: Vec<EntityRowTuple> = sqlx::query_as(
+        "SELECT entity_id, label, slug, aliases, mentions, vector FROM kb_entities WHERE kind = $1",
+    )
+    .bind(kind)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(entity_id, label, slug, aliases, mentions, vector)| EntityRow {
+            entity_id,
+            label,
+            slug,
+            aliases,
+            mentions,
+            vector: vector.map(|b| bytes_to_vec(&b)).unwrap_or_default(),
+        })
+        .collect())
+}
+
+/// Insert a new entity, or merge into an existing row on slug
+/// collision. Returns `(entity_id, was_created)`. When merging, the
+/// existing row's `vector` is updated to the (count-weighted) mean
+/// across both, aliases are unioned, and `mentions` is incremented by
+/// the new contribution.
+async fn upsert_entity(
+    pool: &PgPool,
+    label: &str,
+    slug: &str,
+    kind: &str,
+    aliases: &[String],
+    vector: &[f32],
+    mention_count: i32,
+) -> Result<(Uuid, bool), KbError> {
+    let bytes = vec_to_bytes(vector);
+    // Try insert first. ON CONFLICT (slug) returns the existing row
+    // unmodified; we then read it, weighted-average the vector, union
+    // aliases, and UPDATE.
+    let inserted: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        INSERT INTO kb_entities (label, slug, kind, aliases, mentions, vector)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (slug) DO NOTHING
+        RETURNING entity_id
+        "#,
+    )
+    .bind(label)
+    .bind(slug)
+    .bind(kind)
+    .bind(aliases)
+    .bind(mention_count)
+    .bind(&bytes)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(id) = inserted {
+        return Ok((id, true));
+    }
+    // Slug collision — merge into the existing row.
+    let row: (Uuid, Vec<String>, i32, Option<Vec<u8>>) = sqlx::query_as(
+        "SELECT entity_id, aliases, mentions, vector FROM kb_entities WHERE slug = $1",
+    )
+    .bind(slug)
+    .fetch_one(pool)
+    .await?;
+    let (entity_id, existing_aliases, existing_mentions, existing_vector) = row;
+    let merged_aliases = union_aliases_with(label, &existing_aliases, aliases);
+    let merged_vector = weighted_mean_vector(
+        &existing_vector.map(|b| bytes_to_vec(&b)).unwrap_or_default(),
+        existing_mentions.max(1),
+        vector,
+        mention_count.max(1),
+    );
+    let merged_bytes = vec_to_bytes(&merged_vector);
+    sqlx::query(
+        r#"
+        UPDATE kb_entities
+        SET aliases    = $2,
+            mentions   = mentions + $3,
+            vector     = $4,
+            last_seen  = now(),
+            updated_at = now()
+        WHERE entity_id = $1
+        "#,
+    )
+    .bind(entity_id)
+    .bind(&merged_aliases)
+    .bind(mention_count)
+    .bind(&merged_bytes)
+    .execute(pool)
+    .await?;
+    Ok((entity_id, false))
+}
+
+/// Update path for entities matched against during a batch. Same shape
+/// as the merge branch in `upsert_entity` but the caller has already
+/// computed the new centroid and aliases-to-add.
+async fn update_entity_with_mentions(
+    pool: &PgPool,
+    entity_id: Uuid,
+    centroid: &[f32],
+    aliases_to_add: &[String],
+    added_mentions: i32,
+) -> Result<(), KbError> {
+    if added_mentions == 0 && aliases_to_add.is_empty() {
+        return Ok(());
+    }
+    let bytes = vec_to_bytes(centroid);
+    sqlx::query(
+        r#"
+        UPDATE kb_entities
+        SET aliases    = (
+                SELECT array_agg(DISTINCT a) FROM unnest(aliases || $2::text[]) AS a
+            ),
+            mentions   = mentions + $3,
+            vector     = $4,
+            last_seen  = now(),
+            updated_at = now()
+        WHERE entity_id = $1
+        "#,
+    )
+    .bind(entity_id)
+    .bind(aliases_to_add)
+    .bind(added_mentions)
+    .bind(&bytes)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Insert one chunk → entity edge. Returns true when the row was
+/// actually new (not a duplicate (chunk_id, entity_id) pair).
+async fn insert_chunk_entity_link(
+    pool: &PgPool,
+    chunk_id: Uuid,
+    entity_id: Uuid,
+) -> Result<bool, KbError> {
+    let inserted: Option<(Uuid,)> = sqlx::query_as(
+        r#"
+        INSERT INTO kb_chunk_entity_links (chunk_id, entity_id)
+        VALUES ($1, $2)
+        ON CONFLICT (chunk_id, entity_id) DO NOTHING
+        RETURNING entity_id
+        "#,
+    )
+    .bind(chunk_id)
+    .bind(entity_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(inserted.is_some())
+}
+
+async fn fetch_entity_labels(
+    pool: &PgPool,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, String>, KbError> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT entity_id, label FROM kb_entities WHERE entity_id = ANY($1)")
+            .bind(ids)
+            .fetch_all(pool)
+            .await?;
+    Ok(rows.into_iter().collect())
+}
+
+fn union_aliases_with(
+    canonical: &str,
+    existing: &[String],
+    incoming: &[String],
+) -> Vec<String> {
+    let mut seen_lower: HashSet<String> = HashSet::new();
+    seen_lower.insert(canonical.to_lowercase());
+    let mut out = Vec::new();
+    for a in existing.iter().chain(incoming.iter()) {
+        let key = a.to_lowercase();
+        if seen_lower.insert(key) {
+            out.push(a.clone());
+        }
+    }
+    out
+}
+
+fn weighted_mean_vector(a: &[f32], na: i32, b: &[f32], nb: i32) -> Vec<f32> {
+    if a.is_empty() {
+        return b.to_vec();
+    }
+    if b.is_empty() || a.len() != b.len() {
+        return a.to_vec();
+    }
+    let total = (na + nb).max(1) as f32;
+    let wa = na as f32 / total;
+    let wb = nb as f32 / total;
+    a.iter().zip(b.iter()).map(|(x, y)| x * wa + y * wb).collect()
 }
