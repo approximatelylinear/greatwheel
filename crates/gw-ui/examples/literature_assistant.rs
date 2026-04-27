@@ -23,7 +23,11 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use gw_core::{LoopEvent, Plugin, PluginContext, PluginError, PluginManifest, SessionId};
 use gw_engine::GreatWheelEngine;
+use gw_kb::entities::{
+    extract_and_persist_entities_for_source, CanonicalizeOpts, EntityIngestReport,
+};
 use gw_kb::ingest::{ingest_inline, KbStores};
+use gw_kb::source::UpsertOutcome;
 use gw_llm::OllamaClient;
 use gw_loop::bridge::{new_ask_handle, ConversationBridge};
 use gw_loop::{ConversationLoop, LoopConfig, OllamaLlmClient, SnapshotPolicy};
@@ -73,6 +77,8 @@ Data host functions:
       Fetches the FULL paper body from ar5iv (arXiv's LaTeX→HTML projection) and returns it as plain text. Use this when the user asks a grounded question that requires more than the abstract — e.g. "what method does X use", "what are the actual results", "compare X and Y in detail". Cached per id, so repeat calls are free. `truncated=True` means the paper is longer than max_chars and got cut at the end; bump max_chars (≤200000) or grep for the section you care about. Errors with a clear message if ar5iv has no HTML rendering for that paper (rare but possible — older or heavily LaTeX-customised papers).
   - kb_paper_count() -> {"configured": bool, "sources": int}
       Returns the size of the persistent gw-kb corpus (papers ingested across all past sessions). Every successful `arxiv_search` adds its results to the KB as a side effect, so this number grows with use. Mention it in your FINAL on the first turn ("…across N papers in your library") when `configured=True`. If `configured=False` the KB isn't wired up; just omit the line.
+  - entity_extraction_status() -> {"configured": bool, "queued": int, "in_progress": int, "completed": int, "completed_chunks": int, "entities_created_total": int, "entities_updated_total": int, "links_created_total": int, "last_run_ms": int}
+      Snapshot of the background entity-extraction worker. After each `arxiv_search` the harness queues the new sources; the worker pulls them off the inbox and runs an LLM-prompted extraction pass per chunk to populate `kb_entities`. The chat path NEVER waits on this — entity extraction lags behind ingestion, and that's expected. Mention progress in narration when relevant: "extracting entities from N papers in the background" if `queued > 0`, or "found N entities across M papers" once `completed > 0`. When `configured=False` the worker is disabled; omit the line.
 
 UI host functions (same as the other demos):
   - emit_widget(session_id, kind, payload, multi_use=False, follow_up=False, scope=None) -> {"widget_id"}
@@ -333,6 +339,13 @@ struct LiteraturePlugin {
     /// `DATABASE_URL` etc. aren't configured — demo still runs without
     /// KB, just stateless.
     kb: Option<Arc<KbStores>>,
+    /// Optional handle to a background worker that pulls per-source
+    /// entity extraction jobs off an inbox and runs them sequentially
+    /// against the LLM. `arxiv_search` enqueues new/updated source
+    /// ids and returns immediately so the chat path never waits on
+    /// per-chunk LLM calls. None when entity extraction is disabled
+    /// (env `LITERATURE_ENTITY_EXTRACTION` unset/falsey, or `kb` None).
+    entity_worker: Option<EntityWorkerHandle>,
 }
 
 impl LiteraturePlugin {
@@ -349,11 +362,17 @@ impl LiteraturePlugin {
             vector_cache: Arc::new(StdMutex::new(HashMap::new())),
             text_cache: Arc::new(StdMutex::new(HashMap::new())),
             kb: None,
+            entity_worker: None,
         }
     }
 
     fn with_kb(mut self, kb: Arc<KbStores>) -> Self {
         self.kb = Some(kb);
+        self
+    }
+
+    fn with_entity_worker(mut self, worker: EntityWorkerHandle) -> Self {
+        self.entity_worker = Some(worker);
         self
     }
 }
@@ -375,6 +394,7 @@ impl Plugin for LiteraturePlugin {
                 "host_fn:literature.cluster_papers".into(),
                 "host_fn:literature.fetch_paper_text".into(),
                 "host_fn:literature.kb_paper_count".into(),
+                "host_fn:literature.entity_extraction_status".into(),
             ],
             requires: vec![],
             priority: 0,
@@ -385,10 +405,12 @@ impl Plugin for LiteraturePlugin {
         let http = self.http.clone();
         let cache = self.paper_cache.clone();
         let kb = self.kb.clone();
+        let entity_worker = self.entity_worker.clone();
         ctx.register_host_fn_async("arxiv_search", None, move |args, kwargs| {
             let http = http.clone();
             let cache = cache.clone();
             let kb = kb.clone();
+            let entity_worker = entity_worker.clone();
             async move {
                 // Accept positional or kwarg `query`, same convention
                 // as run_sql in the data explorer.
@@ -471,11 +493,33 @@ impl Plugin for LiteraturePlugin {
                         });
                         match ingest_inline(kb, &url, &body, Some(metadata)).await {
                             Ok(report) => {
-                                use gw_kb::source::UpsertOutcome;
                                 match report.outcome {
-                                    UpsertOutcome::Inserted => new_count += 1,
-                                    UpsertOutcome::Updated | UpsertOutcome::Unchanged => {
-                                        existing_count += 1
+                                    UpsertOutcome::Inserted => {
+                                        new_count += 1;
+                                        // Queue freshly-ingested sources for
+                                        // background entity extraction. Worker
+                                        // is None when extraction is disabled
+                                        // via env, in which case we just
+                                        // accumulate sources without entity
+                                        // work (Phase A behaviour).
+                                        if let Some(w) = entity_worker.as_ref() {
+                                            w.enqueue_source(report.source.source_id);
+                                        }
+                                    }
+                                    UpsertOutcome::Updated => {
+                                        existing_count += 1;
+                                        // Re-chunked content invalidates prior
+                                        // entity links; re-extract.
+                                        if let Some(w) = entity_worker.as_ref() {
+                                            w.enqueue_source(report.source.source_id);
+                                        }
+                                    }
+                                    UpsertOutcome::Unchanged => {
+                                        existing_count += 1;
+                                        // Already-known source whose hash
+                                        // didn't change. Skip extraction —
+                                        // either we did it on a previous run
+                                        // or extraction is disabled.
                                     }
                                 }
                             }
@@ -854,6 +898,42 @@ impl Plugin for LiteraturePlugin {
                 }
             }
         });
+
+        // entity_extraction_status() -> {"configured", "queued",
+        //   "in_progress", "completed", "completed_chunks",
+        //   "entities_created_total", "entities_updated_total",
+        //   "links_created_total", "last_run_ms"}
+        //
+        // Snapshot of the background worker's progress. The agent
+        // calls this when it wants to mention entity-extraction
+        // progress in narration ("3 papers still being analysed in
+        // the background"). Returns {"configured": false} when
+        // extraction is disabled; agent can omit the line.
+        let worker = self.entity_worker.clone();
+        ctx.register_host_fn_async(
+            "entity_extraction_status",
+            None,
+            move |_args, _kwargs| {
+                let worker = worker.clone();
+                async move {
+                    let Some(w) = worker else {
+                        return Ok(json!({ "configured": false }));
+                    };
+                    let s = w.status.lock().await.clone();
+                    Ok(json!({
+                        "configured": true,
+                        "queued": s.queued,
+                        "in_progress": s.in_progress,
+                        "completed": s.completed,
+                        "completed_chunks": s.completed_chunks,
+                        "entities_created_total": s.entities_created_total,
+                        "entities_updated_total": s.entities_updated_total,
+                        "links_created_total": s.links_created_total,
+                        "last_run_ms": s.last_run_ms,
+                    }))
+                }
+            },
+        );
 
         Ok(())
     }
@@ -1308,6 +1388,112 @@ fn html_to_plaintext(html: &str) -> String {
     collapsed.trim().to_string()
 }
 
+// ─── Background entity-extraction worker ────────────────────────────
+//
+// One tokio task per binary instance. Owns a tokio mpsc inbox of
+// source ids and a shared status struct readable from any host fn.
+// arxiv_search pushes ids and returns; the worker drains the inbox,
+// running `extract_and_persist_entities_for_source` per id. Sequential
+// because the local Ollama path serialises anyway and a single worker
+// also serialises any future link-rebuild step.
+//
+// Failure semantics: per-source errors are logged at warn level and
+// don't take down the worker. Channel close (binary shutting down)
+// exits the loop cleanly.
+
+#[derive(Debug, Clone, Default)]
+struct EntityWorkerStatus {
+    /// Sources sitting in the inbox waiting for the worker to pick
+    /// them up.
+    queued: usize,
+    /// Sources currently mid-extract. 0 or 1 in the single-worker
+    /// model — surfaced as a counter so the same shape would extend
+    /// to a worker pool later.
+    in_progress: usize,
+    /// Sources finished since process start (success only).
+    completed: usize,
+    /// Total chunks extracted across all completed sources.
+    completed_chunks: usize,
+    /// Aggregate of `EntityIngestReport` fields across the run.
+    entities_created_total: usize,
+    entities_updated_total: usize,
+    links_created_total: usize,
+    /// Wall time of the most recent extract pass.
+    last_run_ms: u64,
+}
+
+#[derive(Clone)]
+struct EntityWorkerHandle {
+    tx: tokio::sync::mpsc::UnboundedSender<Uuid>,
+    status: Arc<tokio::sync::Mutex<EntityWorkerStatus>>,
+}
+
+impl EntityWorkerHandle {
+    fn enqueue_source(&self, source_id: Uuid) {
+        // try_lock instead of blocking on the mutex inside the chat
+        // path — if we somehow deadlock with the worker, drop the
+        // counter increment rather than the chat. The worker also
+        // increments queued atomically when it pulls.
+        if let Ok(mut s) = self.status.try_lock() {
+            s.queued += 1;
+        }
+        // Channel closure means the worker has exited — log once
+        // here rather than crashing the chat.
+        if self.tx.send(source_id).is_err() {
+            tracing::warn!(%source_id, "entity worker inbox closed; source dropped");
+        }
+    }
+}
+
+fn spawn_entity_worker(stores: Arc<KbStores>) -> EntityWorkerHandle {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Uuid>();
+    let status = Arc::new(tokio::sync::Mutex::new(EntityWorkerStatus::default()));
+    let status_w = status.clone();
+    tokio::spawn(async move {
+        let opts = CanonicalizeOpts::default();
+        while let Some(source_id) = rx.recv().await {
+            {
+                let mut s = status_w.lock().await;
+                // The chat path may or may not have decremented queued
+                // (try_lock); reconcile by clamping to ≥ 0 implicitly
+                // via saturating_sub.
+                s.queued = s.queued.saturating_sub(1);
+                s.in_progress += 1;
+            }
+            let started = std::time::Instant::now();
+            let result: Result<EntityIngestReport, _> =
+                extract_and_persist_entities_for_source(&stores, source_id, &opts).await;
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            let mut s = status_w.lock().await;
+            s.in_progress = s.in_progress.saturating_sub(1);
+            s.last_run_ms = elapsed_ms;
+            match result {
+                Ok(report) => {
+                    s.completed += 1;
+                    s.completed_chunks += report.mentions_in;
+                    s.entities_created_total += report.entities_created;
+                    s.entities_updated_total += report.entities_updated;
+                    s.links_created_total += report.links_created;
+                    tracing::info!(
+                        %source_id,
+                        mentions = report.mentions_in,
+                        new_entities = report.entities_created,
+                        updated = report.entities_updated,
+                        links = report.links_created,
+                        ms = elapsed_ms,
+                        "entity extraction complete"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(%source_id, error = %e, "entity extraction failed");
+                }
+            }
+        }
+        tracing::info!("entity worker exiting (channel closed)");
+    });
+    EntityWorkerHandle { tx, status }
+}
+
 /// Build the gw-kb store bundle from environment, returning Ok(None)
 /// when the user hasn't configured a database (so the demo can keep
 /// running stateless). Defaults match the `gw_kb` CLI: lance under
@@ -1760,7 +1946,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut lit = LiteraturePlugin::new(embedder);
     if let Some(kb) = kb_stores.clone() {
-        lit = lit.with_kb(kb);
+        lit = lit.with_kb(kb.clone());
+        // Background entity extraction is opt-in: the LLM cost is
+        // ~one chat call per chunk per query, so plain demo runs stay
+        // cheap unless the user asks for it.
+        let enable = std::env::var("LITERATURE_ENTITY_EXTRACTION")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "on" | "yes"))
+            .unwrap_or(false);
+        if enable {
+            tracing::info!("entity worker enabled (LITERATURE_ENTITY_EXTRACTION)");
+            let handle = spawn_entity_worker(kb);
+            lit = lit.with_entity_worker(handle);
+        } else {
+            tracing::info!(
+                "entity extraction disabled — set LITERATURE_ENTITY_EXTRACTION=on to enable"
+            );
+        }
     }
 
     let engine = GreatWheelEngine::new()
@@ -1828,6 +2029,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "cluster_papers".into(),
         "fetch_paper_text".into(),
         "kb_paper_count".into(),
+        "entity_extraction_status".into(),
     ];
     let mut repl = ReplAgent::new(external_fns, Box::new(conv_bridge));
     repl.set_variable("gw_session_id", Object::String(session_id.0.to_string()))
