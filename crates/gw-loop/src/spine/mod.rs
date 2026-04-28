@@ -35,9 +35,14 @@
 
 pub mod extract;
 pub mod persist;
+pub mod segment;
 pub mod types;
 
 pub use extract::SpineExtractor;
+pub use segment::{
+    segment, ProposedSegment, SegmentEntry, SegmentOpts, DEFAULT_MAX_ENTRIES_PER_SEGMENT,
+    DEFAULT_MIN_SHARED_ENTITIES,
+};
 pub use types::{
     EntryEntityLink, EntryExtraction, EntryRelation, RecommendedPredicate,
     RECOMMENDED_PREDICATES,
