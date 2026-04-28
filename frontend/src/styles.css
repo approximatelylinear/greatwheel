@@ -93,6 +93,12 @@ html, body, #root {
      DragSplitter component); the canvas takes whatever's left. */
   grid-template-columns: var(--chat-w) 6px minmax(0, 1fr);
 }
+/* When a SemanticSpine widget is live, insert a 220px-fixed pane
+   between chat and the splitter. Order in JSX is
+   chat → spine → splitter → canvas, matching `grid-template-columns`. */
+.app-main.has-spine {
+  grid-template-columns: var(--chat-w) 220px 6px minmax(0, 1fr);
+}
 /* Default: chat fills, canvas is a narrow right rail (Frankenstein,
    echo-server, anything with compact canvas content). */
 .app-main-chat-primary,
@@ -554,6 +560,87 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
 }
 .message-followups .a2ui-button {
   font-size: 12.5px; padding: 5px 11px;
+}
+
+/* ─── Spine pane (semantic timeline of segments) ─────────────── */
+
+.spine-pane {
+  overflow-y: auto;
+  padding: 28px 14px 32px;
+  background: var(--bg-soft);
+  font-family: var(--font-ui);
+}
+.spine-empty {
+  display: flex; align-items: center; justify-content: center;
+}
+.spine-empty-text {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-style: italic;
+  text-align: center;
+  padding: 0 10px;
+  line-height: 1.5;
+}
+/* The rail itself: vertical line + markers. The line is a single
+   left-edge border that the markers' dots sit on top of, so the
+   rail visually "threads" through the segment cards. */
+.spine-rail {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding-left: 18px;
+  border-left: 1px solid var(--border);
+  margin-left: 6px;
+}
+.spine-marker {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  /* Soft-faded by default; commit-vs-mentioned styling lands in
+     Issue #5 with a `.committed` modifier flipping opacity to 1. */
+  opacity: 0.85;
+  transition: opacity 120ms ease;
+}
+.spine-marker:hover {
+  opacity: 1;
+}
+.spine-dot {
+  position: absolute;
+  left: -23px;        /* aligns with the rail's border-left */
+  top: 4px;
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  border: 2px solid var(--bg-soft);
+  box-sizing: content-box;
+}
+.spine-label-card {
+  flex: 1;
+  display: flex; flex-direction: column;
+  gap: 3px;
+}
+.spine-label {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--fg);
+  letter-spacing: -0.005em;
+  line-height: 1.3;
+}
+.spine-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: 500 9.5px/1.2 var(--font-ui);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.spine-kind {
+  /* The kind badge mirrors the dot's colour at low saturation —
+     redundant with the dot for now, but the Sidebar in #4 will
+     hide the dot when expanded so this label remains the cue. */
+  color: var(--muted-strong);
 }
 
 /* ─── Canvas pane ────────────────────────────────────────────── */
