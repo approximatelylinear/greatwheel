@@ -193,7 +193,7 @@ async fn load_entries_with_entity_ids(
         FROM session_entries se
         LEFT JOIN session_entry_entities ee ON ee.entry_id = se.id
         WHERE se.session_id = $1
-          AND se.entry_type IN ('UserMessage', 'AssistantMessage')
+          AND se.entry_type IN ('user_message', 'assistant_message')
         ORDER BY se.created_at, se.id, ee.entity_id
         "#,
     )
@@ -440,6 +440,79 @@ fn build_label_prompt(entity_labels: &[String], first_text: &str, last_text: &st
     )
 }
 
+/// Best-effort repair for a known qwen3.5:9b quirk: it sometimes
+/// drops the *opening* quote on JSON keys, emitting things like
+/// `{label": "cluster pipeline", kind": "construction"}`. The
+/// closing quote and colon are still there. We walk the string and,
+/// at every position immediately after `{` or `,` (skipping
+/// whitespace), if we see an unquoted identifier followed by `":`,
+/// we splice in the missing opening quote. Strings already inside
+/// quotes are left untouched.
+///
+/// Pure prefix-of-key heuristic — won't repair structural breakage
+/// (missing braces, unbalanced strings). The caller treats the
+/// result as a "second-chance parse"; if it still fails, the
+/// labeller's fallback path kicks in.
+fn repair_unquoted_keys(raw: &str) -> String {
+    // The structural characters we look at (`{`, `,`, `"`, `:`,
+    // identifier chars, whitespace) are all ASCII-single-byte, so
+    // we can scan with byte positions but must rebuild the output
+    // using `&str` slicing — that keeps multibyte chars in label
+    // values intact.
+    let b = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len() + 16);
+    let mut i = 0;
+    let mut in_string = false;
+    let mut last_flush = 0;
+    while i < b.len() {
+        if in_string {
+            // Skip past the closing quote, honoring `\"` escapes.
+            if b[i] == b'\\' && i + 1 < b.len() {
+                i += 2;
+                continue;
+            }
+            if b[i] == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if b[i] == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        if b[i] == b'{' || b[i] == b',' {
+            // Look ahead past whitespace for an unquoted identifier
+            // followed by `":` (qwen3.5's missing-opening-quote quirk).
+            let mut j = i + 1;
+            while j < b.len() && (b[j] as char).is_ascii_whitespace() {
+                j += 1;
+            }
+            let id_start = j;
+            while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
+                j += 1;
+            }
+            if j > id_start && j + 1 < b.len() && b[j] == b'"' && b[j + 1] == b':' {
+                // Splice in the missing opening quote at id_start.
+                // The `"` we found at j is now the *closing* quote of
+                // the key — flip in_string=true so the main loop's
+                // handling of b[j] (which it'll encounter next iter
+                // via i = j) correctly treats it as a closer.
+                out.push_str(&raw[last_flush..id_start]);
+                out.push('"');
+                last_flush = id_start;
+                in_string = true;
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+    out.push_str(&raw[last_flush..]);
+    out
+}
+
 fn truncate(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         return s.to_string();
@@ -458,8 +531,9 @@ struct LabelWire {
 }
 
 fn parse_label_output(raw: &str) -> Result<SegmentLabel, LoopError> {
-    let parsed: LabelWire =
-        extract_json(raw).map_err(|e| LoopError::Spine(format!("parse label: {e}")))?;
+    let parsed: LabelWire = extract_json::<LabelWire>(raw)
+        .or_else(|_| extract_json::<LabelWire>(&repair_unquoted_keys(raw)))
+        .map_err(|e| LoopError::Spine(format!("parse label: {e}")))?;
     let label = parsed.label.trim().to_string();
     if label.is_empty() {
         return Err(LoopError::Spine(
@@ -575,6 +649,40 @@ mod tests {
         let raw = "```json\n{\"label\": \"colbert pipeline\", \"kind\": \"construction\"}\n```";
         let l = parse_label_output(raw).unwrap();
         assert_eq!(l.label, "colbert pipeline");
+    }
+
+    #[test]
+    fn repairs_qwen_missing_opening_key_quotes() {
+        // The exact failure mode observed in production: qwen3.5:9b
+        // dropping the opening quote on each key. extract_json fails
+        // on the raw form; the repair pass restores `"key":` so the
+        // second-chance parse in parse_label_output succeeds.
+        let raw = r#"{label": "cluster pipeline", kind": "construction"}"#;
+        let repaired = repair_unquoted_keys(raw);
+        assert_eq!(
+            repaired,
+            r#"{"label": "cluster pipeline", "kind": "construction"}"#
+        );
+        let parsed = parse_label_output(raw).unwrap();
+        assert_eq!(parsed.label, "cluster pipeline");
+        assert_eq!(parsed.kind, "construction");
+    }
+
+    #[test]
+    fn repair_preserves_multibyte_chars_in_values() {
+        // Sanity: multibyte values (labels containing accented
+        // names, em-dashes, etc.) survive the byte-level scan.
+        let raw = r#"{label": "Müller — recall", kind": "comparison"}"#;
+        let repaired = repair_unquoted_keys(raw);
+        assert!(repaired.contains("Müller — recall"));
+        assert!(repaired.contains(r#""label":"#));
+        assert!(repaired.contains(r#""kind":"#));
+    }
+
+    #[test]
+    fn repair_is_noop_on_well_formed_json() {
+        let raw = r#"{"label": "ok", "kind": "decision"}"#;
+        assert_eq!(repair_unquoted_keys(raw), raw);
     }
 
     #[test]
