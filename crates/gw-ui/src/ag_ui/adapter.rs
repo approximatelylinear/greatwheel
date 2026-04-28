@@ -26,13 +26,45 @@ use axum::{
     Json, Router,
 };
 use futures::Stream;
-use gw_core::{LoopEvent, SessionId, WidgetEvent};
+use gw_core::{
+    LoopEvent, SessionId, SpineSegmentSnapshot, UiSurfaceId, Widget, WidgetEvent, WidgetId,
+    WidgetKind, WidgetPayload, WidgetState,
+};
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::surface::{UiSurfaceSnapshot, UiSurfaceStore};
+
+/// Assemble the SemanticSpine widget payload from a session's
+/// current (live) segments. Custom A2UI component shape; the
+/// frontend's json-render catalog needs a matching `SemanticSpine`
+/// entry to render it. See `docs/design-semantic-spine.md` §5.3.
+fn build_spine_payload(segments: &[SpineSegmentSnapshot]) -> serde_json::Value {
+    let segs: Vec<serde_json::Value> = segments
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.segment_id.to_string(),
+                "label": s.label,
+                "kind": s.kind,
+                "entry_first": s.entry_first.0.to_string(),
+                "entry_last": s.entry_last.0.to_string(),
+                "entity_count": s.entity_ids.len(),
+                "entity_ids": s.entity_ids
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>(),
+                "summary": s.summary,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "type": "SemanticSpine",
+        "segments": segs,
+    })
+}
 
 use super::codec::loop_event_to_ag_ui;
 use super::events::{AgUiEvent, PostMessageBody};
@@ -67,6 +99,13 @@ pub struct AgUiState {
     /// (Frankenstein / data-explorer / future) can label itself
     /// instead of all sharing a hardcoded "Frankenstein" header.
     branding: std::sync::Mutex<Option<Branding>>,
+    /// Per-session spine widget registry. The first
+    /// `SpineSegmentsUpdated` for a session emits a fresh
+    /// `SemanticSpine` widget; subsequent updates supersede it on
+    /// the same surface. Map persists `(surface_id, widget_id)` so
+    /// we can pin the supersede chain to one surface — moving the
+    /// spine across surfaces would confuse focus tracking.
+    spine_widgets: Mutex<HashMap<SessionId, (UiSurfaceId, WidgetId)>>,
 }
 
 /// App-wide branding shown in the frontend header. `layout` is an
@@ -118,6 +157,7 @@ impl AgUiAdapter {
             inbound: Mutex::new(HashMap::new()),
             focused_scope: Mutex::new(HashMap::new()),
             branding: std::sync::Mutex::new(None),
+            spine_widgets: Mutex::new(HashMap::new()),
         });
 
         let st = state.clone();
@@ -241,12 +281,88 @@ impl AgUiAdapter {
     /// TurnComplete, etc.). Events without an outbound projection are
     /// silently dropped.
     pub async fn dispatch(&self, session_id: SessionId, event: &LoopEvent) {
+        // Side-effect: spine segment updates project into the widget
+        // store so the existing notification → STATE_DELTA path
+        // delivers the new segments to the frontend with no
+        // additional plumbing. The first SpineSegmentsUpdated for
+        // a session creates the SemanticSpine widget; subsequent
+        // updates supersede it on the same surface so the spine
+        // pane keeps a stable widget id to focus on.
+        if let LoopEvent::SpineSegmentsUpdated { segments, .. } = event {
+            self.update_spine_widget(session_id, segments).await;
+        }
+
         let Some(ag) = loop_event_to_ag_ui(event) else {
             return;
         };
         let sessions = self.state.sessions.lock().await;
         if let Some(tx) = sessions.get(&session_id) {
             let _ = tx.send(ag);
+        }
+    }
+
+    /// Project a `SpineSegmentsUpdated` event into a SemanticSpine
+    /// widget. Lazily creates the widget on the first update for a
+    /// session; supersedes thereafter so the widget id stays stable
+    /// for the chain (frontend can hold a focusedSegmentId across
+    /// updates without losing context).
+    async fn update_spine_widget(
+        &self,
+        session_id: SessionId,
+        segments: &[SpineSegmentSnapshot],
+    ) {
+        let payload = build_spine_payload(segments);
+        let mut spine = self.state.spine_widgets.lock().await;
+        match spine.get(&session_id).copied() {
+            Some((surface_id, old_id)) => {
+                let new_widget = Widget {
+                    id: WidgetId::new(),
+                    surface_id,
+                    session_id,
+                    origin_entry: None,
+                    kind: WidgetKind::A2ui,
+                    state: WidgetState::Active,
+                    payload: WidgetPayload::Inline(payload),
+                    supersedes: Some(old_id),
+                    created_at: chrono::Utc::now(),
+                    resolved_at: None,
+                    resolution: None,
+                    multi_use: true,
+                    follow_up: false,
+                    scope: None,
+                };
+                let new_id = new_widget.id;
+                if let Err(e) = self.state.store.supersede(old_id, new_widget).await {
+                    warn!(error = %e, "spine widget supersede failed");
+                    return;
+                }
+                spine.insert(session_id, (surface_id, new_id));
+            }
+            None => {
+                let surface_id = UiSurfaceId::new();
+                let widget = Widget {
+                    id: WidgetId::new(),
+                    surface_id,
+                    session_id,
+                    origin_entry: None,
+                    kind: WidgetKind::A2ui,
+                    state: WidgetState::Active,
+                    payload: WidgetPayload::Inline(payload),
+                    supersedes: None,
+                    created_at: chrono::Utc::now(),
+                    resolved_at: None,
+                    resolution: None,
+                    multi_use: true,
+                    follow_up: false,
+                    scope: None,
+                };
+                let widget_id = widget.id;
+                if let Err(e) = self.state.store.emit(widget).await {
+                    warn!(error = %e, "spine widget emit failed");
+                    return;
+                }
+                spine.insert(session_id, (surface_id, widget_id));
+            }
         }
     }
 
