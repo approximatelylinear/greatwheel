@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use gw_core::{EntryId, EntryType, LlmMessage, LoopEvent, ReplSnapshotData, SessionId};
+use gw_core::{
+    EntryId, EntryType, LlmMessage, LoopEvent, ReplSnapshotData, SessionId, SpineEntityLink,
+    SpineRelation, SpineSegmentSnapshot,
+};
 use gw_runtime::{extract_code_blocks, HostBridge, ReplAgent};
 use tokio::sync::mpsc;
 use tracing::{info, info_span, warn};
@@ -294,7 +297,9 @@ impl ConversationLoop {
                 | LoopEvent::TurnError { .. }
                 | LoopEvent::WidgetEmitted(_)
                 | LoopEvent::WidgetSuperseded { .. }
-                | LoopEvent::CodeExecuted { .. } => {}
+                | LoopEvent::CodeExecuted { .. }
+                | LoopEvent::SpineEntryExtracted { .. }
+                | LoopEvent::SpineSegmentsUpdated { .. } => {}
             }
         }
     }
@@ -898,46 +903,137 @@ impl ConversationLoop {
         };
 
         if let Some(extractor) = self.spine_extractor.as_ref() {
+            let session_id = self.session_id;
             for entry in new_entries {
                 if !is_extractable_entry_type(&entry.entry_type) {
                     continue;
                 }
                 let extractor = Arc::clone(extractor);
+                let event_tx = self.event_tx.clone();
                 tokio::spawn(async move {
                     let entry_id = entry.id;
-                    match extractor.extract_entry(&entry).await {
-                        Ok(extraction) => {
-                            if extraction.entities.is_empty()
-                                && extraction.relations.is_empty()
-                            {
-                                return;
-                            }
-                            let pool = extractor.stores.pg.clone();
-                            match crate::spine::persist::persist_entry_extraction(
-                                &pool,
-                                &extraction,
-                            )
-                            .await
-                            {
-                                Ok(report) => {
-                                    info!(
-                                        entry_id = %entry_id.0,
-                                        entity_links = report.entity_links_written,
-                                        relations = report.relations_written,
-                                        "spine extraction persisted"
-                                    );
-                                }
-                                Err(e) => warn!(
-                                    entry_id = %entry_id.0,
-                                    error = %e,
-                                    "spine persist failed; entry left without spine rows"
-                                ),
-                            }
+                    let extraction = match extractor.extract_entry(&entry).await {
+                        Ok(x) => x,
+                        Err(e) => {
+                            warn!(
+                                entry_id = %entry_id.0,
+                                error = %e,
+                                "spine extract failed; entry left without spine rows"
+                            );
+                            return;
                         }
-                        Err(e) => warn!(
+                    };
+                    if extraction.entities.is_empty()
+                        && extraction.relations.is_empty()
+                    {
+                        return;
+                    }
+
+                    let pool = extractor.stores.pg.clone();
+                    if let Err(e) = crate::spine::persist::persist_entry_extraction(
+                        &pool,
+                        &extraction,
+                    )
+                    .await
+                    {
+                        warn!(
                             entry_id = %entry_id.0,
                             error = %e,
-                            "spine extract failed; entry left without spine rows"
+                            "spine persist failed; entry left without spine rows"
+                        );
+                        return;
+                    }
+                    info!(
+                        entry_id = %entry_id.0,
+                        entity_links = extraction.entities.len(),
+                        relations = extraction.relations.len(),
+                        "spine extraction persisted"
+                    );
+
+                    // Outbound diagnostic event so subscribers see
+                    // per-entry deltas without polling Postgres.
+                    let entities_wire: Vec<SpineEntityLink> = extraction
+                        .entities
+                        .iter()
+                        .map(|l| SpineEntityLink {
+                            entry_id: l.entry_id,
+                            entity_id: l.entity_id,
+                            surface: l.surface.clone(),
+                            role: l.role.clone(),
+                            status: l.status.clone(),
+                            confidence: l.confidence,
+                            span_start: l.span_start,
+                            span_end: l.span_end,
+                        })
+                        .collect();
+                    let relations_wire: Vec<SpineRelation> = extraction
+                        .relations
+                        .iter()
+                        .map(|r| SpineRelation {
+                            entry_id: r.entry_id,
+                            subject_id: r.subject_id,
+                            object_id: r.object_id,
+                            predicate: r.predicate.clone(),
+                            directed: r.directed,
+                            surface: r.surface.clone(),
+                            confidence: r.confidence,
+                            span_start: r.span_start,
+                            span_end: r.span_end,
+                        })
+                        .collect();
+                    let _ = event_tx.send(LoopEvent::SpineEntryExtracted {
+                        entry_id,
+                        entities: entities_wire,
+                        relations: relations_wire,
+                    });
+
+                    // Re-segment the session now that this entry's
+                    // entities are in place. v1: trigger per-entry —
+                    // resegment is idempotent and converges across
+                    // multiple in-flight extractions in one turn.
+                    // The "right" model is one debounced trigger per
+                    // turn; revisit when LLM-call cost shows up
+                    // (resegment only re-prompts for *new* segment
+                    // ranges, so steady-state runs are cheap).
+                    let llm = extractor.stores.llm.clone();
+                    match crate::spine::resegment::resegment(
+                        &pool,
+                        llm.as_ref(),
+                        session_id.0,
+                        &crate::spine::resegment::ResegmentOpts::default(),
+                    )
+                    .await
+                    {
+                        Ok((report, snapshots)) => {
+                            info!(
+                                session_id = %session_id.0,
+                                created = report.segments_created,
+                                updated = report.segments_updated,
+                                invalidated = report.segments_invalidated,
+                                "spine resegment complete"
+                            );
+                            let segments_wire: Vec<SpineSegmentSnapshot> = snapshots
+                                .into_iter()
+                                .map(|s| SpineSegmentSnapshot {
+                                    segment_id: s.segment_id,
+                                    session_id: s.session_id,
+                                    label: s.label,
+                                    kind: s.kind,
+                                    entry_first: s.entry_first,
+                                    entry_last: s.entry_last,
+                                    entity_ids: s.entity_ids,
+                                    summary: s.summary,
+                                })
+                                .collect();
+                            let _ = event_tx.send(LoopEvent::SpineSegmentsUpdated {
+                                session_id,
+                                segments: segments_wire,
+                            });
+                        }
+                        Err(e) => warn!(
+                            session_id = %session_id.0,
+                            error = %e,
+                            "spine resegment failed; segments stale"
                         ),
                     }
                 });
