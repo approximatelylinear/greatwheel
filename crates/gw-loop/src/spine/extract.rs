@@ -315,15 +315,18 @@ struct JointWire {
 
 #[derive(Debug, Default, Deserialize)]
 struct EntityWire {
-    #[serde(default)]
+    // String fields use the same null-tolerant deserialiser as
+    // RelationWire — local LLMs occasionally emit nulls and we'd
+    // rather drop bad rows post-parse than reject the whole payload.
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     label: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     kind: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     canonical_form: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     role: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     status: String,
     #[serde(default)]
     confidence: Option<f64>,
@@ -333,13 +336,32 @@ struct EntityWire {
     span_end: Option<i64>,
 }
 
+/// Accept a JSON `null` for a string field as if it were `""`.
+/// Local LLMs occasionally emit nulls where the prompt asks for a
+/// string; without this, serde rejects the entire JSON object and
+/// we lose every entity in the chunk along with the bad row.
+/// Downstream filters drop empty strings cleanly.
+fn deserialize_optional_string<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(d)?;
+    Ok(opt.unwrap_or_default())
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct RelationWire {
-    #[serde(default)]
+    // Subject/object accept null because local LLMs occasionally emit
+    // `"subject": null` when the prompt asks for a relation between
+    // two entities the model couldn't actually identify. Without this,
+    // serde rejects the entire `{entities, relations}` payload —
+    // costing every entity in the same chunk too. Treat null as
+    // empty; downstream filters drop the relation cleanly.
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     subject: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     object: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     predicate: String,
     #[serde(default)]
     directed: Option<bool>,
@@ -577,6 +599,28 @@ mod tests {
         }"#;
         let out = parse_joint_output(raw).unwrap();
         assert_eq!(out.entities.len(), 1);
+    }
+
+    #[test]
+    fn tolerates_null_string_fields_from_local_llm() {
+        // Real failure mode from qwen3.5:9b — relation endpoints come
+        // back as null when the LLM couldn't identify them. Before
+        // the fix, serde rejected the whole payload and we lost the
+        // valid entity too. After: bad relation drops, entity stays.
+        let raw = r#"{
+            "entities": [{"label": "Survey on RAG", "kind": "venue",
+                          "canonical_form": "Survey on RAG", "role": "referenced",
+                          "status": "mentioned", "confidence": 0.9}],
+            "relations": [{"subject": null, "object": null,
+                           "predicate": "compared_with", "directed": false,
+                           "surface": "compared with neighbours", "confidence": 0.8}]
+        }"#;
+        let out = parse_joint_output(raw).unwrap();
+        assert_eq!(out.entities.len(), 1);
+        assert_eq!(out.entities[0].label, "Survey on RAG");
+        // Relation has empty subject/object after null → fails the
+        // empty-string filter and gets dropped. No relations land.
+        assert!(out.relations.is_empty());
     }
 
     #[test]
