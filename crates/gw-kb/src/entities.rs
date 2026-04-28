@@ -959,11 +959,17 @@ async fn update_entity_with_mentions(
         return Ok(());
     }
     let bytes = vec_to_bytes(centroid);
+    // COALESCE the de-duped union with an empty array — `array_agg`
+    // over an empty set returns NULL, and `kb_entities.aliases` is
+    // NOT NULL. This trips for entities whose mentions all share the
+    // canonical label (no new aliases) AND whose row already had no
+    // aliases (so the union is empty).
     sqlx::query(
         r#"
         UPDATE kb_entities
-        SET aliases    = (
-                SELECT array_agg(DISTINCT a) FROM unnest(aliases || $2::text[]) AS a
+        SET aliases    = COALESCE(
+                (SELECT array_agg(DISTINCT a) FROM unnest(aliases || $2::text[]) AS a),
+                ARRAY[]::TEXT[]
             ),
             mentions   = mentions + $3,
             vector     = $4,
