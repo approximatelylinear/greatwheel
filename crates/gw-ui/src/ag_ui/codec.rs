@@ -8,7 +8,7 @@
 
 use gw_core::LoopEvent;
 
-use super::events::AgUiEvent;
+use super::events::{AgUiEvent, DebugSpineSegment};
 
 /// Project a `LoopEvent` onto an AG-UI outbound event. Returns `None` for
 /// events that do not belong on the wire (inbound-only, internal
@@ -73,21 +73,41 @@ pub fn loop_event_to_ag_ui(event: &LoopEvent) -> Option<AgUiEvent> {
             is_final: *is_final,
             error: error.clone(),
         }),
+        LoopEvent::SpineEntryExtracted {
+            entry_id,
+            entities,
+            relations,
+        } => Some(AgUiEvent::DebugSpineEntryExtracted {
+            entry_id: entry_id.0.to_string(),
+            entity_count: entities.len(),
+            relation_count: relations.len(),
+        }),
+        LoopEvent::SpineSegmentsUpdated {
+            session_id,
+            segments,
+        } => Some(AgUiEvent::DebugSpineSegmentsUpdated {
+            session_id: session_id.0.to_string(),
+            segments: segments
+                .iter()
+                .map(|s| DebugSpineSegment {
+                    segment_id: s.segment_id.to_string(),
+                    label: s.label.clone(),
+                    kind: s.kind.clone(),
+                    entity_count: s.entity_ids.len(),
+                })
+                .collect(),
+        }),
         // Widget lifecycle: projected via the store notification path
         // (`state::notification_to_patches`), not through LoopEvent.
         LoopEvent::WidgetEmitted(_) | LoopEvent::WidgetSuperseded { .. } => None,
         // Not projected outbound: inbound-only variants and internal
         // state transitions that don't need frontend awareness.
-        // Spine events also land here for now — Issue #3 will route
-        // them through STATE_DELTA against the spine widget surface.
         LoopEvent::UserMessage(_)
         | LoopEvent::FollowUp(_)
         | LoopEvent::SwitchBranch(_)
         | LoopEvent::Compact
         | LoopEvent::SessionEnd
-        | LoopEvent::WidgetInteraction(_)
-        | LoopEvent::SpineEntryExtracted { .. }
-        | LoopEvent::SpineSegmentsUpdated { .. } => None,
+        | LoopEvent::WidgetInteraction(_) => None,
     }
 }
 

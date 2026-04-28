@@ -273,7 +273,11 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
         <CanvasPane />
       </main>
       {debug && (
-        <DebugPane traces={state.codeTraces} toolCalls={state.toolCalls} />
+        <DebugPane
+          traces={state.codeTraces}
+          toolCalls={state.toolCalls}
+          spineEvents={state.spineEvents}
+        />
       )}
       <footer className="app-footer">
         <MessageInput onSend={onSend} disabled={state.running} />
