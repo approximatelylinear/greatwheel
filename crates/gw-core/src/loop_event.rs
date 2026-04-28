@@ -1,7 +1,56 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::session_tree::EntryId;
 use crate::ui::{Widget, WidgetEvent, WidgetId};
+use crate::SessionId;
+
+/// One canonicalised entity mention attached to a session entry. Wire
+/// shape of `gw_loop::spine::types::EntryEntityLink`. Defined in
+/// gw-core because it rides on the `LoopEvent` stream and the
+/// dependency graph forbids gw-core from depending on gw-loop or
+/// gw-kb. The field set matches `session_entry_entities` 1:1.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpineEntityLink {
+    pub entry_id: EntryId,
+    pub entity_id: Uuid,
+    pub surface: String,
+    pub role: String,
+    pub status: String,
+    pub confidence: f32,
+    pub span_start: Option<i32>,
+    pub span_end: Option<i32>,
+}
+
+/// One typed relation between two entities asserted in a session
+/// entry. Wire shape of `gw_loop::spine::types::EntryRelation`.
+/// Field set matches `session_entry_relations`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpineRelation {
+    pub entry_id: EntryId,
+    pub subject_id: Uuid,
+    pub object_id: Uuid,
+    pub predicate: String,
+    pub directed: bool,
+    pub surface: String,
+    pub confidence: f32,
+    pub span_start: Option<i32>,
+    pub span_end: Option<i32>,
+}
+
+/// Snapshot of one persisted segment, suitable for outbound events.
+/// Wire shape of `gw_loop::spine::resegment::SegmentSnapshot`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpineSegmentSnapshot {
+    pub segment_id: Uuid,
+    pub session_id: Uuid,
+    pub label: String,
+    pub kind: String,
+    pub entry_first: EntryId,
+    pub entry_last: EntryId,
+    pub entity_ids: Vec<Uuid>,
+    pub summary: Option<String>,
+}
 
 /// Events that drive the conversation loop state machine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,5 +145,24 @@ pub enum LoopEvent {
         stdout: String,
         is_final: bool,
         error: Option<String>,
+    },
+    /// Spine extracted typed entities + relations from one session
+    /// entry. Outbound / diagnostic. The data has already been
+    /// persisted to `session_entry_entities` + `session_entry_relations`
+    /// by the time this fires; the event lets clients subscribe to
+    /// per-entry deltas without polling. See
+    /// `docs/design-semantic-spine.md` §4.3.
+    SpineEntryExtracted {
+        entry_id: EntryId,
+        entities: Vec<SpineEntityLink>,
+        relations: Vec<SpineRelation>,
+    },
+    /// Spine re-segmented the session and `segments` is the current
+    /// (live) set after the diff. Outbound. Carries enough to
+    /// re-render the spine surface from the snapshot alone — clients
+    /// don't need to query Postgres to project. doc §4.3.
+    SpineSegmentsUpdated {
+        session_id: SessionId,
+        segments: Vec<SpineSegmentSnapshot>,
     },
 }

@@ -12,7 +12,7 @@ pub mod ui;
 
 pub use agent_bus::AgentBus;
 pub use channel::{ChannelAdapter, TaskChannelAdapter};
-pub use loop_event::LoopEvent;
+pub use loop_event::{LoopEvent, SpineEntityLink, SpineRelation, SpineSegmentSnapshot};
 pub use plugin::{
     EventData, EventHandler, EventPayload, EventResult, HostFnHandler, HostFnHandlerAsync,
     HostFnHandlerFn, HostFnRegistration, LifecycleEvent, Plugin, PluginContext, PluginError,

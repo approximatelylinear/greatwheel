@@ -78,12 +78,16 @@ pub fn loop_event_to_ag_ui(event: &LoopEvent) -> Option<AgUiEvent> {
         LoopEvent::WidgetEmitted(_) | LoopEvent::WidgetSuperseded { .. } => None,
         // Not projected outbound: inbound-only variants and internal
         // state transitions that don't need frontend awareness.
+        // Spine events also land here for now — Issue #3 will route
+        // them through STATE_DELTA against the spine widget surface.
         LoopEvent::UserMessage(_)
         | LoopEvent::FollowUp(_)
         | LoopEvent::SwitchBranch(_)
         | LoopEvent::Compact
         | LoopEvent::SessionEnd
-        | LoopEvent::WidgetInteraction(_) => None,
+        | LoopEvent::WidgetInteraction(_)
+        | LoopEvent::SpineEntryExtracted { .. }
+        | LoopEvent::SpineSegmentsUpdated { .. } => None,
     }
 }
 
