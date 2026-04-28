@@ -164,7 +164,12 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
   // time (the supersede chain keeps the chain), so first match wins.
   // We render it in a dedicated third pane rather than inline,
   // because conceptually the spine annotates chat (not a turn output).
-  const spineSegments: SpineSegment[] | null = useMemo(() => {
+  // Find the spine widget once and remember widget_id + surface_id
+  // alongside the segment list. The SpinePane needs both to fire
+  // postWidgetEvent on marker click; a click with action="focus"
+  // doesn't run the agent (adapter short-circuits), it just updates
+  // /focusedScope/segment which the rail listens to.
+  const spineState = useMemo(() => {
     for (const w of Object.values(widgets)) {
       if (w.kind !== 'A2ui') continue;
       if (!('Inline' in w.payload)) continue;
@@ -177,7 +182,7 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
       const raw = Array.isArray(inline.segments)
         ? (inline.segments as Array<Record<string, unknown>>)
         : [];
-      return raw.map((s) => ({
+      const segments: SpineSegment[] = raw.map((s) => ({
         id: String(s.id ?? ''),
         label: String(s.label ?? ''),
         kind: String(s.kind ?? 'other'),
@@ -190,9 +195,35 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
           : [],
         summary: s.summary != null ? String(s.summary) : null,
       }));
+      return {
+        segments,
+        widgetId: w.id,
+        surfaceId: w.surface_id,
+      };
     }
     return null;
   }, [widgets]);
+  const spineSegments = spineState?.segments ?? null;
+  const focusedSegmentId =
+    useStateValue<string | null>('/focusedScope/segment') ?? null;
+
+  const onSegmentFocus = useCallback(
+    (segmentId: string) => {
+      if (!spineState) return;
+      void postWidgetEvent(sessionId, {
+        widget_id: spineState.widgetId,
+        surface_id: spineState.surfaceId,
+        action: 'focus',
+        data: {
+          segment_id: segmentId,
+          scope: { kind: 'segment', key: segmentId },
+        },
+      }).catch(() => {
+        /* surfaced via stream-error path on next event */
+      });
+    },
+    [sessionId, spineState],
+  );
 
   const onRepin = useCallback(
     (arxivId: string) => {
@@ -230,7 +261,14 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
           onSuggest={onSend}
           onRepin={onRepin}
         />
-        {spineSegments && <SpinePane segments={spineSegments} />}
+        {spineSegments && (
+          <SpinePane
+            segments={spineSegments}
+            focusedSegmentId={focusedSegmentId}
+            onSegmentFocus={onSegmentFocus}
+            sessionId={sessionId}
+          />
+        )}
         <DragSplitter storageKey={`app.chatW.${layout}`} />
         <CanvasPane />
       </main>

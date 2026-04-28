@@ -542,6 +542,16 @@ async fn post_widget_event(
         }
     }
 
+    // `action: "focus"` is a pure UI-state update — sets focused
+    // scope, nothing else. The semantic-spine SpinePane uses this so
+    // a marker click highlights without running the agent. Skipping
+    // the inbound forward here keeps the conversation loop quiet
+    // for navigation-only events. Any other action ("submit",
+    // "select", "revisit", etc.) still flows to the agent as before.
+    if body.action == "focus" {
+        return Ok(StatusCode::ACCEPTED);
+    }
+
     let inbound = state.inbound.lock().await;
     let tx = inbound.get(&sid).ok_or_else(|| {
         (
