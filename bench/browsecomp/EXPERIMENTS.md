@@ -221,6 +221,50 @@ accuracy, not timeout artifacts.
 ### Key insight
 86% of failures are **retrieval** (right documents never found), not extraction. The 9B model reasons well once it has the right documents. Dense vector search doesn't help — but ColBERT reranking of a wider BM25 pool does, because the right documents are often in BM25's top-200 but ranked too low for the agent to see.
 
+### M1 / M2 (apr27-28) — neural reranker ceiling on this stack
+
+Two experiments testing Meng et al.'s biggest reported lever (BM25+passage
++ monoT5-3B + Q2Q reformulation, +20.5% accuracy on their setup).
+
+| Variant | Exact | Fuzzy | Tokens | Result |
+|---|---|---|---|---|
+| Passage+RRF (no rerank) | 11/29 | 13/29 | 120K | reference |
+| **M1**: passage+RRF + monoT5-3B (k=200→10) | 8/29 | 10/29 | 145K | -3 / -3 |
+| **M2**: M1 + Q2Q reformulation (rerank_q2q) | 6/29 | 8/29 | 100K | -5 / -5 |
+
+Both regressed vs no-rerank baseline on sample30, *opposite* of Meng's
++20.5%. Both are nonetheless **complementary** at the per-query level —
+each picks a different mix of right answers. Likely causes for the
+divergence from the paper:
+- Our agent (qwen3.5:9b) is much smaller than Meng's gpt-oss-20b. They
+  showed a similar BM25→monoT5 lift on the larger gpt-oss-20b but
+  noticeably less consistent gains on smaller agents.
+- monoT5 was trained on MS MARCO; BrowseComp's distribution differs.
+- Q2Q reformulation quality depends on the reformulator LLM. We use
+  the same qwen3.5:9b that runs the main loop; Meng used a higher-tier
+  model. Lower-quality NL questions may lose specificity.
+- Sample30 variance is ±2 fuzzy; effects below that bar are masked.
+
+**Ceiling finding (most important).** Across all six channels we now
+have on this branch (pass-r1, pass-r2, S5-lite, S5-filter, M1, M2),
+the oracle union of correct answers is **20/30 fuzzy**, identical to
+the 4-way union before M1 and M2 were added. M1 and M2 contributed
+zero new gold queries — they only reshuffled which queries get solved
+within the same 20-query frontier. **10 queries are never solved by
+any channel.** Adding more reranker / pre-search variants will not
+move this ceiling.
+
+**Implication**: the next gain must address either
+1. The 10 unsolved queries — likely a retrieval-recall problem or an
+   extraction-from-found-doc problem the current agent can't fix.
+   Candidate: P7 (Meng-style passage recipe) since it's a different
+   passage indexing scheme and may surface gold docs none of the
+   current channels reach.
+2. The single-config gap from 11/29 to 20/30 — operationalize
+   per-query routing across the 6 channels (S6-style ensemble with
+   answer-confidence selector). Operates entirely in the 20-query
+   frontier we already have.
+
 ### Supervisor K=3 batch 2 (apr27) — symmetric saturation, config space exhausted
 
 Second parallel batch testing the *opposite* direction of batch 1: "less is more"

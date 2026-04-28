@@ -183,6 +183,15 @@ pub(crate) struct BenchConfig {
     /// Max answer length before it's rejected as a refusal
     pub max_answer_length: usize,
 
+    // --- M2: Q2Q reformulation for the neural reranker ---
+    /// When true, before sending candidates to a neural reranker
+    /// (--rerank-url), reformulate the agent's keyword search query into a
+    /// natural-language question via a cheap LLM call. Mitigates the
+    /// training-inference mismatch that hurts neural rerankers (Meng et al.
+    /// 2026, arXiv:2602.21456). BM25 retrieval still uses the raw keyword
+    /// query — only the reranker sees the NL question.
+    pub rerank_q2q: bool,
+
     // --- S5-lite: coverage pre-search ---
     /// When true, pre-search round-1 takes top-N from each sub-query in
     /// round-robin (rank r across all queries before rank r+1). Enforces
@@ -224,6 +233,7 @@ impl Default for BenchConfig {
             max_search_calls: 20,
             bridge_timeout_secs: 150,
             repl_output_max_chars: 8000,
+            rerank_q2q: false,
             presearch_coverage: false,
             presearch_coverage_per_query: 2,
             presearch_coverage_skip_refine: true,
@@ -277,6 +287,7 @@ struct BrowseCompBridge {
     k: u32,
     search_mode: String, // mode string sent to HTTP backend ("bm25", "rerank", etc.)
     rerank_url: Option<String>, // Optional rerank server URL (for native backend + ColBERT reranking)
+    rerank_q2q: bool, // When true, reformulate query into NL question before sending to rerank server
     colbert_encode_url: Option<String>, // Optional ColBERT encode server URL (for multi-vector search)
     llm: OllamaClient,
     model: String,
@@ -320,6 +331,7 @@ impl BrowseCompBridge {
             k,
             search_mode,
             rerank_url,
+            rerank_q2q: false, // overridden by BenchConfig when used
             colbert_encode_url,
             _dedicated_rt: None,
             llm,
@@ -405,6 +417,8 @@ impl BrowseCompBridge {
                 let searcher = searcher.clone();
                 let llm = self.llm.clone();
                 let rerank_url = self.rerank_url.clone();
+                let rerank_q2q = self.rerank_q2q;
+                let model = self.model.clone();
                 let (corpus_hits, embed_ms, vector_ms, bm25_ms) = self.rt.block_on(async {
                     let mut embed_ms = 0u64;
                     let mut vector_ms = 0u64;
@@ -521,9 +535,60 @@ impl BrowseCompBridge {
                         })
                         .collect();
 
-                    // If rerank URL is set, send candidates to ColBERT for reranking
+                    // If rerank URL is set, send candidates to the reranker.
                     if let Some(ref url) = rerank_url {
                         let rerank_endpoint = format!("{url}/rerank");
+
+                        // Q2Q (M2): translate the agent's keyword query into a
+                        // natural-language question. Neural rerankers (monoT5,
+                        // RankLLaMA, Rank1) are trained on MS MARCO NL questions,
+                        // not on web-search-style keyword queries — Meng et al.
+                        // 2026 report this mismatch is the main thing limiting
+                        // neural reranker effectiveness on BrowseComp-Plus.
+                        // BM25 retrieval still uses the raw keyword query above;
+                        // only the reranker sees the NL question.
+                        let rerank_query: String = if rerank_q2q {
+                            let q2q_prompt = format!(
+                                "Translate this short web-search query into a single \
+                                 natural-language question that captures the underlying \
+                                 information need. Output only the question — no \
+                                 preamble, quotes, or explanation.\n\n\
+                                 Search query: {query_str}\n\n\
+                                 Question:"
+                            );
+                            let q2q_messages = vec![Message {
+                                role: "user".into(),
+                                content: q2q_prompt,
+                            }];
+                            match llm
+                                .chat_with_options(&q2q_messages, Some(&model), Some(false))
+                                .await
+                            {
+                                Ok(resp) => {
+                                    let nl = strip_think_tags(&resp.content)
+                                        .trim()
+                                        .trim_matches('"')
+                                        .trim()
+                                        .to_string();
+                                    if nl.is_empty() {
+                                        query_str.clone()
+                                    } else {
+                                        tracing::debug!(
+                                            keyword = query_str.as_str(),
+                                            nl_question = nl.as_str(),
+                                            "Q2Q reformulated"
+                                        );
+                                        nl
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "Q2Q reformulation failed, using raw query");
+                                    query_str.clone()
+                                }
+                            }
+                        } else {
+                            query_str.clone()
+                        };
 
                         // For ColBERT retrieval mode with passage index:
                         // expand each docid into ALL its passages so the reranker
@@ -560,7 +625,7 @@ impl BrowseCompBridge {
                         let client = reqwest::Client::new();
                         match client.post(&rerank_endpoint)
                             .json(&serde_json::json!({
-                                "query": query_str,
+                                "query": rerank_query,
                                 "documents": docs_json,
                                 "k": k,
                             }))
@@ -2314,6 +2379,7 @@ fn run_single_query(
     bridge.max_llm_calls = bench_config.max_llm_calls;
     bridge.max_search_calls = bench_config.max_search_calls;
     bridge.timeout_secs = bench_config.bridge_timeout_secs;
+    bridge.rerank_q2q = bench_config.rerank_q2q;
 
     let external_fns = vec![
         "search".to_string(),
@@ -2378,6 +2444,7 @@ fn run_single_query(
         bridge2.max_llm_calls = bench_config.max_llm_calls;
         bridge2.max_search_calls = bench_config.max_search_calls;
         bridge2.timeout_secs = bench_config.bridge_timeout_secs;
+        bridge2.rerank_q2q = bench_config.rerank_q2q;
         let bridge2_boxed: Box<dyn HostBridge> = Box::new(bridge2);
         // Apply config overrides to the new bridge.
         // (Can't access fields through Box<dyn HostBridge>, so we cast.)
