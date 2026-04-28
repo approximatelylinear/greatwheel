@@ -3136,6 +3136,7 @@ dependencies = [
  "chrono",
  "gw-core",
  "gw-engine",
+ "gw-kb",
  "gw-llm",
  "gw-runtime",
  "ouros",

@@ -5,6 +5,7 @@ pub mod error;
 pub mod llm;
 pub mod pg_store;
 pub mod session;
+pub mod spine;
 pub mod tree;
 
 pub use context::{build_turn_context, build_turn_context_with_opts, ContextOptions, TurnContext};
