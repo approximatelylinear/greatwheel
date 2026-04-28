@@ -96,6 +96,34 @@ pub enum AgUiEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// Diagnostic: spine extraction landed for one entry. Carries the
+    /// counts (entities + relations) plus the entry id so the
+    /// DebugPane can correlate with chat messages. Greatwheel-
+    /// specific, `DEBUG_` prefix → spec-strict clients drop safely.
+    DebugSpineEntryExtracted {
+        entry_id: String,
+        entity_count: usize,
+        relation_count: usize,
+    },
+    /// Diagnostic: a re-segment pass committed. Carries a flat
+    /// snapshot of the live segment set so a debug viewer can show
+    /// "what the spine looks like right now" without separately
+    /// reading /widgets state.
+    DebugSpineSegmentsUpdated {
+        session_id: String,
+        segments: Vec<DebugSpineSegment>,
+    },
+}
+
+/// Compact segment shape for `DebugSpineSegmentsUpdated`. Subset of
+/// `gw_core::SpineSegmentSnapshot` — just what the DebugPane wants
+/// to render in a list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebugSpineSegment {
+    pub segment_id: String,
+    pub label: String,
+    pub kind: String,
+    pub entity_count: usize,
 }
 
 /// Body of `POST /sessions/:id/messages`.

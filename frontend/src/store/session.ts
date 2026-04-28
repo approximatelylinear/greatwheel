@@ -1,5 +1,35 @@
 import { useReducer } from 'react';
-import type { AgUiEvent, CodeTrace, ToolCall, Widget } from '../types';
+import type {
+  AgUiEvent,
+  CodeTrace,
+  DebugSpineSegment,
+  ToolCall,
+  Widget,
+} from '../types';
+
+/**
+ * One spine diagnostic event for the DebugPane's "spine" tab.
+ * Either an entry-level extraction landed (`entry-extracted`) or a
+ * re-segment pass committed (`segments-updated`). The pane renders
+ * a chronological list so the user can see the spine pipeline in
+ * motion turn-by-turn.
+ */
+export type SpineDebugEvent =
+  | {
+      kind: 'entry-extracted';
+      id: string;
+      at: number;
+      entry_id: string;
+      entity_count: number;
+      relation_count: number;
+    }
+  | {
+      kind: 'segments-updated';
+      id: string;
+      at: number;
+      session_id: string;
+      segments: DebugSpineSegment[];
+    };
 
 export interface Message {
   id: string;
@@ -35,6 +65,10 @@ export interface SessionState {
   /** Follow-up widgets received before their anchor message existed.
    *  Drained onto the next assistant message. */
   pendingFollowUps: string[];
+  /** Insertion-ordered spine pipeline events. Surfaced in the debug
+   *  pane's "spine" tab so the user can see extraction + re-segment
+   *  passes as they fire. Capped to keep memory bounded. */
+  spineEvents: SpineDebugEvent[];
 }
 
 type Action =
@@ -52,10 +86,12 @@ type Action =
       result?: unknown;
       error?: string;
       at: number;
-    };
+    }
+  | { type: 'spine-event'; event: SpineDebugEvent };
 
 const MAX_TRACES = 50;
 const MAX_TOOL_CALLS = 50;
+const MAX_SPINE_EVENTS = 100;
 
 const initial: SessionState = {
   messages: [],
@@ -64,6 +100,7 @@ const initial: SessionState = {
   toolCalls: [],
   messageFollowUps: {},
   pendingFollowUps: [],
+  spineEvents: [],
 };
 
 function reducer(state: SessionState, action: Action): SessionState {
@@ -192,6 +229,13 @@ function reducer(state: SessionState, action: Action): SessionState {
       };
       return { ...state, toolCalls: next };
     }
+    case 'spine-event': {
+      const next = [...state.spineEvents, action.event];
+      if (next.length > MAX_SPINE_EVENTS) {
+        next.splice(0, next.length - MAX_SPINE_EVENTS);
+      }
+      return { ...state, spineEvents: next };
+    }
   }
 }
 
@@ -269,6 +313,29 @@ function agUiToAction(ev: AgUiEvent): Action | null {
           is_final: ev.is_final,
           error: ev.error,
           at: Date.now(),
+        },
+      };
+    case 'DEBUG_SPINE_ENTRY_EXTRACTED':
+      return {
+        type: 'spine-event',
+        event: {
+          kind: 'entry-extracted',
+          id: crypto.randomUUID(),
+          at: Date.now(),
+          entry_id: ev.entry_id,
+          entity_count: ev.entity_count,
+          relation_count: ev.relation_count,
+        },
+      };
+    case 'DEBUG_SPINE_SEGMENTS_UPDATED':
+      return {
+        type: 'spine-event',
+        event: {
+          kind: 'segments-updated',
+          id: crypto.randomUUID(),
+          at: Date.now(),
+          session_id: ev.session_id,
+          segments: ev.segments,
         },
       };
   }

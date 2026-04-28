@@ -84,7 +84,30 @@ export type AgUiEvent =
       stdout: string;
       is_final: boolean;
       error?: string;
+    }
+  /** Diagnostic: spine extraction landed for one entry. */
+  | {
+      type: 'DEBUG_SPINE_ENTRY_EXTRACTED';
+      entry_id: string;
+      entity_count: number;
+      relation_count: number;
+    }
+  /** Diagnostic: a re-segment pass committed. Carries a flat
+   *  snapshot of the live segment set so the DebugPane can render
+   *  "what the spine looks like right now" without separately
+   *  reading /widgets state. */
+  | {
+      type: 'DEBUG_SPINE_SEGMENTS_UPDATED';
+      session_id: string;
+      segments: DebugSpineSegment[];
     };
+
+export interface DebugSpineSegment {
+  segment_id: string;
+  label: string;
+  kind: string;
+  entity_count: number;
+}
 
 export interface CodeTrace {
   id: string;
