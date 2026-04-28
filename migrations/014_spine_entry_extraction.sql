@@ -23,6 +23,7 @@
 -- named in the prose).
 
 CREATE TABLE session_entry_entities (
+    link_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     entry_id     UUID NOT NULL REFERENCES session_entries(id)   ON DELETE CASCADE,
     entity_id    UUID NOT NULL REFERENCES kb_entities(entity_id) ON DELETE CASCADE,
     surface      TEXT NOT NULL,                                 -- text span as it appeared
@@ -31,13 +32,16 @@ CREATE TABLE session_entry_entities (
     confidence   REAL NOT NULL DEFAULT 0.5,
     span_start   INT,                                           -- char offset within entry text
     span_end     INT,
-    extracted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    -- COALESCE so two rows for the same (entry, entity) at different
-    -- spans are distinct, but two rows with NULL span at the same
-    -- (entry, entity) collapse into one.
-    PRIMARY KEY (entry_id, entity_id, COALESCE(span_start, -1))
+    extracted_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Natural-key dedup: two rows for the same (entry, entity) at
+-- different spans are distinct; two NULL-span rows for the same
+-- (entry, entity) collapse into one. Postgres PRIMARY KEY can't take
+-- expressions, so use a unique expression index instead — ON CONFLICT
+-- can target it by repeating the same expression list.
+CREATE UNIQUE INDEX session_entry_entities_natural_uk
+    ON session_entry_entities (entry_id, entity_id, COALESCE(span_start, -1));
 CREATE INDEX idx_session_entry_entities_entity ON session_entry_entities (entity_id);
 CREATE INDEX idx_session_entry_entities_committed
     ON session_entry_entities (entry_id) WHERE status = 'committed';

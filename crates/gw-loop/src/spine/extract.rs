@@ -74,6 +74,28 @@ impl SpineExtractor {
         entry: &SessionEntry,
     ) -> Result<EntryExtraction, LoopError> {
         let raw = self.raw_extract_entry(entry).await?;
+        self.build_typed_extraction(entry.id, raw).await
+    }
+
+    /// Test/replay seam: run the post-LLM half of `extract_entry` on
+    /// a hand-crafted `RawJointExtraction`. Useful for integration
+    /// tests that exercise canonicalisation + relation resolution +
+    /// row construction against a real DB without paying the LLM
+    /// call. Production code should always go through
+    /// `extract_entry`.
+    pub async fn extract_entry_from_raw(
+        &self,
+        entry_id: gw_core::EntryId,
+        raw: RawJointExtraction,
+    ) -> Result<EntryExtraction, LoopError> {
+        self.build_typed_extraction(entry_id, raw).await
+    }
+
+    async fn build_typed_extraction(
+        &self,
+        entry_id: gw_core::EntryId,
+        raw: RawJointExtraction,
+    ) -> Result<EntryExtraction, LoopError> {
         if raw.entities.is_empty() {
             // Empty entity list ⇒ no relations either (parser drops
             // relations whose endpoints don't appear in the entity
@@ -105,7 +127,7 @@ impl SpineExtractor {
         // parser used so subject/object → entity-position → entity_id.
         // The parser already dropped unresolved relations, so every
         // surviving raw.relations[*] is guaranteed to find both
-        // endpoints; the .ok_or in the closure below is defensive.
+        // endpoints.
         let mut entity_lookup: HashMap<String, usize> = HashMap::new();
         for (i, e) in raw.entities.iter().enumerate() {
             entity_lookup.entry(e.label.to_lowercase()).or_insert(i);
@@ -120,7 +142,7 @@ impl SpineExtractor {
             .iter()
             .enumerate()
             .map(|(i, e)| EntryEntityLink {
-                entry_id: entry.id,
+                entry_id,
                 entity_id: entity_ids_slice[i],
                 surface: e.label.clone(),
                 role: e.role.clone(),
@@ -147,7 +169,7 @@ impl SpineExtractor {
                 continue;
             }
             relations.push(EntryRelation {
-                entry_id: entry.id,
+                entry_id,
                 subject_id: entity_ids_slice[si],
                 object_id: entity_ids_slice[oi],
                 predicate: r.predicate.clone(),
