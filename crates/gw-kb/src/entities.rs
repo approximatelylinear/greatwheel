@@ -380,35 +380,31 @@ pub struct EntityIngestReport {
     pub links_created: usize,
 }
 
-/// Top-level entry point for step 3. Embeds → clusters → upserts →
-/// links. Stores everything in one go; nothing here is transactional
-/// because each statement is idempotent (slug conflicts merge into
-/// the existing row; `kb_chunk_entity_links` is `ON CONFLICT DO
-/// NOTHING`).
-pub async fn canonicalize_and_persist(
+/// Embed → cluster → upsert into `kb_entities` for a flat list of raw
+/// mentions, returning a parallel `Vec<Uuid>` that maps each input
+/// `mentions[i]` to its canonicalised entity. Does NOT write any
+/// chunk-side or entry-side link rows — those are the caller's
+/// problem (`canonicalize_and_persist` writes `kb_chunk_entity_links`;
+/// the spine writes `session_entry_entities`).
+///
+/// Cross-batch consistency: existing entities of the same kind are
+/// loaded and matched against; an incoming mention prefers attaching
+/// to an existing entity over starting a fresh in-batch cluster, so
+/// repeated runs over the same canonical_form converge to one row.
+pub async fn canonicalize_mentions(
     stores: &KbStores,
-    chunks: &[ChunkEntities],
+    mentions: &[RawEntity],
     opts: &CanonicalizeOpts,
-) -> Result<EntityIngestReport, KbError> {
-    // 1. Flatten mentions into one parallel-array list.
-    let mut mentions: Vec<MentionRef> = Vec::new();
-    for c in chunks {
-        for raw in &c.entities {
-            mentions.push(MentionRef {
-                chunk_id: c.chunk_id,
-                raw: raw.clone(),
-            });
-        }
-    }
+) -> Result<(Vec<Uuid>, EntityIngestReport), KbError> {
     let mentions_in = mentions.len();
     if mentions.is_empty() {
-        return Ok(EntityIngestReport::default());
+        return Ok((Vec::new(), EntityIngestReport::default()));
     }
 
-    // 2. Embed all canonical_forms in one batch. The embedder's
+    // Embed all canonical_forms in one batch. The embedder's
     // sentence-transformers backend is loaded lazily on first call;
     // batching keeps that one-time cost amortised.
-    let texts: Vec<String> = mentions.iter().map(|m| m.raw.canonical_form.clone()).collect();
+    let texts: Vec<String> = mentions.iter().map(|m| m.canonical_form.clone()).collect();
     let vectors = stores.embedder.embed_texts(&texts)?;
     if vectors.len() != mentions.len() {
         return Err(KbError::Other(format!(
@@ -418,20 +414,18 @@ pub async fn canonicalize_and_persist(
         )));
     }
 
-    // 3. Group mention indices by kind so each kind clusters
+    // Group mention indices by kind so each kind clusters
     // independently. Shared cosine threshold; per-kind threshold is a
     // future tunable mentioned in the design doc.
     let mut by_kind: HashMap<String, Vec<usize>> = HashMap::new();
     for (idx, m) in mentions.iter().enumerate() {
-        by_kind.entry(m.raw.kind.clone()).or_default().push(idx);
+        by_kind.entry(m.kind.clone()).or_default().push(idx);
     }
 
     let mut report = EntityIngestReport {
         mentions_in,
         ..Default::default()
     };
-    // mention index → assigned entity_id. Filled progressively as we
-    // cluster. Used in step 6 below to write the chunk-entity links.
     let mut mention_entity: HashMap<usize, Uuid> = HashMap::new();
 
     for (kind, indices) in by_kind {
@@ -440,7 +434,7 @@ pub async fn canonicalize_and_persist(
         // mention arriving later then merges into the longer cluster
         // and contributes its label as an alias.
         let mut ordered = indices;
-        ordered.sort_by_key(|i| std::cmp::Reverse(mentions[*i].raw.canonical_form.len()));
+        ordered.sort_by_key(|i| std::cmp::Reverse(mentions[*i].canonical_form.len()));
 
         let existing = load_entities_by_kind(&stores.pg, &kind).await?;
 
@@ -452,7 +446,7 @@ pub async fn canonicalize_and_persist(
 
         for i in ordered {
             let v = &vectors[i];
-            let raw = &mentions[i].raw;
+            let raw = &mentions[i];
 
             // Best match across existing rows.
             let mut best_existing: Option<(usize, f32)> = None;
@@ -509,9 +503,6 @@ pub async fn canonicalize_and_persist(
             let aliases = collect_aliases(&canonical, &cluster.surface_forms);
             let slug = unique_entity_slug(&canonical, &mut used_slugs);
             let mention_count = cluster.mention_indices.len() as i32;
-            // Upsert form: ON CONFLICT (slug) merges into the existing
-            // row. Two batches that pick the same slug just collapse,
-            // matching what canonicalisation should do anyway.
             let (entity_id, was_created) = upsert_entity(
                 &stores.pg,
                 &canonical,
@@ -546,15 +537,55 @@ pub async fn canonicalize_and_persist(
         }
     }
 
-    // 4. Write kb_chunk_entity_links and update kb_chunks.entities.
+    // Build the parallel Vec<Uuid>. Every input index must have
+    // landed somewhere by now; if it didn't, that's a bug, not a
+    // routine miss — surface it.
+    let mut entity_ids: Vec<Uuid> = Vec::with_capacity(mentions.len());
+    for i in 0..mentions.len() {
+        let id = mention_entity.get(&i).copied().ok_or_else(|| {
+            KbError::Other(format!(
+                "canonicalize_mentions: mention {i} did not resolve to an entity"
+            ))
+        })?;
+        entity_ids.push(id);
+    }
+    Ok((entity_ids, report))
+}
+
+/// Top-level entry point for step 3 of the chunk-side ingest pipeline.
+/// Embeds → clusters → upserts → writes `kb_chunk_entity_links`.
+/// Spine callers want only the canonicalisation half — see
+/// `canonicalize_mentions`.
+pub async fn canonicalize_and_persist(
+    stores: &KbStores,
+    chunks: &[ChunkEntities],
+    opts: &CanonicalizeOpts,
+) -> Result<EntityIngestReport, KbError> {
+    // Flatten chunks → parallel arrays of (chunk_id, RawEntity). The
+    // chunk_id list lines up with the entity_ids returned by
+    // canonicalize_mentions.
+    let mut chunk_ids: Vec<Uuid> = Vec::new();
+    let mut mentions: Vec<RawEntity> = Vec::new();
+    for c in chunks {
+        for raw in &c.entities {
+            chunk_ids.push(c.chunk_id);
+            mentions.push(raw.clone());
+        }
+    }
+    if mentions.is_empty() {
+        return Ok(EntityIngestReport::default());
+    }
+
+    let (entity_ids, mut report) = canonicalize_mentions(stores, &mentions, opts).await?;
+
+    // Write kb_chunk_entity_links and update kb_chunks.entities.
     // Group by chunk so kb_chunks.entities batches a single UPDATE.
     let mut by_chunk: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
-    for (i, entity_id) in &mention_entity {
-        let chunk_id = mentions[*i].chunk_id;
-        if insert_chunk_entity_link(&stores.pg, chunk_id, *entity_id).await? {
+    for (chunk_id, entity_id) in chunk_ids.iter().zip(entity_ids.iter()) {
+        if insert_chunk_entity_link(&stores.pg, *chunk_id, *entity_id).await? {
             report.links_created += 1;
         }
-        by_chunk.entry(chunk_id).or_default().push(*entity_id);
+        by_chunk.entry(*chunk_id).or_default().push(*entity_id);
     }
 
     if opts.write_chunk_entities_column {
@@ -701,12 +732,6 @@ async fn extract_and_persist_for_rows(
 }
 
 // ─── Internal: clustering scratchpads ───────────────────────────────
-
-#[derive(Debug, Clone)]
-struct MentionRef {
-    chunk_id: Uuid,
-    raw: RawEntity,
-}
 
 /// In-batch cluster that hasn't been persisted yet.
 #[derive(Debug, Clone)]

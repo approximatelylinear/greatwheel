@@ -18,17 +18,21 @@
 //! into two calls would either double the cost or force the second
 //! call to re-extract entities.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use gw_core::{EntryId, EntryType, SessionEntry};
+use gw_core::{EntryType, SessionEntry};
+use gw_kb::entities::{
+    canonicalize_mentions, CanonicalizeOpts, RawEntity as KbRawEntity,
+};
 use gw_kb::ingest::KbStores;
 use gw_kb::llm_parse::extract_json;
 use gw_llm::{Message, OllamaClient};
 use serde::Deserialize;
 
 use super::types::{
-    EntryExtraction, RawEntryEntity, RawJointExtraction, RawRelation, RECOMMENDED_PREDICATES,
+    EntryEntityLink, EntryExtraction, EntryRelation, RawEntryEntity, RawJointExtraction,
+    RawRelation, RECOMMENDED_PREDICATES,
 };
 use crate::error::LoopError;
 
@@ -57,32 +61,108 @@ impl SpineExtractor {
         Self { stores }
     }
 
-    /// Run extraction over one entry. Returns an empty
-    /// `EntryExtraction` for entry types that aren't user-facing
-    /// prose (code execution, host calls, repl snapshots,
-    /// compactions). The persistence step is a no-op on empty
-    /// extractions, so callers can fire this for every entry without
-    /// guarding.
-    ///
-    /// Step B note: this currently runs the joint LLM call and logs
-    /// the raw extraction, but returns an empty `EntryExtraction`
-    /// because canonicalisation (step C) still has to land before we
-    /// can resolve entity labels to `kb_entities.entity_id` and emit
-    /// the typed `EntryEntityLink` / `EntryRelation` rows.
+    /// Run extraction over one entry: joint LLM call → canonicalise
+    /// each entity into `kb_entities` → resolve relation endpoints
+    /// to `entity_id`s → return the typed `EntryExtraction`.
+    /// Returns an empty `EntryExtraction` for entry types that
+    /// aren't user-facing prose (code execution, host calls, repl
+    /// snapshots, compactions). The persistence step is a no-op on
+    /// empty extractions, so callers can fire this for every entry
+    /// without guarding.
     pub async fn extract_entry(
         &self,
         entry: &SessionEntry,
     ) -> Result<EntryExtraction, LoopError> {
         let raw = self.raw_extract_entry(entry).await?;
-        if !raw.entities.is_empty() || !raw.relations.is_empty() {
-            tracing::debug!(
-                entry_id = %entry.id.0,
-                entities = raw.entities.len(),
-                relations = raw.relations.len(),
-                "spine raw extraction (canonicalisation pending)",
-            );
+        if raw.entities.is_empty() {
+            // Empty entity list ⇒ no relations either (parser drops
+            // relations whose endpoints don't appear in the entity
+            // list). Skip the canonicalisation hop.
+            return Ok(EntryExtraction::default());
         }
-        Ok(EntryExtraction::default())
+
+        // Canonicalise entities through gw-kb so chat-extracted
+        // entities share `kb_entities` rows with document-extracted
+        // ones. Each `raw.entities[i]` resolves to `entity_ids[i]`.
+        let kb_mentions: Vec<KbRawEntity> = raw
+            .entities
+            .iter()
+            .map(|e| KbRawEntity {
+                label: e.label.clone(),
+                kind: e.kind.clone(),
+                canonical_form: e.canonical_form.clone(),
+                confidence: e.confidence,
+            })
+            .collect();
+        let canon_opts = CanonicalizeOpts::default();
+        let (entity_ids, _ingest_report) =
+            canonicalize_mentions(&self.stores, &kb_mentions, &canon_opts)
+                .await
+                .map_err(|e| LoopError::Spine(format!("canonicalize: {e}")))?;
+        debug_assert_eq!(entity_ids.len(), raw.entities.len());
+
+        // Resolve relation endpoints. Re-build the same lookup the
+        // parser used so subject/object → entity-position → entity_id.
+        // The parser already dropped unresolved relations, so every
+        // surviving raw.relations[*] is guaranteed to find both
+        // endpoints; the .ok_or in the closure below is defensive.
+        let mut entity_lookup: HashMap<String, usize> = HashMap::new();
+        for (i, e) in raw.entities.iter().enumerate() {
+            entity_lookup.entry(e.label.to_lowercase()).or_insert(i);
+            entity_lookup
+                .entry(e.canonical_form.to_lowercase())
+                .or_insert(i);
+        }
+
+        let entity_ids_slice = entity_ids.as_slice();
+        let entities: Vec<EntryEntityLink> = raw
+            .entities
+            .iter()
+            .enumerate()
+            .map(|(i, e)| EntryEntityLink {
+                entry_id: entry.id,
+                entity_id: entity_ids_slice[i],
+                surface: e.label.clone(),
+                role: e.role.clone(),
+                status: e.status.clone(),
+                confidence: e.confidence,
+                span_start: e.span_start,
+                span_end: e.span_end,
+            })
+            .collect();
+
+        let mut relations: Vec<EntryRelation> = Vec::with_capacity(raw.relations.len());
+        for r in &raw.relations {
+            let subj_idx = entity_lookup.get(&r.subject.to_lowercase()).copied();
+            let obj_idx = entity_lookup.get(&r.object.to_lowercase()).copied();
+            let (Some(si), Some(oi)) = (subj_idx, obj_idx) else {
+                continue;
+            };
+            // Defensive: parser already drops self-loops, but
+            // canonicalisation could collapse two distinct labels
+            // into the same entity_id (rare but possible — same
+            // surface form passed in twice with different casing
+            // would canonicalise to one row).
+            if entity_ids_slice[si] == entity_ids_slice[oi] {
+                continue;
+            }
+            relations.push(EntryRelation {
+                entry_id: entry.id,
+                subject_id: entity_ids_slice[si],
+                object_id: entity_ids_slice[oi],
+                predicate: r.predicate.clone(),
+                directed: r.directed,
+                surface: r.surface.clone(),
+                confidence: r.confidence,
+                span_start: r.span_start,
+                span_end: r.span_end,
+            });
+        }
+
+        Ok(EntryExtraction {
+            entities,
+            relations,
+        })
     }
 
     /// Pre-canonicalisation extraction. Public so tests + the
@@ -106,7 +186,9 @@ impl SpineExtractor {
             return Ok(RawJointExtraction::default());
         }
 
-        let _entry_id: EntryId = entry.id;
+        // entry id is intentionally unused at this layer — we
+        // re-attach it during the typed-row build in extract_entry.
+        let _ = entry.id;
         joint_extract_for_text(self.stores.llm.as_ref(), text, role).await
     }
 }
