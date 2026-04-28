@@ -1497,6 +1497,40 @@ fn spawn_entity_worker(stores: Arc<KbStores>) -> EntityWorkerHandle {
     EntityWorkerHandle { tx, status }
 }
 
+/// HTTP handler for the spine sidebar. Resolves the segment id from
+/// the path, loads its detail (segment + entries + entities +
+/// relations) via gw-loop's spine::query, returns JSON. Mirrors the
+/// shape of the existing AG-UI surface endpoint so the frontend's
+/// fetch path is uniform.
+async fn handle_segment_detail(
+    axum::extract::Path((_session_id, segment_id)): axum::extract::Path<(String, String)>,
+    axum::extract::State(pool): axum::extract::State<sqlx::PgPool>,
+) -> Result<
+    axum::Json<gw_loop::spine::query::SegmentDetail>,
+    (axum::http::StatusCode, String),
+> {
+    let seg_uuid = uuid::Uuid::parse_str(&segment_id).map_err(|_| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid segment id".to_string(),
+        )
+    })?;
+    match gw_loop::spine::query::fetch_segment_detail(&pool, seg_uuid).await {
+        Ok(Some(detail)) => Ok(axum::Json(detail)),
+        Ok(None) => Err((
+            axum::http::StatusCode::NOT_FOUND,
+            "segment not found or invalidated".to_string(),
+        )),
+        Err(e) => {
+            tracing::warn!(error = %e, "segment detail query failed");
+            Err((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                e.to_string(),
+            ))
+        }
+    }
+}
+
 /// Demo-only fixed UUIDs for the literature_assistant's
 /// org/user/agent_def chain. Stable across runs so re-launching the
 /// binary doesn't pile up rows; ON CONFLICT DO NOTHING makes the
@@ -2169,8 +2203,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         })?;
 
-    let app = adapter
-        .router()
+    // Spine sidebar's segment-detail endpoint. Mounted only when the
+    // KB is wired up (it joins across kb_entities and the spine
+    // tables; without a PgPool there's nothing to read). Uses the
+    // same axum app as the AG-UI router via .merge so the frontend
+    // hits one host:port.
+    let app_base = adapter.router();
+    let app_with_spine = if let Some(kb) = kb_stores.as_ref() {
+        let pool = kb.pg.clone();
+        let spine_router = axum::Router::new()
+            .route(
+                "/sessions/{session_id}/segments/{segment_id}",
+                axum::routing::get(handle_segment_detail),
+            )
+            .with_state(pool);
+        app_base.merge(spine_router)
+    } else {
+        app_base
+    };
+    let app = app_with_spine
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive());
     let listener = TcpListener::bind("127.0.0.1:8787").await?;

@@ -105,7 +105,19 @@ const built = defineRegistry(spikeCatalog, {
         )}
       </div>
     ),
-    SemanticSpine: ({ props }) => <SpinePane segments={props.segments} />,
+    // Fallback path: the spine widget is normally rendered by
+    // App.tsx (which knows the widget_id + surface_id needed for
+    // click events). This binding only fires if some future code
+    // path drops the widget through the json-render registry; in
+    // that case we render the rail as static (no focus state, no
+    // click handler) rather than crash.
+    SemanticSpine: ({ props }) => (
+      <SpinePane
+        segments={props.segments}
+        focusedSegmentId={null}
+        onSegmentFocus={() => {}}
+      />
+    ),
     EntityCloud: ({ props, emit }) => (
       <EntityCloudWidget
         points={props.points}

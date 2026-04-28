@@ -1,0 +1,235 @@
+import { useEffect, useState } from 'react';
+import {
+  fetchSegmentDetail,
+  type EntityCard,
+  type RelationRow,
+  type SegmentDetail,
+} from '../api/client';
+
+/**
+ * Sidebar that hangs under the spine rail when a marker is focused.
+ * Fetches `/sessions/:session_id/segments/:segment_id` from the
+ * literature_assistant's segment-detail endpoint and renders three
+ * tabs: Entities, Relations, Notes.
+ *
+ * Refetches on focus change. AbortController cancels stale requests
+ * if the user clicks through markers quickly.
+ *
+ * Phase B scope: read-only. Phase C wires the action menu (revisit /
+ * expand / compare). Phase D moves the sidebar from inline-under-rail
+ * to canvas-pinned per the design doc.
+ */
+interface Props {
+  sessionId: string;
+  segmentId: string;
+}
+
+type Tab = 'entities' | 'relations' | 'notes';
+
+const KIND_COLORS: Record<string, string> = {
+  // entity-kind palette — matches the EntityCloud's kind colours so
+  // an author dot in the cloud reads the same in the sidebar.
+  author: '#b48cde',
+  concept: '#7bd38f',
+  method: '#7ba5ff',
+  dataset: '#6ec3d2',
+  venue: '#d6a56e',
+};
+
+function kindColor(kind: string): string {
+  return KIND_COLORS[kind.toLowerCase()] ?? '#a8b1bf';
+}
+
+export function SpineSidebar({ sessionId, segmentId }: Props) {
+  const [tab, setTab] = useState<Tab>('entities');
+  const [detail, setDetail] = useState<SegmentDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const ac = new AbortController();
+    setLoading(true);
+    setError(null);
+    fetchSegmentDetail(sessionId, segmentId, ac.signal)
+      .then((d) => {
+        setDetail(d);
+        setLoading(false);
+      })
+      .catch((e: unknown) => {
+        // Aborted requests show up as DOMException AbortError; ignore.
+        if (e instanceof DOMException && e.name === 'AbortError') return;
+        setError(String(e));
+        setLoading(false);
+      });
+    return () => ac.abort();
+  }, [sessionId, segmentId]);
+
+  if (error) {
+    return (
+      <div className="spine-sidebar spine-sidebar-error">
+        Couldn't load segment detail: {error}
+      </div>
+    );
+  }
+  if (loading || !detail) {
+    return (
+      <div className="spine-sidebar spine-sidebar-loading">
+        <div className="spine-sidebar-header">
+          <span className="spine-sidebar-title">Loading…</span>
+        </div>
+      </div>
+    );
+  }
+
+  const { segment, entities, relations } = detail;
+  return (
+    <div className="spine-sidebar" aria-live="polite">
+      <header className="spine-sidebar-header">
+        <span className="spine-sidebar-title">{segment.label}</span>
+        <span className={`spine-kind spine-kind-${segment.kind}`}>
+          {segment.kind.replace('_', ' ')}
+        </span>
+      </header>
+      {segment.summary && (
+        <p className="spine-sidebar-summary">{segment.summary}</p>
+      )}
+      <nav className="spine-sidebar-tabs" role="tablist">
+        <TabButton
+          tab="entities"
+          active={tab}
+          onSelect={setTab}
+          label={`Entities · ${entities.length}`}
+        />
+        <TabButton
+          tab="relations"
+          active={tab}
+          onSelect={setTab}
+          label={`Relations · ${relations.length}`}
+        />
+        <TabButton tab="notes" active={tab} onSelect={setTab} label="Notes" />
+      </nav>
+      <div className="spine-sidebar-body">
+        {tab === 'entities' && <EntitiesTab entities={entities} />}
+        {tab === 'relations' && <RelationsTab relations={relations} />}
+        {tab === 'notes' && <NotesTab />}
+      </div>
+    </div>
+  );
+}
+
+function TabButton({
+  tab,
+  active,
+  onSelect,
+  label,
+}: {
+  tab: Tab;
+  active: Tab;
+  onSelect: (t: Tab) => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active === tab}
+      className={`spine-tab${active === tab ? ' active' : ''}`}
+      onClick={() => onSelect(tab)}
+    >
+      {label}
+    </button>
+  );
+}
+
+function EntitiesTab({ entities }: { entities: EntityCard[] }) {
+  if (entities.length === 0) {
+    return (
+      <div className="spine-tab-empty">
+        No named entities extracted from this segment yet.
+      </div>
+    );
+  }
+  return (
+    <ul className="spine-entity-list">
+      {entities.map((e) => (
+        <li key={e.entity_id} className="spine-entity-card">
+          <div className="spine-entity-row">
+            <span
+              className="spine-entity-dot"
+              style={{ backgroundColor: kindColor(e.kind) }}
+              aria-hidden
+            />
+            <span className="spine-entity-label" title={e.slug}>
+              {e.label}
+            </span>
+            <span className="spine-entity-kind">{e.kind}</span>
+          </div>
+          <div className="spine-entity-meta">
+            <span title="mentions inside this segment">
+              {e.mentions_in_segment}× here
+            </span>
+            <span className="spine-entity-meta-sep">·</span>
+            <span title="mentions across the whole KB corpus">
+              {e.global_mentions}× total
+            </span>
+            {e.aliases.length > 0 && (
+              <>
+                <span className="spine-entity-meta-sep">·</span>
+                <span
+                  className="spine-entity-aliases"
+                  title={e.aliases.join(', ')}
+                >
+                  {e.aliases.length} alias{e.aliases.length === 1 ? '' : 'es'}
+                </span>
+              </>
+            )}
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function RelationsTab({ relations }: { relations: RelationRow[] }) {
+  if (relations.length === 0) {
+    return (
+      <div className="spine-tab-empty">
+        No typed relations asserted in this segment.
+      </div>
+    );
+  }
+  return (
+    <ul className="spine-relation-list">
+      {relations.map((r) => (
+        <li key={r.id} className="spine-relation-row" title={r.surface}>
+          <span className="spine-relation-subject">{r.subject_label}</span>
+          <span
+            className={`spine-relation-arrow${r.directed ? ' directed' : ''}`}
+            aria-label={r.predicate}
+          >
+            {r.directed ? '→' : '↔'}
+          </span>
+          <span className="spine-relation-predicate">
+            {r.predicate.replace('_', ' ')}
+          </span>
+          <span
+            className={`spine-relation-arrow${r.directed ? ' directed' : ''}`}
+            aria-hidden
+          >
+            {r.directed ? '→' : '↔'}
+          </span>
+          <span className="spine-relation-object">{r.object_label}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function NotesTab() {
+  return (
+    <div className="spine-tab-empty">
+      Notes are coming next — pin observations to a segment for later
+      reference.
+    </div>
+  );
+}

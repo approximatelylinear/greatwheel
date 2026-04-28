@@ -598,13 +598,188 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
   display: flex;
   align-items: flex-start;
   gap: 0;
+  /* Reset button defaults so the marker reads as a clickable card,
+     not a button. */
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  font: inherit;
+  color: inherit;
   /* Soft-faded by default; commit-vs-mentioned styling lands in
      Issue #5 with a `.committed` modifier flipping opacity to 1. */
   opacity: 0.85;
-  transition: opacity 120ms ease;
+  transition: opacity 120ms ease, background-color 120ms ease;
+  border-radius: var(--radius-sm);
+  padding: 4px 6px 4px 0;
+  margin-left: -6px;
 }
 .spine-marker:hover {
   opacity: 1;
+  background-color: var(--surface-hi);
+}
+.spine-marker.active {
+  opacity: 1;
+  background-color: var(--surface);
+}
+.spine-marker.active .spine-dot {
+  /* Bigger + soft glow on the focused marker so the rail communicates
+     "here's where you're looking." */
+  box-shadow: 0 0 0 2px var(--surface-hi);
+  transform: scale(1.15);
+}
+.spine-marker.active .spine-label {
+  color: var(--accent);
+}
+
+/* ─── Sidebar under the rail (focused-segment detail) ────────── */
+
+.spine-sidebar {
+  margin-top: 24px;
+  padding: 12px 12px 14px;
+  background: var(--surface-hi);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  display: flex; flex-direction: column; gap: 10px;
+  animation: rise-in 240ms cubic-bezier(0.2, 0.8, 0.25, 1) both;
+}
+.spine-sidebar-loading,
+.spine-sidebar-error {
+  font: 11.5px/1.45 var(--font-ui);
+  color: var(--muted);
+  font-style: italic;
+}
+.spine-sidebar-header {
+  display: flex; align-items: center; gap: 8px;
+  flex-wrap: wrap;
+}
+.spine-sidebar-title {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--fg);
+  letter-spacing: -0.005em;
+  flex: 1;
+}
+.spine-sidebar-summary {
+  margin: 0;
+  font: 12px/1.45 var(--font-serif);
+  color: var(--fg-dim);
+}
+.spine-sidebar-tabs {
+  display: flex; gap: 2px;
+  border-bottom: 1px solid var(--border);
+  margin: 0 -2px;
+}
+.spine-tab {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  padding: 6px 8px 7px;
+  font: 500 10px/1.2 var(--font-ui);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+.spine-tab:hover { color: var(--fg-dim); }
+.spine-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.spine-sidebar-body {
+  font-family: var(--font-ui);
+  /* Keep the panel from blowing past the spine column when there are
+     many entities/relations — let the inner list scroll. */
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.spine-tab-empty {
+  padding: 14px 4px;
+  font: italic 11.5px/1.5 var(--font-ui);
+  color: var(--muted);
+}
+
+/* Entities tab */
+.spine-entity-list {
+  list-style: none;
+  margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.spine-entity-card {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 6px 0 7px;
+  border-bottom: 1px dashed var(--border);
+}
+.spine-entity-card:last-child { border-bottom: 0; }
+.spine-entity-row {
+  display: flex; align-items: center; gap: 6px;
+}
+.spine-entity-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.spine-entity-label {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--fg);
+  flex: 1;
+  letter-spacing: -0.005em;
+  /* Long author names / dataset titles wrap rather than overflow. */
+  word-break: break-word;
+}
+.spine-entity-kind {
+  font: 600 9px/1.2 var(--font-ui);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-strong);
+}
+.spine-entity-meta {
+  display: flex; gap: 4px;
+  font: 11px/1.3 var(--font-mono);
+  color: var(--muted);
+  flex-wrap: wrap;
+}
+.spine-entity-meta-sep { color: var(--border-hi); }
+.spine-entity-aliases { font-style: italic; }
+
+/* Relations tab */
+.spine-relation-list {
+  list-style: none;
+  margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.spine-relation-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto 1fr;
+  gap: 4px; align-items: baseline;
+  padding: 4px 0;
+  font-size: 11.5px;
+  border-bottom: 1px dashed var(--border);
+}
+.spine-relation-row:last-child { border-bottom: 0; }
+.spine-relation-subject,
+.spine-relation-object {
+  color: var(--fg);
+  font-weight: 500;
+  word-break: break-word;
+}
+.spine-relation-object { text-align: right; }
+.spine-relation-arrow {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.spine-relation-predicate {
+  font: 500 9.5px/1.2 var(--font-ui);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+  white-space: nowrap;
 }
 .spine-dot {
   position: absolute;

@@ -35,6 +35,7 @@
 
 pub mod extract;
 pub mod persist;
+pub mod query;
 pub mod resegment;
 pub mod segment;
 pub mod types;
