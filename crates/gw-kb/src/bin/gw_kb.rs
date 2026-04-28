@@ -293,6 +293,15 @@ enum Command {
         rebuild_links: bool,
     },
 
+    /// Mark every embedded migration as already-applied without
+    /// running any SQL. Use this once on a database whose schema was
+    /// created out-of-band (e.g. migrations applied manually with
+    /// psql before sqlx::migrate! was wired in). After baselining,
+    /// future `gw-kb` and `literature_assistant` runs see all
+    /// migrations as applied and won't retry them. Idempotent: rows
+    /// for already-tracked versions are left alone.
+    MigrateBaseline,
+
     /// Rebuild the entity link graph (kb_entity_links) and the
     /// topic↔entity bridge (kb_topic_entity_links) from current state.
     /// Run after a batch of `extract-entities` calls.
@@ -303,8 +312,12 @@ enum Command {
         min_cosine: f32,
         #[arg(long, default_value_t = 0.10)]
         min_confidence: f32,
-        #[arg(long)]
-        max_per_entity: Option<usize>,
+        /// Per-entity fan-out cap. Default mirrors
+        /// `LinkEntitiesOpts::default().max_per_entity` (20) so the
+        /// link graph has bounded degree out of the box. Pass `0`
+        /// explicitly to disable the cap.
+        #[arg(long, default_value_t = 20)]
+        max_per_entity: usize,
     },
 
     /// Spreading-activation discovery from a free-text query.
@@ -382,8 +395,11 @@ async fn main() -> Result<(), KbError> {
     let cli = Cli::parse();
 
     // Build stores up-front for commands that need them. Cheap construction;
-    // py-ping doesn't need them but it's the only exception.
-    let need_stores = !matches!(cli.command, Command::PyPing);
+    // py-ping doesn't need them; migrate-baseline opens its own pg
+    // connection because it deliberately skips the migrate-on-connect
+    // step that build_stores does.
+    let need_stores =
+        !matches!(cli.command, Command::PyPing | Command::MigrateBaseline);
     let stores = if need_stores {
         Some(build_stores(&cli).await?)
     } else {
@@ -400,6 +416,23 @@ async fn main() -> Result<(), KbError> {
                 println!("---\n{}", doc.trim());
                 Ok(())
             })?;
+        }
+        Command::MigrateBaseline => {
+            // Connect directly — build_stores would call sqlx::migrate!
+            // and fail against an out-of-band schema. We want to
+            // populate _sqlx_migrations *first* so the next normal
+            // run sees everything as already-applied.
+            let pg = connect_pg(cli.database_url.as_deref()).await?;
+            let report = baseline_migrations(&pg).await?;
+            println!("migrate-baseline report:");
+            println!("  total_migrations  = {}", report.total);
+            println!("  newly_recorded    = {}", report.recorded);
+            println!("  already_recorded  = {}", report.already_present);
+            println!(
+                "\n_sqlx_migrations is now in sync with the embedded migration set.\n\
+                 Future `gw-kb` and `literature_assistant` runs will see all migrations as\n\
+                 applied and won't retry them."
+            );
         }
         Command::Ingest {
             url,
@@ -1079,6 +1112,12 @@ async fn main() -> Result<(), KbError> {
             max_per_entity,
         } => {
             let stores = stores.as_ref().expect("stores built above");
+            // 0 disables the cap — surfaced as None to the linker.
+            let max_per_entity = if max_per_entity == 0 {
+                None
+            } else {
+                Some(max_per_entity)
+            };
             let er = gw_kb::linking::link_entities(
                 &stores.pg,
                 gw_kb::linking::LinkEntitiesOpts {
@@ -1435,6 +1474,16 @@ async fn run_jsonl_ingest(
 
 async fn build_stores(cli: &Cli) -> Result<KbStores, KbError> {
     let pg = connect_pg(cli.database_url.as_deref()).await?;
+    // Apply gw-kb's schema migrations against this Postgres. The
+    // sqlx::migrate! macro embeds the *.sql files at compile time and
+    // tracks applied versions in a `_sqlx_migrations` table, so this
+    // is idempotent: a fresh database gets all migrations, an
+    // already-bootstrapped one is a no-op (only newly-added migrations
+    // run). Mirrors the same call in the literature_assistant example.
+    sqlx::migrate!("../../migrations")
+        .run(&pg)
+        .await
+        .map_err(|e| KbError::Other(format!("migrate: {e}")))?;
     let lance = Arc::new(KbLanceStore::open(&cli.lance_path, cli.embedding_dim).await?);
     let tantivy = Arc::new(KbTantivyStore::open(std::path::Path::new(
         &cli.tantivy_path,
@@ -1456,6 +1505,73 @@ async fn build_stores(cli: &Cli) -> Result<KbStores, KbError> {
         embedder,
         llm,
     })
+}
+
+struct BaselineReport {
+    total: usize,
+    recorded: usize,
+    already_present: usize,
+}
+
+/// Walk the embedded migration set and insert one row per migration
+/// into `_sqlx_migrations`, marking each as already-applied. Used to
+/// retrofit migration tracking onto a database whose schema was
+/// created out-of-band. Idempotent: existing rows are left alone via
+/// ON CONFLICT DO NOTHING.
+///
+/// The checksum we write is the same SHA-384 sqlx itself computes,
+/// pulled directly off the `Migrator`'s `Migration` records — so a
+/// later `sqlx::migrate!.run(...)` will accept these rows as valid
+/// and skip the migrations rather than throwing a checksum-mismatch
+/// error.
+async fn baseline_migrations(pg: &PgPool) -> Result<BaselineReport, KbError> {
+    let migrator = sqlx::migrate!("../../migrations");
+    // _sqlx_migrations might not exist yet; the simplest way to make
+    // sure it does (without applying any other migrations) is to
+    // create the table with the same shape sqlx uses. Mirrors the
+    // DDL sqlx emits internally.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS _sqlx_migrations (
+            version BIGINT PRIMARY KEY,
+            description TEXT NOT NULL,
+            installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
+            success BOOLEAN NOT NULL,
+            checksum BYTEA NOT NULL,
+            execution_time BIGINT NOT NULL
+        )
+        "#,
+    )
+    .execute(pg)
+    .await?;
+
+    let mut report = BaselineReport {
+        total: 0,
+        recorded: 0,
+        already_present: 0,
+    };
+    for m in migrator.iter() {
+        report.total += 1;
+        let result = sqlx::query(
+            r#"
+            INSERT INTO _sqlx_migrations
+                (version, description, installed_on, success, checksum, execution_time)
+            VALUES ($1, $2, now(), TRUE, $3, 0)
+            ON CONFLICT (version) DO NOTHING
+            "#,
+        )
+        .bind(m.version)
+        .bind(m.description.as_ref())
+        .bind(m.checksum.as_ref())
+        .execute(pg)
+        .await?;
+        if result.rows_affected() > 0 {
+            report.recorded += 1;
+        } else {
+            report.already_present += 1;
+        }
+    }
+    Ok(report)
 }
 
 async fn connect_pg(database_url: Option<&str>) -> Result<PgPool, KbError> {

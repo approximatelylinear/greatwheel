@@ -11,6 +11,7 @@ subsequent calls are fast. The PyO3 host process holds the model resident.
 
 from __future__ import annotations
 
+import os
 import threading
 from typing import Optional
 
@@ -20,14 +21,23 @@ _LOCK = threading.Lock()
 
 
 def _get_model(model_name: str):
-    """Lazy-load (and cache) the sentence-transformers model."""
+    """Lazy-load (and cache) the sentence-transformers model.
+
+    Honours `GW_KB_EMBED_DEVICE` ("cpu" / "cuda" / "cuda:N") when set
+    so the caller can force a device when the GPU is busy with other
+    workloads (e.g. Ollama holding a chat model resident).
+    sentence-transformers' default is to pick CUDA if available.
+    """
     global _MODEL, _MODEL_NAME
     if _MODEL is not None and _MODEL_NAME == model_name:
         return _MODEL
     with _LOCK:
         if _MODEL is None or _MODEL_NAME != model_name:
             from sentence_transformers import SentenceTransformer
-            _MODEL = SentenceTransformer(model_name, trust_remote_code=True)
+            device = os.environ.get("GW_KB_EMBED_DEVICE") or None
+            _MODEL = SentenceTransformer(
+                model_name, trust_remote_code=True, device=device
+            )
             _MODEL_NAME = model_name
     return _MODEL
 
