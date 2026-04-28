@@ -192,6 +192,19 @@ pub(crate) struct BenchConfig {
     /// query — only the reranker sees the NL question.
     pub rerank_q2q: bool,
 
+    /// Number of candidates to fetch from BM25 (or passage+RRF) and pass to
+    /// the rerank server when --rerank-url is set. Historical c2 = 50;
+    /// our M1 used 200 (the prior hardcoded value).
+    pub rerank_candidate_pool: usize,
+
+    /// When true AND --rerank-url is set AND a passage index is loaded,
+    /// each docid in the candidate pool is expanded into ALL of its
+    /// passages before being sent to the reranker. The reranker then
+    /// scores passages, and the best score per docid is used. Recreates
+    /// the historical "passage expansion" rerank recipe (colbert-passage-
+    /// rerank-v2 etc.) but works with any reranker, not just ColBERT mode.
+    pub rerank_passage_expansion: bool,
+
     // --- S5-lite: coverage pre-search ---
     /// When true, pre-search round-1 takes top-N from each sub-query in
     /// round-robin (rank r across all queries before rank r+1). Enforces
@@ -234,6 +247,8 @@ impl Default for BenchConfig {
             bridge_timeout_secs: 150,
             repl_output_max_chars: 8000,
             rerank_q2q: false,
+            rerank_candidate_pool: 200,
+            rerank_passage_expansion: false,
             presearch_coverage: false,
             presearch_coverage_per_query: 2,
             presearch_coverage_skip_refine: true,
@@ -288,6 +303,8 @@ struct BrowseCompBridge {
     search_mode: String, // mode string sent to HTTP backend ("bm25", "rerank", etc.)
     rerank_url: Option<String>, // Optional rerank server URL (for native backend + ColBERT reranking)
     rerank_q2q: bool, // When true, reformulate query into NL question before sending to rerank server
+    rerank_candidate_pool: usize, // How many BM25/passage candidates to send to the reranker
+    rerank_passage_expansion: bool, // When true, expand each docid into all passages before reranking
     colbert_encode_url: Option<String>, // Optional ColBERT encode server URL (for multi-vector search)
     llm: OllamaClient,
     model: String,
@@ -331,7 +348,9 @@ impl BrowseCompBridge {
             k,
             search_mode,
             rerank_url,
-            rerank_q2q: false, // overridden by BenchConfig when used
+            rerank_q2q: false,                // overridden by BenchConfig when used
+            rerank_candidate_pool: 200,       // overridden by BenchConfig when used
+            rerank_passage_expansion: false,  // overridden by BenchConfig when used
             colbert_encode_url,
             _dedicated_rt: None,
             llm,
@@ -418,6 +437,8 @@ impl BrowseCompBridge {
                 let llm = self.llm.clone();
                 let rerank_url = self.rerank_url.clone();
                 let rerank_q2q = self.rerank_q2q;
+                let rerank_candidate_pool = self.rerank_candidate_pool;
+                let rerank_passage_expansion = self.rerank_passage_expansion;
                 let model = self.model.clone();
                 let (corpus_hits, embed_ms, vector_ms, bm25_ms) = self.rt.block_on(async {
                     let mut embed_ms = 0u64;
@@ -504,7 +525,11 @@ impl BrowseCompBridge {
                         }
                         _ => {
                             // Default to boosted BM25 — retrieve more if reranking
-                            let retrieve_k = if rerank_url.is_some() { std::cmp::max(k, 200) } else { k };
+                            let retrieve_k = if rerank_url.is_some() {
+                                std::cmp::max(k, rerank_candidate_pool)
+                            } else {
+                                k
+                            };
                             let t0 = std::time::Instant::now();
                             // Use passage+doc RRF when passage index is available
                             let hits = if searcher.has_passage_index() {
@@ -590,10 +615,15 @@ impl BrowseCompBridge {
                             query_str.clone()
                         };
 
-                        // For ColBERT retrieval mode with passage index:
-                        // expand each docid into ALL its passages so the reranker
-                        // can pick the most relevant passage (not just BM25's best)
-                        let docs_json: Vec<serde_json::Value> = if mode_str == "colbert" && searcher.has_passage_index() {
+                        // Passage expansion: expand each docid into ALL its passages
+                        // so the reranker can pick the most relevant passage rather
+                        // than just BM25's best snippet. Triggered by ColBERT mode
+                        // OR by the rerank_passage_expansion flag (recreates the
+                        // historical "passage expansion" rerank recipe across any
+                        // reranker, not just ColBERT).
+                        let expand = (mode_str == "colbert" || rerank_passage_expansion)
+                            && searcher.has_passage_index();
+                        let docs_json: Vec<serde_json::Value> = if expand {
                             let mut passage_docs = Vec::new();
                             for h in hits.iter().take(20) { // top-20 docs, expand to passages
                                 let passages = searcher.all_passages_for_docid(&h.docid);
@@ -622,23 +652,38 @@ impl BrowseCompBridge {
                                 })
                             }).collect()
                         };
+                        // When passage expansion is on, request more results from
+                        // the reranker so we can dedupe down to k unique docids.
+                        let request_k = if expand { (k as usize) * 5 } else { k as usize };
                         let client = reqwest::Client::new();
                         match client.post(&rerank_endpoint)
                             .json(&serde_json::json!({
                                 "query": rerank_query,
                                 "documents": docs_json,
-                                "k": k,
+                                "k": request_k,
                             }))
                             .send()
                             .await
                         {
                             Ok(resp) if resp.status().is_success() => {
                                 if let Ok(reranked) = resp.json::<Vec<serde_json::Value>>().await {
-                                    hits = reranked.iter().map(|r| SearchHit {
-                                        docid: r["docid"].as_str().unwrap_or("").to_string(),
-                                        score: r["score"].as_f64(),
-                                        snippet: r["text"].as_str().map(|s| s.to_string()),
-                                    }).collect();
+                                    let mut seen = std::collections::HashSet::new();
+                                    let mut deduped: Vec<SearchHit> = Vec::with_capacity(k as usize);
+                                    for r in reranked.iter() {
+                                        let docid = r["docid"].as_str().unwrap_or("").to_string();
+                                        if !seen.insert(docid.clone()) {
+                                            continue;
+                                        }
+                                        deduped.push(SearchHit {
+                                            docid,
+                                            score: r["score"].as_f64(),
+                                            snippet: r["text"].as_str().map(|s| s.to_string()),
+                                        });
+                                        if deduped.len() >= k as usize {
+                                            break;
+                                        }
+                                    }
+                                    hits = deduped;
                                 }
                             }
                             Ok(resp) => {
@@ -2380,6 +2425,8 @@ fn run_single_query(
     bridge.max_search_calls = bench_config.max_search_calls;
     bridge.timeout_secs = bench_config.bridge_timeout_secs;
     bridge.rerank_q2q = bench_config.rerank_q2q;
+    bridge.rerank_candidate_pool = bench_config.rerank_candidate_pool;
+    bridge.rerank_passage_expansion = bench_config.rerank_passage_expansion;
 
     let external_fns = vec![
         "search".to_string(),
@@ -2445,6 +2492,8 @@ fn run_single_query(
         bridge2.max_search_calls = bench_config.max_search_calls;
         bridge2.timeout_secs = bench_config.bridge_timeout_secs;
         bridge2.rerank_q2q = bench_config.rerank_q2q;
+        bridge2.rerank_candidate_pool = bench_config.rerank_candidate_pool;
+        bridge2.rerank_passage_expansion = bench_config.rerank_passage_expansion;
         let bridge2_boxed: Box<dyn HostBridge> = Box::new(bridge2);
         // Apply config overrides to the new bridge.
         // (Can't access fields through Box<dyn HostBridge>, so we cast.)
