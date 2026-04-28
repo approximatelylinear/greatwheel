@@ -30,7 +30,10 @@ use gw_kb::ingest::{ingest_inline, KbStores};
 use gw_kb::source::UpsertOutcome;
 use gw_llm::OllamaClient;
 use gw_loop::bridge::{new_ask_handle, ConversationBridge};
-use gw_loop::{ConversationLoop, LoopConfig, OllamaLlmClient, SnapshotPolicy};
+use gw_loop::spine::SpineExtractor;
+use gw_loop::{
+    ConversationLoop, LoopConfig, OllamaLlmClient, PgSessionStore, SessionTree, SnapshotPolicy,
+};
 use gw_runtime::ReplAgent;
 use gw_ui::{AgUiAdapter, UiPlugin, UiSurfaceStore};
 use ouros::Object;
@@ -1494,6 +1497,76 @@ fn spawn_entity_worker(stores: Arc<KbStores>) -> EntityWorkerHandle {
     EntityWorkerHandle { tx, status }
 }
 
+/// Demo-only fixed UUIDs for the literature_assistant's
+/// org/user/agent_def chain. Stable across runs so re-launching the
+/// binary doesn't pile up rows; ON CONFLICT DO NOTHING makes the
+/// seed idempotent. The session row uses a fresh UUID per process
+/// run (the binary's `session_id`) so each launch is its own
+/// conversation in the spine.
+const LIT_ORG_ID: uuid::Uuid = uuid::uuid!("01000000-0000-0000-0000-000000000001");
+const LIT_USER_ID: uuid::Uuid = uuid::uuid!("02000000-0000-0000-0000-000000000001");
+const LIT_AGENT_ID: uuid::Uuid = uuid::uuid!("03000000-0000-0000-0000-000000000001");
+
+/// Plant the FK chain `session_entries(session_id)` requires.
+/// Idempotent: every literature_assistant run calls this with the
+/// fresh session UUID; the org/user/agent_def rows persist across
+/// runs. Errors propagate to the caller — without this seed,
+/// `flush_to_pg` would FK-fail on every entry and the spine would
+/// never see anything.
+async fn ensure_literature_session(
+    pg: &sqlx::PgPool,
+    session_id: uuid::Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO orgs (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING")
+        .bind(LIT_ORG_ID)
+        .bind("literature-demo")
+        .execute(pg)
+        .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO users (id, org_id, name, email)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (id) DO NOTHING
+        "#,
+    )
+    .bind(LIT_USER_ID)
+    .bind(LIT_ORG_ID)
+    .bind("literature-demo")
+    .bind("demo@literature.local")
+    .execute(pg)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO agent_defs
+            (id, org_id, name, system_prompt, source_type,
+             tool_permissions, model_config, resource_limits)
+        VALUES ($1, $2, $3, '', 'inline',
+                '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)
+        ON CONFLICT (id) DO NOTHING
+        "#,
+    )
+    .bind(LIT_AGENT_ID)
+    .bind(LIT_ORG_ID)
+    .bind("literature-assistant")
+    .execute(pg)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO sessions (id, org_id, user_id, agent_id, session_key)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (id) DO NOTHING
+        "#,
+    )
+    .bind(session_id)
+    .bind(LIT_ORG_ID)
+    .bind(LIT_USER_ID)
+    .bind(LIT_AGENT_ID)
+    .bind(session_id.to_string())
+    .execute(pg)
+    .await?;
+    Ok(())
+}
+
 /// Build the gw-kb store bundle from environment, returning Ok(None)
 /// when the user hasn't configured a database (so the demo can keep
 /// running stateless). Defaults match the `gw_kb` CLI: lance under
@@ -1991,6 +2064,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let session_id = SessionId(Uuid::new_v4());
 
+    // When the KB is configured, plant the org/user/agent_def chain
+    // session_entries.session_id needs to FK against, then build a
+    // PG-backed session tree so flush_to_pg actually persists. The
+    // spine extractor downstream relies on entries existing in
+    // Postgres before its background extraction tasks fire.
+    if let Some(kb) = kb_stores.as_ref() {
+        if let Err(e) = ensure_literature_session(&kb.pg, session_id.0).await {
+            tracing::warn!(error = %e, "failed to seed literature session — entries will not persist");
+        }
+    }
+
     let (tap_tx, mut tap_rx) = mpsc::unbounded_channel::<LoopEvent>();
     let (loop_tx, loop_rx) = mpsc::unbounded_channel::<LoopEvent>();
     adapter.register_session(session_id, tap_tx.clone()).await;
@@ -2051,7 +2135,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         compaction_keep_count: 0,
         auto_compact_after_turns: None,
     };
-    let mut conv_loop = ConversationLoop::new(session_id, repl, loop_llm, config, tap_tx);
+    // Build a PG-backed tree when KB is wired up, so flush_to_pg
+    // persists entries (the spine extractor depends on this). Falls
+    // back to the in-memory tree when the KB isn't configured —
+    // demo runs without Postgres still work, just without spine
+    // rows accumulating.
+    let tree = if let Some(kb) = kb_stores.as_ref() {
+        let pg_store = PgSessionStore::new(kb.pg.clone());
+        SessionTree::with_pg(session_id, pg_store)
+    } else {
+        SessionTree::new(session_id)
+    };
+    let mut conv_loop =
+        ConversationLoop::with_tree(tree, repl, loop_llm, config, tap_tx);
+    if let Some(kb) = kb_stores.as_ref() {
+        let extractor = Arc::new(SpineExtractor::new(kb.clone()));
+        conv_loop = conv_loop.with_spine_extractor(extractor);
+        tracing::info!("spine extractor attached — entries → entities + segments");
+    }
 
     std::thread::Builder::new()
         .name("gw-loop".into())
