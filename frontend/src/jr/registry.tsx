@@ -1,6 +1,7 @@
 import { defineRegistry } from '@json-render/react';
 import { spikeCatalog } from './catalog';
 import { EntityCloudWidget } from '../widgets/EntityCloudWidget';
+import { SpinePane } from '../components/SpinePane';
 
 function formatCell(v: unknown): string {
   if (v == null) return '—';
@@ -104,6 +105,7 @@ const built = defineRegistry(spikeCatalog, {
         )}
       </div>
     ),
+    SemanticSpine: ({ props }) => <SpinePane segments={props.segments} />,
     EntityCloud: ({ props, emit }) => (
       <EntityCloudWidget
         points={props.points}

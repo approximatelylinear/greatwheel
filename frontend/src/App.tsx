@@ -9,6 +9,7 @@ import { CanvasPane } from './components/CanvasPane';
 import { DebugPane } from './components/DebugPane';
 import { MessageInput } from './components/MessageInput';
 import { DragSplitter } from './components/DragSplitter';
+import { SpinePane, type SpineSegment } from './components/SpinePane';
 import { registry } from './jr/registry';
 import type { Widget } from './types';
 import {
@@ -158,6 +159,41 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
   const widgets = useStateValue<Record<string, Widget>>('/widgets') ?? {};
   const canvasSlot = useStateValue<string | null>('/canvasSlot') ?? null;
 
+  // Find the SemanticSpine widget the AG-UI adapter emits/supersedes
+  // on each SpineSegmentsUpdated. Only one is live per session at a
+  // time (the supersede chain keeps the chain), so first match wins.
+  // We render it in a dedicated third pane rather than inline,
+  // because conceptually the spine annotates chat (not a turn output).
+  const spineSegments: SpineSegment[] | null = useMemo(() => {
+    for (const w of Object.values(widgets)) {
+      if (w.kind !== 'A2ui') continue;
+      if (!('Inline' in w.payload)) continue;
+      const inline = (w.payload as { Inline: unknown }).Inline as
+        | { type?: unknown; segments?: unknown }
+        | null;
+      if (!inline || (inline as { type?: unknown }).type !== 'SemanticSpine') {
+        continue;
+      }
+      const raw = Array.isArray(inline.segments)
+        ? (inline.segments as Array<Record<string, unknown>>)
+        : [];
+      return raw.map((s) => ({
+        id: String(s.id ?? ''),
+        label: String(s.label ?? ''),
+        kind: String(s.kind ?? 'other'),
+        entry_first: String(s.entry_first ?? ''),
+        entry_last: String(s.entry_last ?? ''),
+        entity_count:
+          typeof s.entity_count === 'number' ? s.entity_count : 0,
+        entity_ids: Array.isArray(s.entity_ids)
+          ? (s.entity_ids as unknown[]).map((x) => String(x))
+          : [],
+        summary: s.summary != null ? String(s.summary) : null,
+      }));
+    }
+    return null;
+  }, [widgets]);
+
   const onRepin = useCallback(
     (arxivId: string) => {
       const cloud = findEntityCloud(widgets, canvasSlot);
@@ -184,7 +220,9 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
         {streamError && <span className="app-error">{streamError}</span>}
         <span className="app-mark" title={`session ${sessionId}`}>greatwheel</span>
       </header>
-      <main className={`app-main app-main-${layout}`}>
+      <main
+        className={`app-main app-main-${layout}${spineSegments ? ' has-spine' : ''}`}
+      >
         <ChatPane
           messages={state.messages}
           running={state.running}
@@ -192,6 +230,7 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
           onSuggest={onSend}
           onRepin={onRepin}
         />
+        {spineSegments && <SpinePane segments={spineSegments} />}
         <DragSplitter storageKey={`app.chatW.${layout}`} />
         <CanvasPane />
       </main>

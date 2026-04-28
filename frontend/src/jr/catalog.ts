@@ -70,6 +70,24 @@ export const spikeCatalog = defineCatalog(schema, {
       description:
         'Read-only display of the SQL the agent ran (transparency), with optional one-line summary or error',
     },
+    SemanticSpine: {
+      props: z.object({
+        segments: z.array(
+          z.object({
+            id: z.string(),
+            label: z.string(),
+            kind: z.string(),
+            entry_first: z.string(),
+            entry_last: z.string(),
+            entity_count: z.number().int(),
+            entity_ids: z.array(z.string()),
+            summary: z.string().nullable().optional(),
+          }),
+        ),
+      }),
+      description:
+        'Vertical rail showing the conversation\'s segments — contiguous runs of session entries that share entities. Each segment carries a label, kind (comparison / decision / deep_dive / construction / other), and the entry-id range it spans so the rail can sync with chat scroll. Emitted by the backend when SpineSegmentsUpdated fires.',
+    },
     EntityCloud: {
       props: z.object({
         points: z.array(

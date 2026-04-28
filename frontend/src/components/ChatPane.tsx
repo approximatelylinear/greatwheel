@@ -49,12 +49,22 @@ export function ChatPane({
   const pinnedIds = useStateValue<Record<string, true>>('/pinnedIds') ?? {};
 
   // Widgets anchored to a message should NOT also appear in the
-  // scroll tail; collect their ids and exclude.
+  // scroll tail; collect their ids and exclude. SemanticSpine
+  // widgets also short-circuit — they render in their own pane via
+  // App.tsx and shouldn't double up in the chat scroll.
   const anchored = new Set<string>(
     Object.values(messageFollowUps).flat(),
   );
+  const isSpineWidget = (id: string): boolean => {
+    const w = widgets[id];
+    if (!w || w.kind !== 'A2ui' || !('Inline' in w.payload)) return false;
+    const inline = (w.payload as { Inline: unknown }).Inline as
+      | { type?: unknown }
+      | null;
+    return !!inline && (inline as { type?: unknown }).type === 'SemanticSpine';
+  };
   const inlineIds = widgetOrder.filter(
-    (id) => !pinnedIds[id] && !anchored.has(id),
+    (id) => !pinnedIds[id] && !anchored.has(id) && !isSpineWidget(id),
   );
   const showTyping = running;
   // Empty state: pre-interaction landing. Hides as soon as anything

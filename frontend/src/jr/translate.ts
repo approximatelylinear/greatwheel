@@ -178,6 +178,33 @@ export function toJrSpec(widget: Widget): Spec | null {
         };
         return key;
       }
+      case 'SemanticSpine': {
+        // Pass-through projection: the spine widget's payload is a
+        // typed list of segments emitted by the backend on each
+        // SpineSegmentsUpdated. The renderer in registry.tsx hands
+        // them to <SpinePane>; clicks aren't wired yet (Issue #4).
+        const rawSegments = Array.isArray(node.segments)
+          ? (node.segments as Array<Record<string, unknown>>)
+          : [];
+        const segments = rawSegments.map((s) => ({
+          id: String(s.id ?? ''),
+          label: String(s.label ?? ''),
+          kind: String(s.kind ?? 'other'),
+          entry_first: String(s.entry_first ?? ''),
+          entry_last: String(s.entry_last ?? ''),
+          entity_count:
+            typeof s.entity_count === 'number' ? s.entity_count : 0,
+          entity_ids: Array.isArray(s.entity_ids)
+            ? (s.entity_ids as unknown[]).map((x) => String(x))
+            : [],
+          summary: s.summary != null ? String(s.summary) : null,
+        }));
+        elements[key] = {
+          type: 'SemanticSpine',
+          props: { segments },
+        } as UIElement;
+        return key;
+      }
       case 'EntityCloud': {
         const rawPoints = Array.isArray(node.points)
           ? (node.points as Array<Record<string, unknown>>)
