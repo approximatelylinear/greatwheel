@@ -9,6 +9,7 @@ workspace = true
 [dependencies]
 gw-core = { workspace = true }
 gw-engine = { workspace = true }
+gw-kb = { workspace = true }
 gw-llm = { workspace = true }
 gw-runtime = { workspace = true }
 ouros = { workspace = true }
