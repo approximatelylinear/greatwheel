@@ -1939,6 +1939,17 @@ lancedb = [
     { name = "lancedb" },
     { name = "pyarrow" },
 ]
+monot5 = [
+    { name = "sentencepiece" },
+    { name = "torch" },
+    { name = "transformers" },
+]
+qwen3-embed = [
+    { name = "lancedb" },
+    { name = "pyarrow" },
+    { name = "torch" },
+    { name = "transformers" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -1949,12 +1960,14 @@ requires-dist = [
     { name = "lancedb", marker = "extra == 'colbert'", specifier = ">=0.26" },
     { name = "lancedb", marker = "extra == 'colbert-index'", specifier = ">=0.26" },
     { name = "lancedb", marker = "extra == 'lancedb'", specifier = ">=0.26" },
+    { name = "lancedb", marker = "extra == 'qwen3-embed'", specifier = ">=0.26" },
     { name = "litellm", specifier = ">=1.82.6" },
     { name = "maxsim-cpu", marker = "extra == 'colbert'", specifier = ">=0.1.0" },
     { name = "numpy", marker = "extra == 'eval'", specifier = ">=1.26.0" },
     { name = "pyarrow", marker = "extra == 'colbert'", specifier = ">=17.0.0" },
     { name = "pyarrow", marker = "extra == 'colbert-index'", specifier = ">=17.0.0" },
     { name = "pyarrow", marker = "extra == 'lancedb'", specifier = ">=17.0.0" },
+    { name = "pyarrow", marker = "extra == 'qwen3-embed'", specifier = ">=17.0.0" },
     { name = "pyserini", marker = "extra == 'bm25'", specifier = ">=1.2.0" },
     { name = "python-dotenv", specifier = ">=1.1.0" },
     { name = "qdrant-client", marker = "extra == 'bench-qdrant'", specifier = ">=1.16.1" },
@@ -1962,17 +1975,22 @@ requires-dist = [
     { name = "rich", specifier = ">=14.0.0" },
     { name = "safetensors", marker = "extra == 'colbert'", specifier = ">=0.4" },
     { name = "safetensors", marker = "extra == 'colbert-index'", specifier = ">=0.4" },
+    { name = "sentencepiece", marker = "extra == 'monot5'", specifier = ">=0.2" },
     { name = "tantivy", specifier = ">=0.25.1" },
     { name = "torch", marker = "extra == 'colbert'", specifier = ">=2.0" },
     { name = "torch", marker = "extra == 'colbert-index'", specifier = ">=2.0" },
+    { name = "torch", marker = "extra == 'monot5'", specifier = ">=2.0" },
+    { name = "torch", marker = "extra == 'qwen3-embed'", specifier = ">=2.0" },
     { name = "tqdm", specifier = ">=4.67.0" },
     { name = "transformers", marker = "extra == 'colbert'", specifier = ">=4.40" },
     { name = "transformers", marker = "extra == 'colbert-index'", specifier = ">=4.40" },
+    { name = "transformers", marker = "extra == 'monot5'", specifier = ">=4.40" },
+    { name = "transformers", marker = "extra == 'qwen3-embed'", specifier = ">=4.51" },
     { name = "usearch", marker = "extra == 'colbert'", specifier = ">=2.23.0" },
     { name = "vllm", marker = "extra == 'eval'", specifier = ">=0.9.0" },
     { name = "voyager", marker = "extra == 'colbert'", specifier = ">=2.1.0" },
 ]
-provides-extras = ["bm25s", "bm25", "lancedb", "colbert", "colbert-index", "eval", "bench-es", "bench-qdrant"]
+provides-extras = ["bm25s", "bm25", "lancedb", "colbert", "colbert-index", "eval", "bench-es", "bench-qdrant", "qwen3-embed", "monot5"]
 
 [[package]]
 name = "h11"

@@ -42,3 +42,16 @@ bench-es = [
 bench-qdrant = [
     "qdrant-client>=1.16.1",
 ]
+# Qwen3-Embedding dense retrieval (LLM-class single-vector embedder)
+qwen3-embed = [
+    "torch>=2.0",
+    "transformers>=4.51",
+    "lancedb>=0.26",
+    "pyarrow>=17.0.0",
+]
+# monoT5 cross-encoder reranker (T5-3B trained on MS MARCO)
+monot5 = [
+    "torch>=2.0",
+    "transformers>=4.40",
+    "sentencepiece>=0.2",
+]
