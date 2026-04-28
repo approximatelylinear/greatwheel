@@ -59,24 +59,32 @@ impl SessionTree {
     }
 
     /// Flush unflushed entries to Postgres and update the active leaf.
-    /// No-op if no PgSessionStore is attached.
-    pub async fn flush_to_pg(&mut self) -> Result<(), sqlx::Error> {
+    /// Returns the slice of entries newly written by this call (empty
+    /// when nothing was unflushed). Callers can use the returned
+    /// slice to fan out background work that needs the entries to
+    /// already be present in Postgres — e.g. the spine extractor's
+    /// FK-bound writes against `session_entries(id)`.
+    /// No-op + empty Vec if no PgSessionStore is attached.
+    pub async fn flush_to_pg(&mut self) -> Result<Vec<SessionEntry>, sqlx::Error> {
         let pg_store = match &self.pg_store {
             Some(store) => store.clone(),
-            None => return Ok(()),
+            None => return Ok(Vec::new()),
         };
 
-        if self.flush_cursor < self.entries.len() {
-            let new_entries: Vec<SessionEntry> = self.entries[self.flush_cursor..].to_vec();
-            pg_store.insert_entries(&new_entries).await?;
+        let new_entries: Vec<SessionEntry> = if self.flush_cursor < self.entries.len() {
+            let entries = self.entries[self.flush_cursor..].to_vec();
+            pg_store.insert_entries(&entries).await?;
             self.flush_cursor = self.entries.len();
-        }
+            entries
+        } else {
+            Vec::new()
+        };
 
         pg_store
             .update_active_leaf(self.session_id, self.active_leaf)
             .await?;
 
-        Ok(())
+        Ok(new_entries)
     }
 
     /// Append an entry as a child of the current active leaf.
