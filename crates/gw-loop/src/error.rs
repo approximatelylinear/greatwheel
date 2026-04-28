@@ -18,4 +18,6 @@ pub enum LoopError {
     NoSnapshot,
     #[error("nothing to compact")]
     NothingToCompact,
+    #[error("spine: {0}")]
+    Spine(String),
 }
