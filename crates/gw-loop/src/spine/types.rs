@@ -103,3 +103,64 @@ pub struct EntryExtraction {
     pub entities: Vec<EntryEntityLink>,
     pub relations: Vec<EntryRelation>,
 }
+
+// ─── Pre-canonicalisation shapes (LLM output) ───────────────────────
+//
+// What the joint extractor in `extract::raw_extract_entry` returns
+// before we canonicalise entity labels into `kb_entities` ids. The
+// relation's subject/object are still strings here because the LLM
+// only ever names entities, never assigns ids. Step C resolves them.
+
+/// One entity mention from the LLM, before canonicalisation. Includes
+/// the spine-specific fields (`surface`, `role`, `span_*`) that
+/// `gw_kb::entities::RawEntity` doesn't carry — chat-turn extraction
+/// needs to know *what the user/agent was doing with* the entity, and
+/// the in-message highlight pass needs the span.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawEntryEntity {
+    /// Surface form as it appeared in the entry text (or the LLM's
+    /// light normalisation of it).
+    pub label: String,
+    /// "author" | "concept" | "method" | "dataset" | "venue" | ...
+    /// Same recommended taxonomy as `gw_kb::entities::RECOMMENDED_KINDS`;
+    /// out-of-vocabulary kinds are filtered post-parse.
+    pub kind: String,
+    /// LLM's best guess at a stable form (defaults to `label` when
+    /// blank). Used for cross-mention canonicalisation.
+    pub canonical_form: String,
+    /// "introduced" | "referenced" | "decided" | "compared" | ...
+    /// Free-form. Defaults to "referenced" when missing.
+    pub role: String,
+    /// What this mention got asserted as in the chat. Always
+    /// "mentioned" at extraction time; the `commit_entity` host fn
+    /// promotes to "committed".
+    pub status: String,
+    pub confidence: f32,
+    pub span_start: Option<i32>,
+    pub span_end: Option<i32>,
+}
+
+/// One relation between two named entities, before label →
+/// entity_id resolution. Relations whose `subject` or `object` don't
+/// resolve to a canonicalised entity in the same extraction get
+/// dropped — better to lose the relation than to point at the wrong
+/// entity (design-semantic-spine.md §4.1 step 3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawRelation {
+    pub subject: String,
+    pub object: String,
+    pub predicate: String,
+    pub directed: bool,
+    pub surface: String,
+    pub confidence: f32,
+    pub span_start: Option<i32>,
+    pub span_end: Option<i32>,
+}
+
+/// Aggregate of one joint LLM call: entity mentions + asserted
+/// relations between them, both pre-canonicalisation.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RawJointExtraction {
+    pub entities: Vec<RawEntryEntity>,
+    pub relations: Vec<RawRelation>,
+}
