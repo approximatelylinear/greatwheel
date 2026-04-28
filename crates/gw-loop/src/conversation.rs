@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use gw_core::{EntryId, EntryType, LlmMessage, LoopEvent, ReplSnapshotData, SessionId};
 use gw_runtime::{extract_code_blocks, HostBridge, ReplAgent};
 use tokio::sync::mpsc;
@@ -156,6 +158,12 @@ pub struct ConversationLoop {
     turns_since_snapshot: u32,
     /// Turn counter for tracing.
     turn_number: u32,
+    /// Optional handle to the semantic-spine extractor. When present,
+    /// each `flush_tree` fans out background tasks that read each
+    /// freshly-persisted prose entry, run the joint extractor, and
+    /// write `session_entry_entities` + `session_entry_relations`
+    /// rows. Off the chat path; per-entry failures are logged.
+    spine_extractor: Option<Arc<crate::spine::SpineExtractor>>,
 }
 
 impl ConversationLoop {
@@ -177,6 +185,7 @@ impl ConversationLoop {
             pending_follow_ups: Vec::new(),
             turns_since_snapshot: 0,
             turn_number: 0,
+            spine_extractor: None,
         }
     }
 
@@ -202,7 +211,22 @@ impl ConversationLoop {
             pending_follow_ups: Vec::new(),
             turns_since_snapshot: 0,
             turn_number,
+            spine_extractor: None,
         }
+    }
+
+    /// Attach a semantic-spine extractor. With this set, every call
+    /// to `flush_tree` after a turn fans out background extractions
+    /// for the newly-persisted prose entries (UserMessage,
+    /// AssistantMessage). Per-entry extraction failures don't bubble
+    /// up — they're warned and the spine catches up on the next
+    /// successful entry.
+    pub fn with_spine_extractor(
+        mut self,
+        extractor: Arc<crate::spine::SpineExtractor>,
+    ) -> Self {
+        self.spine_extractor = Some(extractor);
+        self
     }
 
     /// Inject a steering message to be included before the next LLM call.
@@ -857,11 +881,79 @@ impl ConversationLoop {
     }
 
     /// Flush new tree entries to Postgres (no-op if no pg store attached).
+    /// When a spine extractor is attached, fan out a background task per
+    /// freshly-persisted prose entry (UserMessage / AssistantMessage)
+    /// so the spine acquires entity + relation rows without blocking
+    /// the chat path. Non-prose entry types (CodeExecution, HostCall,
+    /// ReplSnapshot, Compaction, BranchSummary, System) are skipped
+    /// at the type-filter level here so we don't pay the channel /
+    /// task-spawn cost for entries the extractor would no-op anyway.
     pub async fn flush_tree(&mut self) {
-        if let Err(e) = self.tree.flush_to_pg().await {
-            warn!(error = %e, "failed to flush session tree to Postgres");
+        let new_entries = match self.tree.flush_to_pg().await {
+            Ok(entries) => entries,
+            Err(e) => {
+                warn!(error = %e, "failed to flush session tree to Postgres");
+                return;
+            }
+        };
+
+        if let Some(extractor) = self.spine_extractor.as_ref() {
+            for entry in new_entries {
+                if !is_extractable_entry_type(&entry.entry_type) {
+                    continue;
+                }
+                let extractor = Arc::clone(extractor);
+                tokio::spawn(async move {
+                    let entry_id = entry.id;
+                    match extractor.extract_entry(&entry).await {
+                        Ok(extraction) => {
+                            if extraction.entities.is_empty()
+                                && extraction.relations.is_empty()
+                            {
+                                return;
+                            }
+                            let pool = extractor.stores.pg.clone();
+                            match crate::spine::persist::persist_entry_extraction(
+                                &pool,
+                                &extraction,
+                            )
+                            .await
+                            {
+                                Ok(report) => {
+                                    info!(
+                                        entry_id = %entry_id.0,
+                                        entity_links = report.entity_links_written,
+                                        relations = report.relations_written,
+                                        "spine extraction persisted"
+                                    );
+                                }
+                                Err(e) => warn!(
+                                    entry_id = %entry_id.0,
+                                    error = %e,
+                                    "spine persist failed; entry left without spine rows"
+                                ),
+                            }
+                        }
+                        Err(e) => warn!(
+                            entry_id = %entry_id.0,
+                            error = %e,
+                            "spine extract failed; entry left without spine rows"
+                        ),
+                    }
+                });
+            }
         }
     }
+}
+
+/// Predicate used by `flush_tree` to skip entry types that the spine
+/// extractor would no-op anyway. Mirrors the inner match in
+/// `SpineExtractor::raw_extract_entry` — keep them in sync.
+fn is_extractable_entry_type(t: &EntryType) -> bool {
+    matches!(
+        t,
+        EntryType::UserMessage(_) | EntryType::AssistantMessage { .. }
+    )
 }
 
 /// Minimal HostBridge that rejects all calls.
