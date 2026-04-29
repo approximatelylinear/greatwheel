@@ -144,17 +144,24 @@ export function ChatPane({
           const repin = isAssistantLogLine
             ? parseRepinLogLine(m.content)
             : null;
-          // Issue #6: row falls inside the focused segment's range?
+          // Issue #6: should this row participate in the highlighter?
+          //   - regex set + range set → row idx must be in [lo, hi]
+          //   - regex set + range absent (single-entity mode) → every
+          //     row is eligible so all occurrences across the chat
+          //     pick up marks
           const inHighlightRange =
             highlightRegex != null &&
-            highlightIndices != null &&
-            idx >= highlightIndices.lo &&
-            idx <= highlightIndices.hi;
+            (highlightIndices == null ||
+              (idx >= highlightIndices.lo && idx <= highlightIndices.hi));
+          // Only the segment-range mode draws the left-border tick
+          // — in single-entity mode tick'ing every row would be loud.
+          const drawSegmentTick =
+            inHighlightRange && highlightIndices != null;
           return (
             <div
               key={m.id}
               className={`message-row${
-                inHighlightRange ? ' message-row-highlighted' : ''
+                drawSegmentTick ? ' message-row-highlighted' : ''
               }`}
               data-entry-id={m.entryId ?? undefined}
               data-message-id={m.id}

@@ -46,6 +46,15 @@ interface Props {
    *  rows. Fires on every successful detail load (segment change /
    *  refetch) and with `null` when the sidebar unmounts. */
   onDetailLoaded?: (detail: SegmentDetail | null) => void;
+  /** Issue #6 follow-up: an entity card was clicked. The parent
+   *  switches the chat-pane highlighter to this single entity (label
+   *  + aliases) across the whole conversation and scrolls to the
+   *  first match. Receives `null` to clear the selection back to
+   *  "all segment entities within segment range". */
+  onSelectEntity?: (entity: EntityCard | null) => void;
+  /** Currently-selected entity id (driven by the parent so it
+   *  survives sidebar refetches). */
+  selectedEntityId?: string | null;
 }
 
 type SpineActionKind = 'revisit' | 'expand' | 'compare';
@@ -100,6 +109,8 @@ export function SpineSidebar({
   onClose,
   onWorkspaceInvalidate,
   onDetailLoaded,
+  onSelectEntity,
+  selectedEntityId,
 }: Props) {
   const [tab, setTab] = useState<Tab>('entities');
   const [detail, setDetail] = useState<SegmentDetail | null>(null);
@@ -286,7 +297,13 @@ export function SpineSidebar({
         <TabButton tab="notes" active={tab} onSelect={setTab} label="Notes" />
       </nav>
       <div className="spine-sidebar-body">
-        {tab === 'entities' && <EntitiesTab entities={entities} />}
+        {tab === 'entities' && (
+          <EntitiesTab
+            entities={entities}
+            selectedEntityId={selectedEntityId ?? null}
+            onSelectEntity={(e) => onSelectEntity?.(e)}
+          />
+        )}
         {tab === 'relations' && <RelationsTab relations={relations} />}
         {tab === 'notes' && <NotesTab />}
       </div>
@@ -331,7 +348,15 @@ function TabButton({
   );
 }
 
-function EntitiesTab({ entities }: { entities: EntityCard[] }) {
+function EntitiesTab({
+  entities,
+  selectedEntityId,
+  onSelectEntity,
+}: {
+  entities: EntityCard[];
+  selectedEntityId: string | null;
+  onSelectEntity: (e: EntityCard | null) => void;
+}) {
   if (entities.length === 0) {
     return (
       <div className="spine-tab-empty">
@@ -341,41 +366,61 @@ function EntitiesTab({ entities }: { entities: EntityCard[] }) {
   }
   return (
     <ul className="spine-entity-list">
-      {entities.map((e) => (
-        <li key={e.entity_id} className="spine-entity-card">
-          <div className="spine-entity-row">
-            <span
-              className="spine-entity-dot"
-              style={{ backgroundColor: kindColor(e.kind) }}
-              aria-hidden
-            />
-            <span className="spine-entity-label" title={e.slug}>
-              {e.label}
-            </span>
-            <span className="spine-entity-kind">{e.kind}</span>
-          </div>
-          <div className="spine-entity-meta">
-            <span title="mentions inside this segment">
-              {e.mentions_in_segment}× here
-            </span>
-            <span className="spine-entity-meta-sep">·</span>
-            <span title="mentions across the whole KB corpus">
-              {e.global_mentions}× total
-            </span>
-            {e.aliases.length > 0 && (
-              <>
-                <span className="spine-entity-meta-sep">·</span>
+      {entities.map((e) => {
+        const isSelected = e.entity_id === selectedEntityId;
+        return (
+          <li key={e.entity_id} className="spine-entity-card">
+            <button
+              type="button"
+              className={`spine-entity-card-btn${
+                isSelected ? ' selected' : ''
+              }`}
+              onClick={() =>
+                onSelectEntity(isSelected ? null : e)
+              }
+              aria-pressed={isSelected}
+              title={
+                isSelected
+                  ? 'Click to clear highlight'
+                  : 'Click to highlight every mention in the chat and jump to the first one'
+              }
+            >
+              <div className="spine-entity-row">
                 <span
-                  className="spine-entity-aliases"
-                  title={e.aliases.join(', ')}
-                >
-                  {e.aliases.length} alias{e.aliases.length === 1 ? '' : 'es'}
+                  className="spine-entity-dot"
+                  style={{ backgroundColor: kindColor(e.kind) }}
+                  aria-hidden
+                />
+                <span className="spine-entity-label" title={e.slug}>
+                  {e.label}
                 </span>
-              </>
-            )}
-          </div>
-        </li>
-      ))}
+                <span className="spine-entity-kind">{e.kind}</span>
+              </div>
+              <div className="spine-entity-meta">
+                <span title="mentions inside this segment">
+                  {e.mentions_in_segment}× here
+                </span>
+                <span className="spine-entity-meta-sep">·</span>
+                <span title="mentions across the whole KB corpus">
+                  {e.global_mentions}× total
+                </span>
+                {e.aliases.length > 0 && (
+                  <>
+                    <span className="spine-entity-meta-sep">·</span>
+                    <span
+                      className="spine-entity-aliases"
+                      title={e.aliases.join(', ')}
+                    >
+                      {e.aliases.length} alias
+                      {e.aliases.length === 1 ? '' : 'es'}
+                    </span>
+                  </>
+                )}
+              </div>
+            </button>
+          </li>
+        );
+      })}
     </ul>
   );
 }
