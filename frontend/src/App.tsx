@@ -12,7 +12,7 @@ import { DragSplitter } from './components/DragSplitter';
 import { SpinePane, type SpineSegment } from './components/SpinePane';
 import { SpineSidebar } from './components/SpineSidebar';
 import { WorkspaceDrawer } from './components/WorkspaceDrawer';
-import type { SegmentDetail } from './api/client';
+import type { EntityCard, SegmentDetail } from './api/client';
 import { registry } from './jr/registry';
 import type { Widget } from './types';
 import {
@@ -168,15 +168,39 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
   const [focusedDetail, setFocusedDetail] = useState<SegmentDetail | null>(
     null,
   );
+  // Issue #6 follow-up: an entity within the focused segment was
+  // clicked — when set, the highlighter switches from "all segment
+  // entities, segment range only" to "this one entity, whole chat"
+  // and scrolls to the first occurrence.
+  const [selectedEntity, setSelectedEntity] = useState<EntityCard | null>(
+    null,
+  );
 
   const onSegmentDetailLoaded = useCallback((d: SegmentDetail | null) => {
     setFocusedDetail(d);
+    // Drop entity selection when the segment changes / sidebar
+    // unmounts; the old entity may not even exist in the new segment.
+    setSelectedEntity(null);
   }, []);
 
-  // Build the highlight terms list — entity label + each alias —
-  // from the focused segment's detail. Skipping entries with no
-  // detail keeps ChatPane's highlight off when nothing's focused.
+  const onSelectEntity = useCallback((entity: EntityCard | null) => {
+    setSelectedEntity(entity);
+  }, []);
+
+  // Build the highlight terms list. Two modes:
+  //   - selectedEntity → just that entity's label + aliases (single
+  //     entity highlighted across the whole chat)
+  //   - else focusedDetail → every entity in the segment (label +
+  //     aliases each) constrained to the segment's row range
   const highlightTerms = useMemo(() => {
+    if (selectedEntity) {
+      const out: string[] = [];
+      if (selectedEntity.label) out.push(selectedEntity.label);
+      for (const a of selectedEntity.aliases) {
+        if (a) out.push(a);
+      }
+      return out;
+    }
     if (!focusedDetail) return undefined;
     const out: string[] = [];
     for (const e of focusedDetail.entities) {
@@ -186,15 +210,34 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
       }
     }
     return out;
-  }, [focusedDetail]);
+  }, [selectedEntity, focusedDetail]);
 
   const highlightRange = useMemo(() => {
+    // When an entity is selected, drop the row range — we want every
+    // occurrence across the chat, not just inside the segment.
+    if (selectedEntity) return undefined;
     if (!focusedDetail) return undefined;
     return {
       first: focusedDetail.segment.entry_first,
       last: focusedDetail.segment.entry_last,
     };
-  }, [focusedDetail]);
+  }, [selectedEntity, focusedDetail]);
+
+  // When selected entity changes, scroll the chat to the first
+  // matching `<mark>` so the user can find what they just clicked.
+  useEffect(() => {
+    if (!selectedEntity) return;
+    // Defer to next frame so ChatPane has rendered the new marks.
+    const handle = window.requestAnimationFrame(() => {
+      const mark = document.querySelector<HTMLElement>(
+        '.chat-pane .entity-mark',
+      );
+      if (mark) {
+        mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    });
+    return () => window.cancelAnimationFrame(handle);
+  }, [selectedEntity]);
   // Widget map + canvas slot — read here so log-line "re-pin" clicks
   // can find the EntityCloud widget and replay the same widget event
   // a point click would have fired.
@@ -498,6 +541,8 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
               onClose={onSegmentClose}
               onWorkspaceInvalidate={onWorkspaceInvalidate}
               onDetailLoaded={onSegmentDetailLoaded}
+              onSelectEntity={onSelectEntity}
+              selectedEntityId={selectedEntity?.entity_id ?? null}
             />
           )}
           <CanvasPane />
