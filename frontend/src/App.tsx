@@ -10,6 +10,7 @@ import { DebugPane } from './components/DebugPane';
 import { MessageInput } from './components/MessageInput';
 import { DragSplitter } from './components/DragSplitter';
 import { SpinePane, type SpineSegment } from './components/SpinePane';
+import { SpineSidebar } from './components/SpineSidebar';
 import { registry } from './jr/registry';
 import type { Widget } from './types';
 import {
@@ -272,6 +273,50 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
     [sessionId, widgets, canvasSlot],
   );
 
+  // Phase D footer: dismiss the focused segment by clearing
+  // /focusedScope/segment. The adapter's extract_scope_update
+  // accepts `key: null` and emits a STATE_DELTA setting the path
+  // to null; the SpinePane stops highlighting and the sidebar
+  // unmounts.
+  const onSegmentClose = useCallback(() => {
+    if (!spineState) return;
+    void postWidgetEvent(sessionId, {
+      widget_id: spineState.widgetId,
+      surface_id: spineState.surfaceId,
+      action: 'focus',
+      data: {
+        segment_id: null,
+        scope: { kind: 'segment', key: null },
+      },
+    }).catch(() => {
+      /* surfaced via stream-error path on next event */
+    });
+  }, [sessionId, spineState]);
+
+  // Phase D footer: scroll the chat to the focused segment's first
+  // anchored row (entry_first); fall back to entry_last if the
+  // first isn't a chat-rendered entry (e.g. a user message before
+  // we plumbed user-message anchoring, or a non-anchored kind).
+  const focusedSegment = useMemo(() => {
+    if (!focusedSegmentId || !spineSegments) return null;
+    return spineSegments.find((s) => s.id === focusedSegmentId) ?? null;
+  }, [focusedSegmentId, spineSegments]);
+
+  const onSegmentJump = useCallback(() => {
+    if (!focusedSegment) return;
+    const ids = [focusedSegment.entry_first, focusedSegment.entry_last];
+    for (const id of ids) {
+      if (!id) continue;
+      const el = document.querySelector<HTMLElement>(
+        `[data-entry-id="${id}"]`,
+      );
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
+      }
+    }
+  }, [focusedSegment]);
+
   return (
     <div className={`app app-${layout}`}>
       <header className="app-header">
@@ -294,12 +339,23 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
             segments={spineSegments}
             focusedSegmentId={focusedSegmentId}
             onSegmentFocus={onSegmentFocus}
-            sessionId={sessionId}
-            onSegmentAction={onSegmentAction}
           />
         )}
         <DragSplitter storageKey={`app.chatW.${layout}`} />
-        <CanvasPane />
+        <div className="canvas-col">
+          {focusedSegmentId && (
+            <SpineSidebar
+              sessionId={sessionId}
+              segmentId={focusedSegmentId}
+              onAction={(action) =>
+                onSegmentAction(focusedSegmentId, action)
+              }
+              onJump={onSegmentJump}
+              onClose={onSegmentClose}
+            />
+          )}
+          <CanvasPane />
+        </div>
       </main>
       {debug && (
         <DebugPane

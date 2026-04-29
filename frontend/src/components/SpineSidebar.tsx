@@ -26,6 +26,15 @@ interface Props {
    *  ConversationLoop, which translates `revisit`/`expand`/`compare`
    *  into a server-side templated prompt and runs the next turn. */
   onAction: (action: 'revisit' | 'expand' | 'compare') => void;
+  /** Phase D footer: scroll the chat to the segment's first chat
+   *  row anchor. Receives the segment id so the parent can resolve
+   *  entry_first/entry_last from its own segment list (the sidebar
+   *  doesn't carry those — they live alongside the rail). */
+  onJump?: () => void;
+  /** Phase D footer: clear `/focusedScope/segment` so the sidebar
+   *  dismisses. Wired by the parent to fire a focus widget event
+   *  with `key: null`. */
+  onClose?: () => void;
 }
 
 type SpineActionKind = 'revisit' | 'expand' | 'compare';
@@ -72,7 +81,13 @@ function kindColor(kind: string): string {
   return KIND_COLORS[kind.toLowerCase()] ?? '#a8b1bf';
 }
 
-export function SpineSidebar({ sessionId, segmentId, onAction }: Props) {
+export function SpineSidebar({
+  sessionId,
+  segmentId,
+  onAction,
+  onJump,
+  onClose,
+}: Props) {
   const [tab, setTab] = useState<Tab>('entities');
   const [detail, setDetail] = useState<SegmentDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -99,7 +114,21 @@ export function SpineSidebar({ sessionId, segmentId, onAction }: Props) {
   if (error) {
     return (
       <div className="spine-sidebar spine-sidebar-error">
-        Couldn't load segment detail: {error}
+        <header className="spine-sidebar-header">
+          <span className="spine-sidebar-title">Couldn't load segment</span>
+          {onClose && (
+            <button
+              type="button"
+              className="spine-sidebar-close"
+              onClick={onClose}
+              title="Dismiss"
+              aria-label="Dismiss segment focus"
+            >
+              ×
+            </button>
+          )}
+        </header>
+        <div>{error}</div>
       </div>
     );
   }
@@ -108,6 +137,17 @@ export function SpineSidebar({ sessionId, segmentId, onAction }: Props) {
       <div className="spine-sidebar spine-sidebar-loading">
         <div className="spine-sidebar-header">
           <span className="spine-sidebar-title">Loading…</span>
+          {onClose && (
+            <button
+              type="button"
+              className="spine-sidebar-close"
+              onClick={onClose}
+              title="Dismiss"
+              aria-label="Dismiss segment focus"
+            >
+              ×
+            </button>
+          )}
         </div>
       </div>
     );
@@ -121,6 +161,17 @@ export function SpineSidebar({ sessionId, segmentId, onAction }: Props) {
         <span className={`spine-kind spine-kind-${segment.kind}`}>
           {segment.kind.replace('_', ' ')}
         </span>
+        {onClose && (
+          <button
+            type="button"
+            className="spine-sidebar-close"
+            onClick={onClose}
+            title="Dismiss"
+            aria-label="Dismiss segment focus"
+          >
+            ×
+          </button>
+        )}
       </header>
       {segment.summary && (
         <p className="spine-sidebar-summary">{segment.summary}</p>
@@ -161,6 +212,19 @@ export function SpineSidebar({ sessionId, segmentId, onAction }: Props) {
         {tab === 'relations' && <RelationsTab relations={relations} />}
         {tab === 'notes' && <NotesTab />}
       </div>
+      {onJump && (
+        <footer className="spine-sidebar-footer">
+          <button
+            type="button"
+            className="spine-sidebar-footer-btn"
+            onClick={onJump}
+            title="Scroll the chat to where this segment starts"
+          >
+            <span aria-hidden>↑</span>
+            <span>Jump to message</span>
+          </button>
+        </footer>
+      )}
     </div>
   );
 }
