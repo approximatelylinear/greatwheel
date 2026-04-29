@@ -289,9 +289,16 @@ fn build_joint_prompt(text: &str, role: &str) -> String {
         research entity. Examples to REJECT: \"paper\", \"papers\", \"point\", \"points\", \
         \"point ID\", \"cluster\", \"category\", \"categories\", \"year\", \"label\", \"id\", \
         \"kind\", \"type\", \"color\", \"axis\", \"filter\", \"row\", \"column\", \"field\", \
-        \"entity\", \"node\", \"edge\". A bare unqualified noun like \"paper\" or \"cluster\" \
-        is never an entity; only proper names (people, datasets, methods, venues, specific \
-        concepts named with a unique identifier or acronym) count. `surface` is the form as \
+        \"entity\", \"node\", \"edge\". DO NOT extract app-action / UI-affordance words — \
+        verbs and labels that describe what the user or agent is *doing* on the chat surface, \
+        not what the conversation is *about*. Examples to REJECT: \"pinned\", \"pin\", \
+        \"saved\", \"save\", \"bookmark\", \"clicked\", \"click\", \"selected\", \"select\", \
+        \"focus\", \"focused\", \"plotted\", \"plot\", \"explore\", \"navigate\", \
+        \"drill\", \"open\", \"close\", \"jump\", \"hover\", \"workspace\", \"sidebar\", \
+        \"chat\", \"message\", \"button\", \"tab\". A bare unqualified noun like \"paper\" or \
+        \"cluster\" is never an entity; UI verbs like \"pinned\" or \"clicked\" are never \
+        entities — only proper names (people, datasets, methods, venues, specific concepts \
+        named with a unique identifier or acronym) count. `surface` is the form as \
         it appears; `canonical_form` is \
         the most complete / standard form (e.g. \"Patrick Lewis\" rather than \"P. Lewis\"; \
         \"Retrieval-Augmented Generation\" rather than \"RAG\"); when you can't improve on \
