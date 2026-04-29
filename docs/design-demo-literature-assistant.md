@@ -1,6 +1,7 @@
 # Design: literature assistant with entity browser
 
-**Status:** Drafted 2026-04-24.
+**Status:** Drafted 2026-04-24 · Extended 2026-04-29 with the
+Semantic Spine + Workspace (see §14).
 
 ## 1. Goal
 
@@ -266,3 +267,120 @@ Biggest engineering risks: entity extraction quality (bad entities →
 messy cloud), UMAP reproducibility (seed it; test it), and the
 bundled-model question (spaCy vs LLM-prompted extraction is a fork
 in the road worth resolving in its own prototype).
+
+## 14. Extension: Semantic Spine + Workspace (2026-04-29)
+
+The original goal — entity cloud as 2D navigation primitive — held
+up well, but once users started running long exploration sessions
+(typed query → 30+ pin clicks → pivot → more pins) two limitations
+showed up that the cloud couldn't address:
+
+- **Temporal vs spatial.** The cloud shows *what's related to what*
+  across all papers, but not *what we covered when*. As a session
+  grew, scrolling chat became the only way to find earlier branches,
+  and scroll-search by label is fragile.
+- **No curated reading list.** Pin acks in chat accumulate but don't
+  consolidate into anything. The user needs to mark "this thread is
+  worth coming back to" without leaving the conversation.
+
+Both motivated the **Semantic Spine** — a vertical rail next to chat
+with one marker per typed user turn (widget-event chains absorbed
+into the parent), and an entity-rich sidebar pinned to the canvas
+column. Full design lives in
+[`design-semantic-spine.md`](design-semantic-spine.md). What follows
+is how it slots into the literature-assistant surface.
+
+### 14.1 What it adds (briefly)
+
+- **Per-entry entity attribution.** Every assistant narration (the
+  resolved `FINAL("...")` prose, persisted as a separate
+  `EntryType::AssistantNarration` so the spine reads from prose, not
+  Python source) gets typed-entity extraction off the chat path.
+  Rows land in `session_entry_entities` keyed to the same
+  `kb_entities` table the EntityCloud already uses. **Same canonical
+  ids across both surfaces.**
+- **Turn-based segmentation.** Each typed user message opens a
+  segment; widget-event-driven turns (point clicks, pin acks) chain
+  into the parent so a click-driven exploration collapses under the
+  question that started it. Persisted in `session_segments`.
+- **Timeline rail.** Markers absolute-positioned at the y-offset of
+  each segment's first chat row; the rail's scroll mirrors the chat
+  pane's so markers track the user's reading position. Distinct
+  visual states for *focused* (clicked, sidebar open) vs *current*
+  (in viewport, scroll-driven).
+- **Canvas-pinned sidebar.** Click a marker → sidebar appears in
+  the canvas column above the EntityCloud (capped at 50% height so
+  the cloud stays usable). Tabs: Entities / Relations / Notes.
+  Action row at top: Revisit / Go deeper / Compare — each fires a
+  synthetic prompt + new turn through the standard `WidgetInteraction`
+  path. Footer has Jump-to-message + Close.
+- **Workspace.** ★ Save toggle on the sidebar header; ★ Workspace
+  button in the app header opens a drawer listing every saved
+  segment (label, top entities, summary, Open / Jump). Survives
+  resegment churn — invalidated-but-saved rows keep showing with a
+  "(superseded)" tag.
+- **Entity ↔ chat coupling.** When a segment is focused, every
+  surface form of its entities (label + aliases) gets wrapped in
+  `<mark>` inside the segment's chat rows; a left-border tick marks
+  the segment range. Clicking an entity card narrows the highlight
+  to that single entity across the *whole conversation* and scrolls
+  to the first match.
+- **Keyboard nav.** `↑` / `↓` move between markers (auto-scrolls
+  chat to the new segment); `Esc` dismisses the focused sidebar.
+  Skipped while typing into an input so the message composer stays
+  usable.
+
+### 14.2 How it complements the EntityCloud
+
+The cloud remains the canvas centerpiece. Spine and cloud are
+complementary projections of the same `kb_entities` graph:
+
+| Surface          | Axis              | Anchored to                       |
+|------------------|-------------------|-----------------------------------|
+| `EntityCloud`    | spatial / semantic| UMAP coords across the corpus     |
+| Semantic Spine   | temporal          | session entries in chronological order |
+
+Same entities, two axes. Clicking an entity in the spine sidebar
+already highlights its mentions in the chat. The mirror direction —
+clicking a cloud point and having the spine focus the segment(s)
+that mentioned it — isn't wired yet but is a natural follow-up
+(see §14.5).
+
+### 14.3 Schema additions since v1
+
+| Table / migration                        | Purpose                                                     |
+|------------------------------------------|-------------------------------------------------------------|
+| `EntryType::AssistantNarration` (Rust)   | Resolved FINAL prose stored alongside the raw assistant entry so the extractor sees what the user saw. |
+| `014_spine_entry_extraction.sql`         | `session_entry_entities`, `session_entry_relations`.        |
+| `015_session_segments.sql`               | Segment cache (label, kind, range, entity_ids, invalidated_at). |
+| `016_session_segment_commits.sql`        | `committed_at` flag → drives the workspace listing.         |
+
+The cloud's data path is unchanged — it still reads `kb_entities` /
+`kb_chunk_entity_links` directly. The spine's data path joins the
+same `kb_entities` rows from the *session* side
+(`session_entry_entities → kb_entities`).
+
+### 14.4 Out-of-scope updates
+
+§10's "Persistent state across queries. Each topic query resets the
+cloud; no history browser" still holds *for the cloud*. The
+workspace adds session-scoped persistence over a different axis —
+saved segments survive new typed queries within the session. **Cross-
+session persistence remains a non-goal**: each `?session=<uuid>` URL
+is its own conversation; no global library of saved segments yet.
+
+### 14.5 Deferred
+
+Items left on the spine punch list, ordered by user-visible impact:
+
+- **Cloud → spine linkage.** Click a cloud point → focus the
+  segment(s) where that entity was discussed. Closes the only
+  remaining one-way coupling between the two surfaces.
+- **Coordinator-race serialization.** Multiple flushes can spawn
+  concurrent `run_resegment` coordinators; `Mutex` per session would
+  serialize cleanly. Empirically OK because Postgres serializes the
+  writes and `supersede` is idempotent.
+- **Label staleness refresh.** A segment's label is set on first
+  creation; as it grows entity counts the label can drift. Cheap fix
+  is re-prompt when entity_ids changes by ≥N.
+- **GC for invalidated segment rows.** Accumulate forever today.
