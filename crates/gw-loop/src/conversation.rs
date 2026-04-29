@@ -326,7 +326,8 @@ impl ConversationLoop {
                 | LoopEvent::WidgetSuperseded { .. }
                 | LoopEvent::CodeExecuted { .. }
                 | LoopEvent::SpineEntryExtracted { .. }
-                | LoopEvent::SpineSegmentsUpdated { .. } => {}
+                | LoopEvent::SpineSegmentsUpdated { .. }
+                | LoopEvent::UserMessageAnchor { .. } => {}
             }
         }
     }
@@ -471,9 +472,19 @@ impl ConversationLoop {
         let span = tracing::Span::current();
         span.record("gw.turn_number", self.turn_number);
 
-        // 1. Append user message to tree.
-        self.tree
+        // 1. Append user message to tree, and emit an anchor event
+        //    so the frontend can stamp the locally-appended chat row
+        //    with `data-entry-id`. Skip widget-event synthetic
+        //    messages — they aren't rendered as user bubbles on the
+        //    frontend, so there's nothing to anchor.
+        let user_entry_id = self
+            .tree
             .append(EntryType::UserMessage(user_message.to_string()));
+        if !user_message.trim_start().starts_with("[widget-event]") {
+            let _ = self.event_tx.send(LoopEvent::UserMessageAnchor {
+                entry_id: user_entry_id,
+            });
+        }
 
         let mut iterations = 0;
         let mut total_input_tokens = 0u32;

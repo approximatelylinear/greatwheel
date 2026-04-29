@@ -57,6 +57,15 @@ pub struct SpineSegmentSnapshot {
 pub enum LoopEvent {
     /// User sends a message.
     UserMessage(String),
+    /// A typed user message has been persisted as a session entry
+    /// — outbound-only. Carries the `session_entries.id` so the
+    /// frontend can stamp the locally-appended chat row with
+    /// `data-entry-id`, which the spine rail uses to anchor markers
+    /// to the user's question (entry_first of a turn-based segment).
+    /// Only emitted for user-typed messages; widget-event synthetic
+    /// user messages are not rendered as chat rows on the frontend
+    /// and don't need anchoring.
+    UserMessageAnchor { entry_id: EntryId },
     /// LLM produces a follow-up (e.g., after code execution).
     FollowUp(String),
     /// Start of an assistant-authored text message. All subsequent
