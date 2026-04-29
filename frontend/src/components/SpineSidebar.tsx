@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   fetchSegmentDetail,
+  setSegmentCommitted,
   type EntityCard,
   type RelationRow,
   type SegmentDetail,
@@ -35,6 +36,11 @@ interface Props {
    *  dismisses. Wired by the parent to fire a focus widget event
    *  with `key: null`. */
   onClose?: () => void;
+  /** Issue #5: invalidate the workspace listing cache after a
+   *  commit toggle so a subsequent workspace-drawer open shows the
+   *  current state. Optional — when absent the workspace just
+   *  refetches on its own next open. */
+  onWorkspaceInvalidate?: () => void;
 }
 
 type SpineActionKind = 'revisit' | 'expand' | 'compare';
@@ -87,11 +93,15 @@ export function SpineSidebar({
   onAction,
   onJump,
   onClose,
+  onWorkspaceInvalidate,
 }: Props) {
   const [tab, setTab] = useState<Tab>('entities');
   const [detail, setDetail] = useState<SegmentDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // In-flight commit toggle so the user can't double-click the
+  // button and fire two requests for the same row.
+  const [commitBusy, setCommitBusy] = useState(false);
 
   useEffect(() => {
     const ac = new AbortController();
@@ -110,6 +120,30 @@ export function SpineSidebar({
       });
     return () => ac.abort();
   }, [sessionId, segmentId]);
+
+  const onToggleCommit = async () => {
+    if (!detail || commitBusy) return;
+    const isCommitted = detail.segment.committed_at != null;
+    setCommitBusy(true);
+    try {
+      const r = await setSegmentCommitted(
+        sessionId,
+        segmentId,
+        !isCommitted,
+      );
+      // Splice the new committed_at onto local state without refetch
+      // so the toggle flips immediately.
+      setDetail({
+        ...detail,
+        segment: { ...detail.segment, committed_at: r.committed_at },
+      });
+      onWorkspaceInvalidate?.();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setCommitBusy(false);
+    }
+  };
 
   if (error) {
     return (
@@ -161,6 +195,33 @@ export function SpineSidebar({
         <span className={`spine-kind spine-kind-${segment.kind}`}>
           {segment.kind.replace('_', ' ')}
         </span>
+        {segment.invalidated && (
+          <span
+            className="spine-sidebar-stale"
+            title="A later resegment pass superseded this segment, but it stays here because you committed it"
+          >
+            superseded
+          </span>
+        )}
+        <button
+          type="button"
+          className={`spine-sidebar-save${
+            segment.committed_at ? ' active' : ''
+          }`}
+          onClick={onToggleCommit}
+          disabled={commitBusy}
+          title={
+            segment.committed_at
+              ? 'Remove from workspace'
+              : 'Save to workspace'
+          }
+          aria-pressed={segment.committed_at != null}
+        >
+          <span aria-hidden>
+            {segment.committed_at ? '★' : '☆'}
+          </span>
+          <span>{segment.committed_at ? 'Saved' : 'Save'}</span>
+        </button>
         {onClose && (
           <button
             type="button"
