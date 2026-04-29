@@ -76,6 +76,11 @@ export function SpinePane({
 }: Props) {
   const railScrollRef = useRef<HTMLDivElement>(null);
   const [layout, setLayout] = useState<RailLayout | null>(null);
+  // The segment whose chat content is currently most visible at the
+  // top of the viewport. Distinct from `focusedSegmentId` (which is
+  // a click — opens the sidebar). Updated on chat scroll so the rail
+  // visually tracks the user's reading position.
+  const [activeSegmentId, setActiveSegmentId] = useState<string | null>(null);
 
   // Measurement is cheap (O(segments + DOM anchors)) but we still want
   // to debounce relayout calls into a single rAF tick so a burst of
@@ -83,6 +88,8 @@ export function SpinePane({
   const rafRef = useRef<number | null>(null);
   const segmentsRef = useRef(segments);
   segmentsRef.current = segments;
+  const layoutRef = useRef<RailLayout | null>(null);
+  layoutRef.current = layout;
 
   const measure = useCallback(() => {
     rafRef.current = null;
@@ -139,9 +146,41 @@ export function SpinePane({
     const ro = new ResizeObserver(scheduleMeasure);
     ro.observe(chat);
 
+    // 80px below the chat's top edge — gives a comfortable
+    // "you're reading this segment" feel rather than flipping the
+    // moment a row's first pixel scrolls into view.
+    const ACTIVE_PROBE_OFFSET = 80;
+    const computeActive = (): string | null => {
+      const layout = layoutRef.current;
+      const segs = segmentsRef.current;
+      if (!layout || segs.length === 0) return null;
+      const probe = chat.scrollTop + ACTIVE_PROBE_OFFSET;
+      // segments[] is in chat order (entry_first ascending). Pick
+      // the LAST segment whose top has scrolled past the probe — that
+      // is the segment the user is currently reading.
+      let active: string | null = null;
+      for (const seg of segs) {
+        const top = layout.tops[seg.id];
+        if (top == null) continue;
+        if (top <= probe) {
+          active = seg.id;
+        } else {
+          break;
+        }
+      }
+      // If nothing has scrolled past yet (top of conversation), the
+      // first segment is the natural "current" so the rail doesn't
+      // look stuck at zero state.
+      if (active == null && segs.length > 0) {
+        active = segs[0]!.id;
+      }
+      return active;
+    };
     const onChatScroll = () => {
       const r = railScrollRef.current;
       if (r) r.scrollTop = chat.scrollTop;
+      const next = computeActive();
+      setActiveSegmentId((prev) => (prev === next ? prev : next));
     };
     chat.addEventListener('scroll', onChatScroll, { passive: true });
     onChatScroll();
@@ -162,6 +201,31 @@ export function SpinePane({
   useEffect(() => {
     scheduleMeasure();
   }, [segments, scheduleMeasure]);
+
+  // Re-evaluate "active" when the layout actually changes (new
+  // segments may shift which one we're reading). The on-scroll
+  // computation handles the user-driven case; this catches
+  // server-pushed updates that re-flow the rail without a scroll.
+  useEffect(() => {
+    const chat = document.querySelector<HTMLElement>('.chat-pane');
+    if (!chat || !layout || segments.length === 0) {
+      setActiveSegmentId(null);
+      return;
+    }
+    const probe = chat.scrollTop + 80;
+    let next: string | null = null;
+    for (const seg of segments) {
+      const top = layout.tops[seg.id];
+      if (top == null) continue;
+      if (top <= probe) {
+        next = seg.id;
+      } else {
+        break;
+      }
+    }
+    if (next == null) next = segments[0]!.id;
+    setActiveSegmentId((prev) => (prev === next ? prev : next));
+  }, [layout, segments]);
 
   if (segments.length === 0) {
     return (
@@ -185,14 +249,23 @@ export function SpinePane({
           }}
         >
           {segments.map((seg) => {
-            const isActive = seg.id === focusedSegmentId;
+            const isFocused = seg.id === focusedSegmentId;
+            const isCurrent = seg.id === activeSegmentId;
             const top = layout?.tops[seg.id];
+            const cls = [
+              'spine-marker',
+              isFocused ? 'active' : '',
+              isCurrent && !isFocused ? 'current' : '',
+            ]
+              .filter(Boolean)
+              .join(' ');
             return (
               <button
                 key={seg.id}
                 type="button"
-                className={`spine-marker${isActive ? ' active' : ''}`}
-                aria-pressed={isActive}
+                className={cls}
+                aria-pressed={isFocused}
+                aria-current={isCurrent ? 'location' : undefined}
                 onClick={() => onSegmentFocus(seg.id)}
                 title={`Focus segment "${seg.label}"`}
                 style={top != null ? { top: `${top}px` } : undefined}
