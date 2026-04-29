@@ -12,6 +12,8 @@
 //! exposes this lives in the binary that owns the AG-UI router; this
 //! module just provides the typed result.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::PgPool;
@@ -40,6 +42,17 @@ pub struct SegmentSummary {
     pub entity_count: usize,
     pub summary: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// When non-null, the user has committed this segment to the
+    /// workspace (Issue #5). The frontend uses it to render the
+    /// "Saved" toggle state and the workspace list filters on it.
+    pub committed_at: Option<DateTime<Utc>>,
+    /// True when the segment has been superseded by a later
+    /// resegment pass (`session_segments.invalidated_at IS NOT NULL`).
+    /// We let committed segments stick around even after invalidation
+    /// so the user's curated list survives churn — the workspace
+    /// view tags these "(superseded)" so the user can still revisit
+    /// the historical context.
+    pub invalidated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,21 +118,35 @@ pub async fn fetch_segment_detail(
         Vec<Uuid>,
         Option<String>,
         DateTime<Utc>,
+        Option<DateTime<Utc>>,
+        Option<DateTime<Utc>>,
     );
     let seg_row: Option<SegmentRow> = sqlx::query_as(
         r#"
         SELECT segment_id, session_id, label, kind, entry_first,
-               entry_last, entity_ids, summary, created_at
+               entry_last, entity_ids, summary, created_at,
+               committed_at, invalidated_at
         FROM session_segments
-        WHERE segment_id = $1 AND invalidated_at IS NULL
+        WHERE segment_id = $1
         "#,
     )
     .bind(segment_id)
     .fetch_optional(pool)
     .await
     .map_err(|e| LoopError::Spine(format!("fetch segment: {e}")))?;
-    let Some((id, session_id, label, kind, entry_first, entry_last, entity_ids, summary, created_at)) =
-        seg_row
+    let Some((
+        id,
+        session_id,
+        label,
+        kind,
+        entry_first,
+        entry_last,
+        entity_ids,
+        summary,
+        created_at,
+        committed_at,
+        invalidated_at,
+    )) = seg_row
     else {
         return Ok(None);
     };
@@ -134,6 +161,8 @@ pub async fn fetch_segment_detail(
         entity_count: entity_ids.len(),
         summary,
         created_at,
+        committed_at,
+        invalidated: invalidated_at.is_some(),
     };
 
     // Entries in [first, last] inclusive, ordered by created_at. Use
@@ -332,6 +361,141 @@ pub async fn fetch_segment_detail(
         entities,
         relations,
     }))
+}
+
+// ─── Workspace (Issue #5) ──────────────────────────────────────────
+
+/// One committed segment as it appears in the workspace listing.
+/// Lighter than `SegmentDetail` — no entries / relations payload, just
+/// what the workspace card needs to render and link.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceItem {
+    pub segment_id: Uuid,
+    pub label: String,
+    pub kind: String,
+    pub entry_first: Uuid,
+    pub entry_last: Uuid,
+    pub entity_count: usize,
+    pub top_entities: Vec<String>,
+    pub summary: Option<String>,
+    pub committed_at: DateTime<Utc>,
+    pub invalidated: bool,
+}
+
+/// Toggle a segment's commit state. Idempotent in both directions:
+/// `commit` on an already-committed segment is a no-op, ditto
+/// `uncommit` on an already-uncommitted one. Returns the resulting
+/// `committed_at` value (None when uncommitted).
+pub async fn set_segment_commit(
+    pool: &PgPool,
+    segment_id: Uuid,
+    committed: bool,
+) -> Result<Option<DateTime<Utc>>, LoopError> {
+    let row: Option<(Option<DateTime<Utc>>,)> = if committed {
+        sqlx::query_as(
+            "UPDATE session_segments \
+             SET committed_at = COALESCE(committed_at, now()) \
+             WHERE segment_id = $1 \
+             RETURNING committed_at",
+        )
+        .bind(segment_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| LoopError::Spine(format!("commit segment: {e}")))?
+    } else {
+        sqlx::query_as(
+            "UPDATE session_segments SET committed_at = NULL \
+             WHERE segment_id = $1 \
+             RETURNING committed_at",
+        )
+        .bind(segment_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| LoopError::Spine(format!("uncommit segment: {e}")))?
+    };
+    Ok(row.and_then(|(t,)| t))
+}
+
+/// All committed segments for `session_id`, newest-commit first.
+/// Includes invalidated-but-still-committed rows — the workspace
+/// shows them tagged so the user's curated list survives resegment
+/// churn. Top entity labels are joined in for compact card rendering.
+pub async fn list_workspace(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> Result<Vec<WorkspaceItem>, LoopError> {
+    type Row = (
+        Uuid,
+        String,
+        String,
+        Uuid,
+        Uuid,
+        Vec<Uuid>,
+        Option<String>,
+        DateTime<Utc>,
+        bool,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        r#"
+        SELECT segment_id, label, kind, entry_first, entry_last,
+               entity_ids, summary, committed_at,
+               (invalidated_at IS NOT NULL) AS invalidated
+        FROM session_segments
+        WHERE session_id = $1 AND committed_at IS NOT NULL
+        ORDER BY committed_at DESC
+        "#,
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| LoopError::Spine(format!("list workspace: {e}")))?;
+
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Collect all top entity ids across the workspace (cap per
+    // segment) and resolve their labels in one shot, so the listing
+    // doesn't fan out to N queries.
+    const TOP_PER_SEGMENT: usize = 5;
+    let mut all_ids: Vec<Uuid> = Vec::new();
+    for r in &rows {
+        for id in r.5.iter().take(TOP_PER_SEGMENT) {
+            all_ids.push(*id);
+        }
+    }
+    type LabelRow = (Uuid, String);
+    let label_rows: Vec<LabelRow> = sqlx::query_as(
+        "SELECT entity_id, label FROM kb_entities WHERE entity_id = ANY($1)",
+    )
+    .bind(&all_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| LoopError::Spine(format!("workspace labels: {e}")))?;
+    let labels: HashMap<Uuid, String> = label_rows.into_iter().collect();
+
+    Ok(rows
+        .into_iter()
+        .map(|(seg_id, label, kind, first, last, entity_ids, summary, committed_at, invalidated)| {
+            let top_entities: Vec<String> = entity_ids
+                .iter()
+                .take(TOP_PER_SEGMENT)
+                .filter_map(|id| labels.get(id).cloned())
+                .collect();
+            WorkspaceItem {
+                segment_id: seg_id,
+                label,
+                kind,
+                entry_first: first,
+                entry_last: last,
+                entity_count: entity_ids.len(),
+                top_entities,
+                summary,
+                committed_at,
+                invalidated,
+            }
+        })
+        .collect())
 }
 
 /// Pull the prose text out of a `session_entries.content` JSONB blob.
