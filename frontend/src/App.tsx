@@ -324,6 +324,65 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
     }
   }, [focusedSegment]);
 
+  // Issue #6: keyboard nav for the spine. Esc dismisses the focused
+  // sidebar; ↑/↓ moves focus between segments in chat order. Bound
+  // globally on window so the user doesn't have to focus the rail
+  // first, but skipped when typing into an input / textarea / any
+  // contenteditable so the MessageInput stays usable.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t) {
+        const tag = t.tagName;
+        if (
+          tag === 'INPUT' ||
+          tag === 'TEXTAREA' ||
+          tag === 'SELECT' ||
+          (t.isContentEditable ?? false)
+        ) {
+          return;
+        }
+      }
+      if (e.key === 'Escape' && focusedSegmentId) {
+        e.preventDefault();
+        // Same path the sidebar's × button uses.
+        onSegmentClose();
+        return;
+      }
+      if (
+        (e.key === 'ArrowDown' || e.key === 'ArrowUp') &&
+        spineSegments &&
+        spineSegments.length > 0
+      ) {
+        e.preventDefault();
+        const cur = focusedSegmentId
+          ? spineSegments.findIndex((s) => s.id === focusedSegmentId)
+          : -1;
+        const next =
+          e.key === 'ArrowDown'
+            ? Math.min(spineSegments.length - 1, cur < 0 ? 0 : cur + 1)
+            : Math.max(0, cur < 0 ? spineSegments.length - 1 : cur - 1);
+        const target = spineSegments[next];
+        if (!target) return;
+        onSegmentFocus(target.id);
+        // Auto-scroll the chat so the new focus lands in view —
+        // otherwise keyboard nav feels blind.
+        for (const id of [target.entry_first, target.entry_last]) {
+          if (!id) continue;
+          const el = document.querySelector<HTMLElement>(
+            `[data-entry-id="${id}"]`,
+          );
+          if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            return;
+          }
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [focusedSegmentId, spineSegments, onSegmentClose, onSegmentFocus]);
+
   // Workspace card actions (Issue #5).
   const onWorkspaceInvalidate = useCallback(() => {
     // Bump the reload key so the drawer refetches on its next open.

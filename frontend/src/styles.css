@@ -679,6 +679,23 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
   color: var(--accent);
 }
 
+/* Issue #6: scroll-driven "current" state — the segment whose chat
+   content is currently most-visible at the top of the viewport.
+   Distinct from `.active` (clicked, sidebar open). Subtle so it
+   doesn't fight the focused state when both are set; here we only
+   apply `.current` when not also focused. */
+.spine-marker.current {
+  opacity: 1;
+}
+.spine-marker.current .spine-dot {
+  /* A faint ring — hints at "you're here" without claiming the eye
+     the way the focused state does. */
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--fg-dim) 60%, transparent);
+}
+.spine-marker.current .spine-label {
+  color: var(--fg);
+}
+
 /* ─── Canvas column wrapper (Phase D) ────────────────────────── */
 /* The canvas grid cell now hosts the spine sidebar above the
    pinned canvas widget. When no segment is focused, the wrapper
