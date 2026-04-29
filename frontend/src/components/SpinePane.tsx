@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { SpineSidebar } from './SpineSidebar';
 
 /**
  * "Semantic spine" rail that runs alongside the chat as a true
@@ -47,16 +46,6 @@ interface Props {
   /** Fires a focus event the adapter routes to scope state without
    *  running the agent. Receives the clicked segment's id. */
   onSegmentFocus: (segmentId: string) => void;
-  /** Session id, used by the sidebar to fetch
-   *  /sessions/:id/segments/:segment_id. Optional so the registry
-   *  fallback path (no session context) doesn't break. */
-  sessionId?: string;
-  /** Spine action-menu click — forwards to App.tsx which fires the
-   *  matching widget event. Optional for the registry fallback. */
-  onSegmentAction?: (
-    segmentId: string,
-    action: 'revisit' | 'expand' | 'compare',
-  ) => void;
 }
 
 const KIND_COLORS: Record<string, string> = {
@@ -84,8 +73,6 @@ export function SpinePane({
   segments,
   focusedSegmentId,
   onSegmentFocus,
-  sessionId,
-  onSegmentAction,
 }: Props) {
   const railScrollRef = useRef<HTMLDivElement>(null);
   const [layout, setLayout] = useState<RailLayout | null>(null);
@@ -232,15 +219,6 @@ export function SpinePane({
           })}
         </div>
       </div>
-      {focusedSegmentId && sessionId && (
-        <SpineSidebar
-          sessionId={sessionId}
-          segmentId={focusedSegmentId}
-          onAction={(action) =>
-            onSegmentAction?.(focusedSegmentId, action)
-          }
-        />
-      )}
     </aside>
   );
 }
