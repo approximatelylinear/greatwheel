@@ -150,7 +150,7 @@ pub async fn fetch_segment_detail(
         SELECT se.id, se.entry_type, se.content, se.created_at
         FROM session_entries se, bounds b
         WHERE se.session_id = $1
-          AND se.entry_type IN ('user_message', 'assistant_message')
+          AND se.entry_type IN ('user_message', 'assistant_message', 'assistant_narration')
           AND se.created_at BETWEEN b.first_at AND b.last_at
         ORDER BY se.created_at, se.id
         "#,
@@ -166,7 +166,7 @@ pub async fn fetch_segment_detail(
         .map(|(id, entry_type, content, created_at)| {
             let role = match entry_type.as_str() {
                 "user_message" => "user".to_string(),
-                "assistant_message" => "assistant".to_string(),
+                "assistant_message" | "assistant_narration" => "assistant".to_string(),
                 other => other.to_string(),
             };
             let text = entry_text(&content);
@@ -207,7 +207,7 @@ pub async fn fetch_segment_detail(
             SELECT se.id
             FROM session_entries se, bounds b
             WHERE se.session_id = $1
-              AND se.entry_type IN ('user_message', 'assistant_message')
+              AND se.entry_type IN ('user_message', 'assistant_message', 'assistant_narration')
               AND se.created_at BETWEEN b.first_at AND b.last_at
         )
         SELECT e.entity_id, e.label, e.slug, e.kind,
@@ -278,7 +278,7 @@ pub async fn fetch_segment_detail(
             SELECT se.id
             FROM session_entries se, bounds b
             WHERE se.session_id = $1
-              AND se.entry_type IN ('user_message', 'assistant_message')
+              AND se.entry_type IN ('user_message', 'assistant_message', 'assistant_narration')
               AND se.created_at BETWEEN b.first_at AND b.last_at
         )
         SELECT r.relation_id, r.entry_id, r.subject_id, s.label,
@@ -335,16 +335,25 @@ pub async fn fetch_segment_detail(
 }
 
 /// Pull the prose text out of a `session_entries.content` JSONB blob.
-/// Mirrors the variants `EntryType::UserMessage(s)` and
-/// `EntryType::AssistantMessage { content, .. }` which serialise as
-/// `{"UserMessage": "…"}` and `{"AssistantMessage": {"content":
-/// "…"}}` respectively. Other variants return empty.
+/// Mirrors the variants `EntryType::UserMessage(s)`,
+/// `EntryType::AssistantMessage { content, .. }`, and
+/// `EntryType::AssistantNarration { content }` which serialise as
+/// `{"UserMessage": "…"}`, `{"AssistantMessage": {"content": "…"}}`,
+/// and `{"AssistantNarration": {"content": "…"}}` respectively.
+/// Other variants return empty.
 fn entry_text(content: &serde_json::Value) -> String {
     if let Some(s) = content.get("UserMessage").and_then(|v| v.as_str()) {
         return s.to_string();
     }
     if let Some(s) = content
         .get("AssistantMessage")
+        .and_then(|v| v.get("content"))
+        .and_then(|v| v.as_str())
+    {
+        return s.to_string();
+    }
+    if let Some(s) = content
+        .get("AssistantNarration")
         .and_then(|v| v.get("content"))
         .and_then(|v| v.as_str())
     {

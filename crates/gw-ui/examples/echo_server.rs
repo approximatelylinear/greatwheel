@@ -126,6 +126,7 @@ async fn echo_text(adapter: &AgUiAdapter, session_id: SessionId, content: String
             session_id,
             &LoopEvent::TextMessageStart {
                 message_id: message_id.clone(),
+                entry_id: None,
             },
         )
         .await;

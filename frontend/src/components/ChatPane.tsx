@@ -76,7 +76,7 @@ export function ChatPane({
   return (
     <div className="chat-pane">
       {isEmpty && <EmptyState welcome={welcome} onSuggest={onSuggest} />}
-      <div className="messages">
+      <div className="messages" data-chat-messages>
         {messages.map((m) => {
           const followUps = messageFollowUps[m.id] ?? [];
           // A "log line" is a short assistant turn with no markdown
@@ -93,7 +93,13 @@ export function ChatPane({
             ? parseRepinLogLine(m.content)
             : null;
           return (
-            <div key={m.id}>
+            <div
+              key={m.id}
+              className="message-row"
+              data-entry-id={m.entryId ?? undefined}
+              data-message-id={m.id}
+              data-role={m.role}
+            >
               {isAssistantLogLine && repin ? (
                 <button
                   type="button"

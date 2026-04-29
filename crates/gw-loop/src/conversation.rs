@@ -14,10 +14,15 @@ use uuid::Uuid;
 /// whole string as one DELTA — wire format is already forward-
 /// compatible with real token streaming, which would fire many
 /// DELTAs between the same START/END pair.
-fn emit_text_message(tx: &mpsc::UnboundedSender<LoopEvent>, content: String) {
+fn emit_text_message(
+    tx: &mpsc::UnboundedSender<LoopEvent>,
+    content: String,
+    entry_id: Option<EntryId>,
+) {
     let message_id = Uuid::new_v4().to_string();
     let _ = tx.send(LoopEvent::TextMessageStart {
         message_id: message_id.clone(),
+        entry_id,
     });
     let _ = tx.send(LoopEvent::TextMessageDelta {
         message_id: message_id.clone(),
@@ -139,6 +144,11 @@ pub struct TurnResult {
     pub input_tokens: u32,
     /// Total output tokens across all LLM calls.
     pub output_tokens: u32,
+    /// Persistent `session_entries.id` of the assistant message that
+    /// produced `response` (when there is one). Forwarded into
+    /// `LoopEvent::TextMessageStart.entry_id` so the frontend can
+    /// anchor each chat row to the entry the spine indexes by.
+    pub assistant_entry_id: Option<EntryId>,
 }
 
 /// The multi-turn conversation loop.
@@ -264,7 +274,24 @@ impl ConversationLoop {
                 }
 
                 LoopEvent::WidgetInteraction(event) => {
-                    self.run_input_turn(&event.to_user_message()).await?;
+                    // Spine action menu (revisit / expand / compare):
+                    // build a server-side templated prompt from the
+                    // segment's content and run it as the next turn.
+                    // Falls through to the default to_user_message
+                    // path on lookup failure or non-spine actions —
+                    // the existing literature_assistant follow-up
+                    // buttons (Method details / Vs neighbors / What
+                    // followed) and other widget interactions stay
+                    // on the original code path.
+                    let prompt = match self.translate_spine_action(&event).await {
+                        Ok(Some(p)) => p,
+                        Ok(None) => event.to_user_message(),
+                        Err(e) => {
+                            warn!(error = %e, "spine action translation failed; falling back");
+                            event.to_user_message()
+                        }
+                    };
+                    self.run_input_turn(&prompt).await?;
                 }
 
                 LoopEvent::FollowUp(content) => {
@@ -309,6 +336,84 @@ impl ConversationLoop {
     /// follow-ups the agent queued, and apply auto-compaction policy.
     /// Used by both the `UserMessage` and `WidgetInteraction` arms of
     /// `run` — kept as one helper so the two paths cannot drift.
+    /// Translate a spine action-menu click (`revisit` / `expand` /
+    /// `compare`) into a server-side templated prompt built from the
+    /// focused segment's entities + label. Returns `Ok(None)` for
+    /// non-spine widget events so the caller falls back to the
+    /// default `to_user_message()` path.
+    ///
+    /// Prompt templates match `docs/design-semantic-spine.md` §5.5:
+    ///   revisit  → "Revisit our discussion about {labels}. Summarize
+    ///              what we concluded and what's still open."
+    ///   expand   → "Go deeper on {labels} — what didn't we cover?"
+    ///   compare  → "Compare {segment_entities} with what's still on
+    ///              the table elsewhere in this conversation."
+    /// `{labels}` is the segment's label; `{segment_entities}` is the
+    /// top entity labels in the segment, joined with commas.
+    async fn translate_spine_action(
+        &self,
+        event: &gw_core::WidgetEvent,
+    ) -> Result<Option<String>, LoopError> {
+        let action = event.action.as_str();
+        if !matches!(action, "revisit" | "expand" | "compare") {
+            return Ok(None);
+        }
+        // Need a PgPool to read segment detail; fall through to the
+        // default path if the spine isn't wired up.
+        let Some(extractor) = self.spine_extractor.as_ref() else {
+            return Ok(None);
+        };
+        let pool = &extractor.stores.pg;
+
+        let segment_id = event
+            .data
+            .get("segment_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok());
+        let Some(seg_id) = segment_id else {
+            return Ok(None);
+        };
+        let detail = match crate::spine::query::fetch_segment_detail(pool, seg_id).await? {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+
+        // Top-N entity labels for the prompt. Query is already
+        // ranked by mentions_in_segment desc, so slicing is enough.
+        let entity_labels: Vec<String> = detail
+            .entities
+            .iter()
+            .take(6)
+            .map(|e| e.label.clone())
+            .collect();
+        let entities_phrase = if entity_labels.is_empty() {
+            detail.segment.label.clone()
+        } else {
+            entity_labels.join(", ")
+        };
+        let prompt = match action {
+            "revisit" => format!(
+                "Revisit our discussion about {entities_phrase}. \
+                Summarize what we concluded and what's still open."
+            ),
+            "expand" => format!(
+                "Go deeper on {entities_phrase} — what didn't we cover yet?"
+            ),
+            "compare" => format!(
+                "Compare {entities_phrase} with what's still on the table \
+                elsewhere in this conversation. Where do they overlap, \
+                where do they diverge?"
+            ),
+            _ => unreachable!("filtered above"),
+        };
+        info!(
+            action = action,
+            segment_id = %seg_id,
+            "spine action → synthetic prompt"
+        );
+        Ok(Some(prompt))
+    }
+
     async fn run_input_turn(&mut self, initial: &str) -> Result<(), LoopError> {
         let _ = self.event_tx.send(LoopEvent::TurnStarted);
         let result = match self.handle_turn(initial).await {
@@ -322,7 +427,7 @@ impl ConversationLoop {
         };
         let _ = self.event_tx.send(LoopEvent::TurnComplete);
         if let Some(response) = result.response {
-            emit_text_message(&self.event_tx, response);
+            emit_text_message(&self.event_tx, response, result.assistant_entry_id);
         }
 
         while let Some(follow_up) = self.pending_follow_ups.pop() {
@@ -338,7 +443,7 @@ impl ConversationLoop {
             };
             let _ = self.event_tx.send(LoopEvent::TurnComplete);
             if let Some(response) = result.response {
-                emit_text_message(&self.event_tx, response);
+                emit_text_message(&self.event_tx, response, result.assistant_entry_id);
             }
         }
 
@@ -519,8 +624,12 @@ impl ConversationLoop {
                     }
                 }
 
-                // 6. Append assistant message to tree.
-                self.tree.append(EntryType::AssistantMessage {
+                // 6. Append assistant message to tree (the LLM's
+                //    raw response — typically code for tool-using
+                //    agents). Narration (the user-visible FINAL
+                //    prose) is appended below as a separate entry so
+                //    the spine extractor reads from prose, not code.
+                let assistant_entry_id = self.tree.append(EntryType::AssistantMessage {
                     content: response_content.clone(),
                     model: response_model,
                 });
@@ -533,6 +642,7 @@ impl ConversationLoop {
                         iterations,
                         input_tokens: total_input_tokens,
                         output_tokens: total_output_tokens,
+                        assistant_entry_id: Some(assistant_entry_id),
                     })
                 } else if let Some(answer) = gw_runtime::extract_final_answer(&response_content) {
                     // Check validator for text-based FINAL too.
@@ -552,6 +662,7 @@ impl ConversationLoop {
                         iterations,
                         input_tokens: total_input_tokens,
                         output_tokens: total_output_tokens,
+                        assistant_entry_id: Some(assistant_entry_id),
                     })
                 } else if code_blocks.is_empty() {
                     Some(TurnResult {
@@ -560,12 +671,31 @@ impl ConversationLoop {
                         iterations,
                         input_tokens: total_input_tokens,
                         output_tokens: total_output_tokens,
+                        assistant_entry_id: Some(assistant_entry_id),
                     })
                 } else {
                     None // Continue rLM loop.
                 };
 
-                if let Some(result) = turn_result {
+                if let Some(mut result) = turn_result {
+                    // Persist the resolved user-visible prose so the
+                    // spine has narrative text to extract from (the
+                    // raw AssistantMessage is mostly Python source).
+                    // Re-point the chat row's data-entry-id to this
+                    // narration entry so segments anchored to it
+                    // line up with the chat row that displays the
+                    // same prose.
+                    if let Some(text) = result.response.as_ref() {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            let narration_id = self.tree.append(
+                                EntryType::AssistantNarration {
+                                    content: text.clone(),
+                                },
+                            );
+                            result.assistant_entry_id = Some(narration_id);
+                        }
+                    }
                     self.post_turn_snapshot();
                     span.record("gw.iterations", iterations);
                     span.record("gw.input_tokens", total_input_tokens);
@@ -608,6 +738,9 @@ impl ConversationLoop {
             iterations,
             input_tokens: total_input_tokens,
             output_tokens: total_output_tokens,
+            // The max-iterations fallback path doesn't append an
+            // assistant entry, so there's no entry_id to forward.
+            assistant_entry_id: None,
         })
     }
 
@@ -698,6 +831,14 @@ impl ConversationLoop {
                 }
                 EntryType::AssistantMessage { content, .. } => {
                     transcript.push_str(&format!("Assistant: {content}\n"));
+                }
+                EntryType::AssistantNarration { content } => {
+                    // Resolved user-visible prose — include in
+                    // compaction summaries since this is what the
+                    // user actually saw, regardless of whether the
+                    // raw assistant entry above contained the literal
+                    // or an f-string template.
+                    transcript.push_str(&format!("Assistant (narration): {content}\n"));
                 }
                 EntryType::CodeExecution {
                     code,
@@ -886,13 +1027,24 @@ impl ConversationLoop {
     }
 
     /// Flush new tree entries to Postgres (no-op if no pg store attached).
-    /// When a spine extractor is attached, fan out a background task per
-    /// freshly-persisted prose entry (UserMessage / AssistantMessage)
-    /// so the spine acquires entity + relation rows without blocking
-    /// the chat path. Non-prose entry types (CodeExecution, HostCall,
-    /// ReplSnapshot, Compaction, BranchSummary, System) are skipped
-    /// at the type-filter level here so we don't pay the channel /
-    /// task-spawn cost for entries the extractor would no-op anyway.
+    /// When a spine extractor is attached, fan out per-entry extraction
+    /// tasks for freshly-persisted prose entries, then a single
+    /// coordinator awaits them all and runs **one** resegment pass.
+    ///
+    /// Why debounce resegment: a turn typically flushes 3+ extractable
+    /// entries (user_message, assistant_message, one or more
+    /// assistant_narration). If each runs its own resegment, we pay
+    /// the LLM label cost on every intermediate state — a turn with
+    /// 4 entries means 4 resegment passes, 3 of which see partial
+    /// state, create transient segments, then get invalidated by the
+    /// next pass. Coordinating one pass per flush eliminates the
+    /// invalidate→recreate churn (the user-facing log used to show
+    /// `created=15 invalidated=15` style passes).
+    ///
+    /// Non-prose entry types (CodeExecution, HostCall, ReplSnapshot,
+    /// Compaction, BranchSummary, System) are skipped at the type
+    /// filter so we don't pay the task-spawn cost for entries the
+    /// extractor would no-op anyway.
     pub async fn flush_tree(&mut self) {
         let new_entries = match self.tree.flush_to_pg().await {
             Ok(entries) => entries,
@@ -902,143 +1054,172 @@ impl ConversationLoop {
             }
         };
 
-        if let Some(extractor) = self.spine_extractor.as_ref() {
-            let session_id = self.session_id;
-            for entry in new_entries {
-                if !is_extractable_entry_type(&entry.entry_type) {
-                    continue;
-                }
-                let extractor = Arc::clone(extractor);
-                let event_tx = self.event_tx.clone();
-                tokio::spawn(async move {
-                    let entry_id = entry.id;
-                    let extraction = match extractor.extract_entry(&entry).await {
-                        Ok(x) => x,
-                        Err(e) => {
-                            warn!(
-                                entry_id = %entry_id.0,
-                                error = %e,
-                                "spine extract failed; entry left without spine rows"
-                            );
-                            return;
-                        }
-                    };
-                    if extraction.entities.is_empty()
-                        && extraction.relations.is_empty()
-                    {
-                        return;
-                    }
+        let Some(extractor) = self.spine_extractor.as_ref() else {
+            return;
+        };
+        let session_id = self.session_id;
 
-                    let pool = extractor.stores.pg.clone();
-                    if let Err(e) = crate::spine::persist::persist_entry_extraction(
-                        &pool,
-                        &extraction,
-                    )
-                    .await
-                    {
-                        warn!(
-                            entry_id = %entry_id.0,
-                            error = %e,
-                            "spine persist failed; entry left without spine rows"
-                        );
-                        return;
-                    }
-                    info!(
-                        entry_id = %entry_id.0,
-                        entity_links = extraction.entities.len(),
-                        relations = extraction.relations.len(),
-                        "spine extraction persisted"
-                    );
-
-                    // Outbound diagnostic event so subscribers see
-                    // per-entry deltas without polling Postgres.
-                    let entities_wire: Vec<SpineEntityLink> = extraction
-                        .entities
-                        .iter()
-                        .map(|l| SpineEntityLink {
-                            entry_id: l.entry_id,
-                            entity_id: l.entity_id,
-                            surface: l.surface.clone(),
-                            role: l.role.clone(),
-                            status: l.status.clone(),
-                            confidence: l.confidence,
-                            span_start: l.span_start,
-                            span_end: l.span_end,
-                        })
-                        .collect();
-                    let relations_wire: Vec<SpineRelation> = extraction
-                        .relations
-                        .iter()
-                        .map(|r| SpineRelation {
-                            entry_id: r.entry_id,
-                            subject_id: r.subject_id,
-                            object_id: r.object_id,
-                            predicate: r.predicate.clone(),
-                            directed: r.directed,
-                            surface: r.surface.clone(),
-                            confidence: r.confidence,
-                            span_start: r.span_start,
-                            span_end: r.span_end,
-                        })
-                        .collect();
-                    let _ = event_tx.send(LoopEvent::SpineEntryExtracted {
-                        entry_id,
-                        entities: entities_wire,
-                        relations: relations_wire,
-                    });
-
-                    // Re-segment the session now that this entry's
-                    // entities are in place. v1: trigger per-entry —
-                    // resegment is idempotent and converges across
-                    // multiple in-flight extractions in one turn.
-                    // The "right" model is one debounced trigger per
-                    // turn; revisit when LLM-call cost shows up
-                    // (resegment only re-prompts for *new* segment
-                    // ranges, so steady-state runs are cheap).
-                    let llm = extractor.stores.llm.clone();
-                    match crate::spine::resegment::resegment(
-                        &pool,
-                        llm.as_ref(),
-                        session_id.0,
-                        &crate::spine::resegment::ResegmentOpts::default(),
-                    )
-                    .await
-                    {
-                        Ok((report, snapshots)) => {
-                            info!(
-                                session_id = %session_id.0,
-                                created = report.segments_created,
-                                updated = report.segments_updated,
-                                invalidated = report.segments_invalidated,
-                                "spine resegment complete"
-                            );
-                            let segments_wire: Vec<SpineSegmentSnapshot> = snapshots
-                                .into_iter()
-                                .map(|s| SpineSegmentSnapshot {
-                                    segment_id: s.segment_id,
-                                    session_id: s.session_id,
-                                    label: s.label,
-                                    kind: s.kind,
-                                    entry_first: s.entry_first,
-                                    entry_last: s.entry_last,
-                                    entity_ids: s.entity_ids,
-                                    summary: s.summary,
-                                })
-                                .collect();
-                            let _ = event_tx.send(LoopEvent::SpineSegmentsUpdated {
-                                session_id,
-                                segments: segments_wire,
-                            });
-                        }
-                        Err(e) => warn!(
-                            session_id = %session_id.0,
-                            error = %e,
-                            "spine resegment failed; segments stale"
-                        ),
-                    }
-                });
+        let mut extract_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        for entry in new_entries {
+            if !is_extractable_entry_type(&entry.entry_type) {
+                continue;
             }
+            let extractor = Arc::clone(extractor);
+            let event_tx = self.event_tx.clone();
+            extract_handles.push(tokio::spawn(async move {
+                run_entry_extraction(extractor, event_tx, entry).await;
+            }));
         }
+
+        if extract_handles.is_empty() {
+            return;
+        }
+
+        // Single coordinator: await all per-entry extractions, then
+        // run exactly one resegment pass. Spawned so flush_tree
+        // returns immediately (the chat path doesn't block on spine
+        // work). Per-entry failures inside the join loop are already
+        // logged by run_entry_extraction; we don't gate the resegment
+        // on every entry succeeding.
+        let extractor = Arc::clone(extractor);
+        let event_tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            for h in extract_handles {
+                let _ = h.await;
+            }
+            run_resegment(extractor, event_tx, session_id).await;
+        });
+    }
+}
+
+/// Per-entry: extract, persist, emit `SpineEntryExtracted`. No
+/// resegment — the coordinator handles that once after all extractions
+/// in the flush batch complete.
+async fn run_entry_extraction(
+    extractor: Arc<crate::spine::SpineExtractor>,
+    event_tx: mpsc::UnboundedSender<LoopEvent>,
+    entry: gw_core::SessionEntry,
+) {
+    let entry_id = entry.id;
+    let extraction = match extractor.extract_entry(&entry).await {
+        Ok(x) => x,
+        Err(e) => {
+            warn!(
+                entry_id = %entry_id.0,
+                error = %e,
+                "spine extract failed; entry left without spine rows"
+            );
+            return;
+        }
+    };
+    if extraction.entities.is_empty() && extraction.relations.is_empty() {
+        return;
+    }
+
+    let pool = extractor.stores.pg.clone();
+    if let Err(e) =
+        crate::spine::persist::persist_entry_extraction(&pool, &extraction).await
+    {
+        warn!(
+            entry_id = %entry_id.0,
+            error = %e,
+            "spine persist failed; entry left without spine rows"
+        );
+        return;
+    }
+    info!(
+        entry_id = %entry_id.0,
+        entity_links = extraction.entities.len(),
+        relations = extraction.relations.len(),
+        "spine extraction persisted"
+    );
+
+    // Outbound diagnostic event so subscribers see per-entry deltas
+    // without polling Postgres.
+    let entities_wire: Vec<SpineEntityLink> = extraction
+        .entities
+        .iter()
+        .map(|l| SpineEntityLink {
+            entry_id: l.entry_id,
+            entity_id: l.entity_id,
+            surface: l.surface.clone(),
+            role: l.role.clone(),
+            status: l.status.clone(),
+            confidence: l.confidence,
+            span_start: l.span_start,
+            span_end: l.span_end,
+        })
+        .collect();
+    let relations_wire: Vec<SpineRelation> = extraction
+        .relations
+        .iter()
+        .map(|r| SpineRelation {
+            entry_id: r.entry_id,
+            subject_id: r.subject_id,
+            object_id: r.object_id,
+            predicate: r.predicate.clone(),
+            directed: r.directed,
+            surface: r.surface.clone(),
+            confidence: r.confidence,
+            span_start: r.span_start,
+            span_end: r.span_end,
+        })
+        .collect();
+    let _ = event_tx.send(LoopEvent::SpineEntryExtracted {
+        entry_id,
+        entities: entities_wire,
+        relations: relations_wire,
+    });
+}
+
+/// Single resegment pass + outbound `SpineSegmentsUpdated`. Called
+/// once per flush_tree batch by the coordinator task.
+async fn run_resegment(
+    extractor: Arc<crate::spine::SpineExtractor>,
+    event_tx: mpsc::UnboundedSender<LoopEvent>,
+    session_id: SessionId,
+) {
+    let pool = extractor.stores.pg.clone();
+    let llm = extractor.stores.llm.clone();
+    match crate::spine::resegment::resegment(
+        &pool,
+        llm.as_ref(),
+        session_id.0,
+        &crate::spine::resegment::ResegmentOpts::default(),
+    )
+    .await
+    {
+        Ok((report, snapshots)) => {
+            info!(
+                session_id = %session_id.0,
+                created = report.segments_created,
+                updated = report.segments_updated,
+                invalidated = report.segments_invalidated,
+                "spine resegment complete"
+            );
+            let segments_wire: Vec<SpineSegmentSnapshot> = snapshots
+                .into_iter()
+                .map(|s| SpineSegmentSnapshot {
+                    segment_id: s.segment_id,
+                    session_id: s.session_id,
+                    label: s.label,
+                    kind: s.kind,
+                    entry_first: s.entry_first,
+                    entry_last: s.entry_last,
+                    entity_ids: s.entity_ids,
+                    summary: s.summary,
+                })
+                .collect();
+            let _ = event_tx.send(LoopEvent::SpineSegmentsUpdated {
+                session_id,
+                segments: segments_wire,
+            });
+        }
+        Err(e) => warn!(
+            session_id = %session_id.0,
+            error = %e,
+            "spine resegment failed; segments stale"
+        ),
     }
 }
 
@@ -1048,7 +1229,9 @@ impl ConversationLoop {
 fn is_extractable_entry_type(t: &EntryType) -> bool {
     matches!(
         t,
-        EntryType::UserMessage(_) | EntryType::AssistantMessage { .. }
+        EntryType::UserMessage(_)
+            | EntryType::AssistantMessage { .. }
+            | EntryType::AssistantNarration { .. }
     )
 }
 

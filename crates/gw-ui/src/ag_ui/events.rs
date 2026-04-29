@@ -17,7 +17,18 @@ pub enum AgUiEvent {
     /// Start of an assistant-authored text message. Subsequent
     /// `TextMessageContent` / `TextMessageEnd` events with the same
     /// `message_id` belong to this message.
-    TextMessageStart { message_id: String },
+    ///
+    /// `entry_id` is greatwheel's persistent `session_entries.id` for
+    /// this assistant turn — emitted so the frontend can stamp the
+    /// chat row with `data-entry-id` and the spine rail can anchor
+    /// segments to their corresponding chat element. Optional because
+    /// some non-loop emitters (e.g. raw channel sends) don't have a
+    /// tree entry to point at.
+    TextMessageStart {
+        message_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        entry_id: Option<String>,
+    },
     /// Delta of assistant-authored text. Today emitted once per
     /// message with the full content; forward-compatible with a
     /// future stream of many deltas between START/END.

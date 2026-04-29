@@ -53,7 +53,7 @@ export type AgUiEvent =
    *  CONTENT deltas between them carry the text. Today there's one
    *  CONTENT per message with the full text; wire is forward-
    *  compatible with token-level streaming. */
-  | { type: 'TEXT_MESSAGE_START'; message_id: string }
+  | { type: 'TEXT_MESSAGE_START'; message_id: string; entry_id?: string }
   | { type: 'TEXT_MESSAGE_CONTENT'; message_id: string; delta: string }
   | { type: 'TEXT_MESSAGE_END'; message_id: string }
   | { type: 'RUN_STARTED'; run_id?: string }

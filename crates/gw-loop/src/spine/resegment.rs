@@ -108,19 +108,38 @@ pub async fn resegment(
     report.segments_proposed = proposed.len();
 
     let existing = load_current_segments(pool, session_id).await?;
-    let existing_by_range: HashMap<(EntryId, EntryId), &CurrentSegmentRow> = existing
+    // Diff key is `entry_first` alone, not `(entry_first, entry_last)`.
+    // A turn-based segment's identity is the user message that opened
+    // the turn; its range can grow as widget-event pin acks chain
+    // into the same turn, but the segment keeps its segment_id and
+    // its label. Keying on the full range would invalidate-and-recreate
+    // every time the turn extends — paying an LLM relabel call each
+    // time and forcing the rail to flicker through transient ids.
+    let existing_by_first: HashMap<EntryId, &CurrentSegmentRow> = existing
         .iter()
-        .map(|s| ((s.entry_first, s.entry_last), s))
+        .map(|s| (s.entry_first, s))
         .collect();
 
     let mut kept: HashSet<Uuid> = HashSet::new();
     let mut snapshots: Vec<SegmentSnapshot> = Vec::with_capacity(proposed.len());
 
     for prop in &proposed {
-        let key = (prop.entry_first, prop.entry_last);
-        if let Some(prev) = existing_by_range.get(&key) {
+        if let Some(prev) = existing_by_first.get(&prop.entry_first) {
             kept.insert(prev.segment_id);
-            if prev.entity_ids != prop.entity_ids {
+            let range_changed = prev.entry_last != prop.entry_last;
+            let entities_changed = prev.entity_ids != prop.entity_ids;
+            if range_changed {
+                // Extend the segment to its new tail and refresh
+                // entities in one statement.
+                update_segment_range_and_entities(
+                    pool,
+                    prev.segment_id,
+                    prop.entry_last,
+                    &prop.entity_ids,
+                )
+                .await?;
+                report.segments_updated += 1;
+            } else if entities_changed {
                 update_segment_entities(pool, prev.segment_id, &prop.entity_ids).await?;
                 report.segments_updated += 1;
             } else {
@@ -132,18 +151,30 @@ pub async fn resegment(
                 label: prev.label.clone(),
                 kind: prev.kind.clone(),
                 entry_first: prev.entry_first,
-                entry_last: prev.entry_last,
+                entry_last: prop.entry_last,
                 entity_ids: prop.entity_ids.clone(),
                 summary: prev.summary.clone(),
             });
         } else {
-            // Brand-new range — needs an LLM-generated label.
-            let labelled = match label_segment(pool, llm, prop).await {
+            // Brand-new range — needs an LLM-generated label. We
+            // pre-fetch the segment's top entity labels here so both
+            // the LLM call and the fallback can share them — fallback
+            // uses the top entity name as the label rather than a
+            // generic count, keeping the rail readable when the LLM
+            // fails or returns empty.
+            let entity_labels = fetch_top_entity_labels(
+                pool,
+                &prop.entity_ids,
+                PROMPT_ENTITY_BUDGET,
+            )
+            .await
+            .unwrap_or_default();
+            let labelled = match label_segment(pool, llm, prop, &entity_labels).await {
                 Ok(l) => l,
                 Err(e) => {
                     warn!(error = %e, "segment labelling failed; using fallback");
                     report.llm_failures += 1;
-                    fallback_label(prop)
+                    fallback_label(prop, &entity_labels)
                 }
             };
             let segment_id =
@@ -186,14 +217,28 @@ async fn load_entries_with_entity_ids(
 ) -> Result<Vec<SegmentEntry>, LoopError> {
     // One query — left join so entries with no extracted entities
     // still appear (they'll start fresh segments by themselves).
-    type Row = (Uuid, Option<Uuid>);
+    // We pull `entry_type` and the user-message text so we can
+    // derive `is_turn_start` from "is this a *typed* user message?"
+    // — widget-event user messages (e.g. `[widget-event] widget=…
+    // action=click`) chain off the previous typed turn rather than
+    // opening a new segment, so a click-driven pin chain collapses
+    // under the typed query that started it.
+    type Row = (Uuid, String, Option<String>, Option<Uuid>);
     let rows: Vec<Row> = sqlx::query_as(
         r#"
-        SELECT se.id, ee.entity_id
+        SELECT
+            se.id,
+            se.entry_type,
+            CASE
+                WHEN se.entry_type = 'user_message'
+                THEN se.content -> 'UserMessage' #>> '{}'
+                ELSE NULL
+            END AS user_text,
+            ee.entity_id
         FROM session_entries se
         LEFT JOIN session_entry_entities ee ON ee.entry_id = se.id
         WHERE se.session_id = $1
-          AND se.entry_type IN ('user_message', 'assistant_message')
+          AND se.entry_type IN ('user_message', 'assistant_message', 'assistant_narration')
         ORDER BY se.created_at, se.id, ee.entity_id
         "#,
     )
@@ -205,8 +250,10 @@ async fn load_entries_with_entity_ids(
     // Group by entry id, preserving the SQL ordering.
     let mut out: Vec<SegmentEntry> = Vec::new();
     let mut current: Option<SegmentEntry> = None;
-    for (entry_id, entity_id) in rows {
+    for (entry_id, entry_type, user_text, entity_id) in rows {
         let eid = EntryId(entry_id);
+        let is_turn_start = entry_type == "user_message"
+            && !is_widget_event_user_message(user_text.as_deref());
         match &mut current {
             Some(s) if s.entry_id == eid => {
                 if let Some(ent) = entity_id {
@@ -224,6 +271,7 @@ async fn load_entries_with_entity_ids(
                 current = Some(SegmentEntry {
                     entry_id: eid,
                     entity_ids,
+                    is_turn_start,
                 });
             }
         }
@@ -232,6 +280,17 @@ async fn load_entries_with_entity_ids(
         out.push(s);
     }
     Ok(out)
+}
+
+/// Convention used by the literature_assistant (and any agent that
+/// turns widget interactions into synthetic user messages): the
+/// user-message text begins with `[widget-event]`. Those messages
+/// are the agent's own bookkeeping — chaining a click-driven action
+/// off the user's typed query — and shouldn't break the visible
+/// turn block. Returns true when `text` looks like one.
+fn is_widget_event_user_message(text: Option<&str>) -> bool {
+    text.map(|s| s.trim_start().starts_with("[widget-event]"))
+        .unwrap_or(false)
 }
 
 // ─── Loading: current cache ────────────────────────────────────────
@@ -320,6 +379,33 @@ async fn update_segment_entities(
     Ok(())
 }
 
+/// Extend a kept segment's `entry_last` and refresh its `entity_ids`
+/// in one statement — used when a turn-based segment's range grows
+/// because new chained entries (e.g. widget-event pin acks) joined
+/// the same turn block. Without this update path the diff would key
+/// on the new range, miss the old segment, mark it invalidated, and
+/// recreate a fresh row — paying an LLM relabel call for what's
+/// conceptually the same turn.
+async fn update_segment_range_and_entities(
+    pool: &PgPool,
+    segment_id: Uuid,
+    entry_last: EntryId,
+    entity_ids: &[Uuid],
+) -> Result<(), LoopError> {
+    sqlx::query(
+        "UPDATE session_segments \
+         SET entry_last = $2, entity_ids = $3 \
+         WHERE segment_id = $1",
+    )
+    .bind(segment_id)
+    .bind(entry_last.0)
+    .bind(entity_ids)
+    .execute(pool)
+    .await
+    .map_err(|e| LoopError::Spine(format!("update segment range: {e}")))?;
+    Ok(())
+}
+
 /// Mark every current segment of `session_id` not in `kept_ids` as
 /// invalidated. Returns the count invalidated.
 async fn invalidate_unmatched(
@@ -353,16 +439,35 @@ struct SegmentLabel {
     kind: String,
 }
 
-fn fallback_label(prop: &ProposedSegment) -> SegmentLabel {
+/// Label-of-last-resort when the LLM call fails or returns empty.
+/// Prefers the segment's top entity name (lower-cased) so the rail
+/// stays useful — "FAIR-RAG", "ColBERT", "BM25" — rather than
+/// generic counters like "1 entity". Falls back to a count-based
+/// stub only when no entity labels are known.
+fn fallback_label(prop: &ProposedSegment, entity_labels: &[String]) -> SegmentLabel {
+    let label = if let Some(first) = entity_labels.first() {
+        let trimmed = first.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            // Lower-case so it visually matches the LLM-emitted
+            // labels (which the prompt instructs to be lowercase).
+            Some(trimmed.to_lowercase())
+        }
+    } else {
+        None
+    };
     let n = prop.entity_ids.len();
     SegmentLabel {
-        label: if n == 0 {
-            "untagged".into()
-        } else if n == 1 {
-            "1 entity".into()
-        } else {
-            format!("{n} entities")
-        },
+        label: label.unwrap_or_else(|| {
+            if n == 0 {
+                "untagged".into()
+            } else if n == 1 {
+                "1 entity".into()
+            } else {
+                format!("{n} entities")
+            }
+        }),
         kind: "other".into(),
     }
 }
@@ -371,9 +476,8 @@ async fn label_segment(
     pool: &PgPool,
     llm: &OllamaClient,
     prop: &ProposedSegment,
+    entity_labels: &[String],
 ) -> Result<SegmentLabel, LoopError> {
-    let entity_labels =
-        fetch_top_entity_labels(pool, &prop.entity_ids, PROMPT_ENTITY_BUDGET).await?;
     let first_text = fetch_entry_text(pool, prop.entry_first).await?;
     let last_text = if prop.entry_first == prop.entry_last {
         String::new() // single-entry segment — first text covers it
@@ -381,7 +485,7 @@ async fn label_segment(
         fetch_entry_text(pool, prop.entry_last).await?
     };
 
-    let prompt = build_label_prompt(&entity_labels, &first_text, &last_text);
+    let prompt = build_label_prompt(entity_labels, &first_text, &last_text);
     let messages = vec![
         Message {
             role: "system".into(),
@@ -427,8 +531,12 @@ fn build_label_prompt(entity_labels: &[String], first_text: &str, last_text: &st
         \"\"\"\n\
         {last_block}\n\
         Pick a 1-3 word `label` (lowercase, the kind of phrase that'd appear on a research-\
-        notebook tab — e.g. \"recall vs precision\", \"colbert pipeline\", \"benchmark choice\") \
-        and a `kind` from {{{kinds}}}. \
+        notebook tab — e.g. \"recall vs precision\", \"colbert pipeline\", \"benchmark choice\"). \
+        The label MUST be specific enough to distinguish this segment from others in the same \
+        conversation. NEVER emit \"empty segment\", \"untagged\", \"misc\", \"other\", \
+        \"section\", or any placeholder of that kind — if the segment is thin, anchor the label \
+        on the most prominent entity from the list above (e.g. \"fair-rag\", \"tree of reviews\"). \
+        Pick a `kind` from {{{kinds}}}. \
         - comparison: weighing two or more options against each other. \
         - decision: picking one option over others. \
         - deep_dive: exploring one topic in depth. \
@@ -540,6 +648,26 @@ fn parse_label_output(raw: &str) -> Result<SegmentLabel, LoopError> {
             "label_segment returned empty label".into(),
         ));
     }
+    // Guard against the model echoing the placeholder labels the
+    // prompt explicitly bans — these collapse the rail into a row of
+    // "empty segment" markers that don't differentiate anything.
+    let lower = label.to_lowercase();
+    const PLACEHOLDER_LABELS: &[&str] = &[
+        "empty segment",
+        "untagged",
+        "misc",
+        "miscellaneous",
+        "other",
+        "section",
+        "segment",
+        "n/a",
+        "none",
+    ];
+    if PLACEHOLDER_LABELS.iter().any(|p| lower == *p) {
+        return Err(LoopError::Spine(format!(
+            "label_segment returned placeholder label: {label}"
+        )));
+    }
     let kind_raw = parsed.kind.trim().to_lowercase();
     let kind = if RECOMMENDED_KINDS.contains(&kind_raw.as_str()) {
         kind_raw
@@ -611,14 +739,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fallback_label_uses_entity_count() {
+    fn fallback_label_prefers_top_entity_name() {
         let prop = ProposedSegment {
             entry_first: EntryId(Uuid::nil()),
             entry_last: EntryId(Uuid::nil()),
             entity_ids: vec![Uuid::new_v4(); 5],
             entry_ids: vec![EntryId(Uuid::nil())],
         };
-        let l = fallback_label(&prop);
+        let labels = vec!["FAIR-RAG".into(), "ColBERT".into()];
+        let l = fallback_label(&prop, &labels);
+        assert_eq!(l.label, "fair-rag");
+        assert_eq!(l.kind, "other");
+    }
+
+    #[test]
+    fn fallback_label_falls_back_to_count_when_no_labels() {
+        let prop = ProposedSegment {
+            entry_first: EntryId(Uuid::nil()),
+            entry_last: EntryId(Uuid::nil()),
+            entity_ids: vec![Uuid::new_v4(); 5],
+            entry_ids: vec![EntryId(Uuid::nil())],
+        };
+        let l = fallback_label(&prop, &[]);
         assert_eq!(l.label, "5 entities");
         assert_eq!(l.kind, "other");
     }

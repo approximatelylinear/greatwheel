@@ -97,6 +97,7 @@ impl HostBridge for ConversationBridge {
                 let message_id = uuid::Uuid::new_v4().to_string();
                 let _ = self.event_tx.send(LoopEvent::TextMessageStart {
                     message_id: message_id.clone(),
+                    entry_id: None,
                 });
                 let _ = self.event_tx.send(LoopEvent::TextMessageDelta {
                     message_id: message_id.clone(),

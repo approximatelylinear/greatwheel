@@ -564,14 +564,21 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
 
 /* ─── Spine pane (semantic timeline of segments) ─────────────── */
 
+/* The spine pane is a column flexbox: a scrollable rail at the top
+   (whose scrollTop is mirrored from the chat pane so markers stay
+   anchored to their chat row) and an optional sidebar below the
+   rail when a segment is focused. */
 .spine-pane {
-  overflow-y: auto;
-  padding: 28px 14px 32px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   background: var(--bg-soft);
   font-family: var(--font-ui);
 }
 .spine-empty {
-  display: flex; align-items: center; justify-content: center;
+  align-items: center;
+  justify-content: center;
+  padding: 28px 14px 32px;
 }
 .spine-empty-text {
   font-size: 11.5px;
@@ -581,40 +588,59 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
   padding: 0 10px;
   line-height: 1.5;
 }
-/* The rail itself: vertical line + markers. The line is a single
-   left-edge border that the markers' dots sit on top of, so the
-   rail visually "threads" through the segment cards. */
+/* Outer scroll container: matches chat's scrollTop in JS, so markers
+   absolutely-positioned inside `.spine-rail` stay aligned with their
+   anchor chat row. Hides its own scrollbar — the chat already shows
+   one and the two share scrollTop. */
+.spine-rail-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  /* `auto` rather than `hidden` so programmatic scrollTop syncing
+     from the chat scroll handler actually moves the inner rail.
+     The scrollbar is hidden visually since chat already shows one
+     and the two share scrollTop. */
+  overflow-y: auto;
+  scrollbar-width: none; /* Firefox */
+  position: relative;
+  /* No padding-top: marker `top` values are computed in the chat's
+     scroll-content coordinate space (which already includes chat's
+     own padding-top). Adding padding here would double-offset every
+     marker. Side padding is fine — it doesn't shift y. */
+  padding: 0 14px 0 0;
+}
+.spine-rail-scroll::-webkit-scrollbar { width: 0; height: 0; }
+/* Inner content: height set in JS to match chat.scrollHeight so
+   absolute marker tops resolve against the same coordinate space.
+   The vertical line is a left-edge border the dots sit on. */
 .spine-rail {
   position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
   padding-left: 18px;
   border-left: 1px solid var(--border);
   margin-left: 6px;
 }
 .spine-marker {
-  position: relative;
+  /* Markers are absolutely positioned at chat-row y-offsets. The
+     `top` is set inline from the JS layout pass; if missing (no
+     measurement yet) we fall back to flex-style stacking so the
+     rail isn't empty before first measure. */
+  position: absolute;
+  left: 6px;
+  right: 0;
   display: flex;
   align-items: flex-start;
   gap: 0;
-  /* Reset button defaults so the marker reads as a clickable card,
-     not a button. */
   background: transparent;
   border: 0;
-  padding: 0;
   cursor: pointer;
   text-align: left;
-  width: 100%;
   font: inherit;
   color: inherit;
   /* Soft-faded by default; commit-vs-mentioned styling lands in
      Issue #5 with a `.committed` modifier flipping opacity to 1. */
   opacity: 0.85;
-  transition: opacity 120ms ease, background-color 120ms ease;
+  transition: opacity 120ms ease, background-color 120ms ease, top 160ms ease;
   border-radius: var(--radius-sm);
-  padding: 4px 6px 4px 0;
-  margin-left: -6px;
+  padding: 4px 6px 4px 12px;
 }
 .spine-marker:hover {
   opacity: 1;
@@ -637,7 +663,13 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
 /* ─── Sidebar under the rail (focused-segment detail) ────────── */
 
 .spine-sidebar {
-  margin-top: 24px;
+  flex: 0 0 auto;
+  /* Sidebar sits below the rail-scroll in the spine-pane flex column;
+     cap it so it never crowds the rail. Has its own scroll for the
+     entity / relation lists. */
+  max-height: 45%;
+  overflow-y: auto;
+  margin: 12px 14px 14px;
   padding: 12px 12px 14px;
   background: var(--surface-hi);
   border: 1px solid var(--border);
@@ -667,6 +699,47 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
   font: 12px/1.45 var(--font-serif);
   color: var(--fg-dim);
 }
+/* Action menu row above the tabs. Three buttons: revisit / go
+   deeper / compare. Each fires a WidgetInteraction the loop
+   translates into a synthetic prompt + new turn. */
+.spine-action-row {
+  display: flex; gap: 4px;
+  flex-wrap: wrap;
+}
+.spine-action {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column;
+  align-items: center; gap: 2px;
+  padding: 6px 4px 7px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  color: var(--fg-dim);
+  transition: border-color 120ms ease, color 120ms ease,
+    background-color 120ms ease, transform 120ms ease;
+}
+.spine-action:hover {
+  border-color: var(--accent);
+  color: var(--fg);
+  background: var(--surface);
+}
+.spine-action:active {
+  transform: translateY(1px);
+}
+.spine-action-glyph {
+  font-size: 14px;
+  font-family: var(--font-mono);
+  color: var(--accent);
+  line-height: 1;
+}
+.spine-action-label {
+  font: 600 9.5px/1.2 var(--font-ui);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .spine-sidebar-tabs {
   display: flex; gap: 2px;
   border-bottom: 1px solid var(--border);

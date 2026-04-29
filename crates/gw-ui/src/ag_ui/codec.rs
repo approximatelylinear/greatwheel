@@ -16,8 +16,12 @@ use super::events::{AgUiEvent, DebugSpineSegment};
 /// `UiSurfaceStore` notification path).
 pub fn loop_event_to_ag_ui(event: &LoopEvent) -> Option<AgUiEvent> {
     match event {
-        LoopEvent::TextMessageStart { message_id } => Some(AgUiEvent::TextMessageStart {
+        LoopEvent::TextMessageStart {
+            message_id,
+            entry_id,
+        } => Some(AgUiEvent::TextMessageStart {
             message_id: message_id.clone(),
+            entry_id: entry_id.map(|id| id.0.to_string()),
         }),
         LoopEvent::TextMessageDelta {
             message_id, delta, ..
@@ -122,6 +126,7 @@ mod tests {
 
         let start = loop_event_to_ag_ui(&LoopEvent::TextMessageStart {
             message_id: id.clone(),
+            entry_id: None,
         })
         .unwrap();
         assert!(matches!(start, AgUiEvent::TextMessageStart { .. }));
