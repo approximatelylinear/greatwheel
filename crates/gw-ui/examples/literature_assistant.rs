@@ -1531,6 +1531,82 @@ async fn handle_segment_detail(
     }
 }
 
+/// Response body for commit/uncommit — echoes the resulting state so
+/// the frontend can stamp the toggle without an extra fetch.
+#[derive(serde::Serialize)]
+struct SegmentCommitResponse {
+    segment_id: String,
+    committed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+async fn set_segment_committed(
+    pool: &sqlx::PgPool,
+    segment_id: &str,
+    committed: bool,
+) -> Result<axum::Json<SegmentCommitResponse>, (axum::http::StatusCode, String)> {
+    let seg_uuid = uuid::Uuid::parse_str(segment_id).map_err(|_| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid segment id".to_string(),
+        )
+    })?;
+    match gw_loop::spine::query::set_segment_commit(pool, seg_uuid, committed).await {
+        Ok(committed_at) => Ok(axum::Json(SegmentCommitResponse {
+            segment_id: segment_id.to_string(),
+            committed_at,
+        })),
+        Err(e) => {
+            tracing::warn!(error = %e, "set segment commit failed");
+            Err((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                e.to_string(),
+            ))
+        }
+    }
+}
+
+async fn handle_segment_commit(
+    axum::extract::Path((_session_id, segment_id)): axum::extract::Path<(String, String)>,
+    axum::extract::State(pool): axum::extract::State<sqlx::PgPool>,
+) -> Result<axum::Json<SegmentCommitResponse>, (axum::http::StatusCode, String)> {
+    set_segment_committed(&pool, &segment_id, true).await
+}
+
+async fn handle_segment_uncommit(
+    axum::extract::Path((_session_id, segment_id)): axum::extract::Path<(String, String)>,
+    axum::extract::State(pool): axum::extract::State<sqlx::PgPool>,
+) -> Result<axum::Json<SegmentCommitResponse>, (axum::http::StatusCode, String)> {
+    set_segment_committed(&pool, &segment_id, false).await
+}
+
+/// HTTP handler for the workspace listing — all committed segments
+/// for `session_id`, newest commit first. Each item is light enough
+/// to render as a card without a follow-up segment-detail fetch.
+async fn handle_workspace(
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    axum::extract::State(pool): axum::extract::State<sqlx::PgPool>,
+) -> Result<
+    axum::Json<Vec<gw_loop::spine::query::WorkspaceItem>>,
+    (axum::http::StatusCode, String),
+> {
+    let sid = uuid::Uuid::parse_str(&session_id).map_err(|_| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid session id".to_string(),
+        )
+    })?;
+    match gw_loop::spine::query::list_workspace(&pool, sid).await {
+        Ok(items) => Ok(axum::Json(items)),
+        Err(e) => {
+            tracing::warn!(error = %e, "workspace listing failed");
+            Err((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                e.to_string(),
+            ))
+        }
+    }
+}
+
 /// Demo-only fixed UUIDs for the literature_assistant's
 /// org/user/agent_def chain. Stable across runs so re-launching the
 /// binary doesn't pile up rows; ON CONFLICT DO NOTHING makes the
@@ -2215,6 +2291,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .route(
                 "/sessions/{session_id}/segments/{segment_id}",
                 axum::routing::get(handle_segment_detail),
+            )
+            .route(
+                "/sessions/{session_id}/segments/{segment_id}/commit",
+                axum::routing::post(handle_segment_commit),
+            )
+            .route(
+                "/sessions/{session_id}/segments/{segment_id}/uncommit",
+                axum::routing::post(handle_segment_uncommit),
+            )
+            .route(
+                "/sessions/{session_id}/workspace",
+                axum::routing::get(handle_workspace),
             )
             .with_state(pool);
         app_base.merge(spine_router)
