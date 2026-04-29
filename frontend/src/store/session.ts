@@ -88,6 +88,7 @@ type Action =
   | { type: 'append-user'; content: string }
   | { type: 'mark-running' }
   | { type: 'text-message-start'; message_id: string; entry_id?: string }
+  | { type: 'user-message-anchor'; entry_id: string }
   | { type: 'assistant-chunk'; message_id: string; delta: string }
   | { type: 'run-finished' }
   | { type: 'widget-emitted'; widget: Widget }
@@ -131,6 +132,21 @@ function reducer(state: SessionState, action: Action): SessionState {
       };
     case 'mark-running':
       return { ...state, running: true };
+    case 'user-message-anchor': {
+      // FIFO-match the next unstamped user-message row. The local
+      // `appendUser` runs optimistically before any server round-trip,
+      // so the order of locally-appended user messages matches the
+      // order of server-side persistence. Server only emits this for
+      // typed user messages (widget-event synthetic messages skip the
+      // emit), so the FIFO across both sides stays aligned.
+      const idx = state.messages.findIndex(
+        (m) => m.role === 'user' && !m.entryId,
+      );
+      if (idx < 0) return state;
+      const next = state.messages.slice();
+      next[idx] = { ...next[idx]!, entryId: action.entry_id };
+      return { ...state, messages: next };
+    }
     case 'text-message-start': {
       // Buffer the entry_id keyed by message_id; the matching
       // 'assistant-chunk' creates the Message and consumes it. If the
@@ -314,6 +330,8 @@ function agUiToAction(ev: AgUiEvent): Action | null {
     case 'TEXT_MESSAGE_END':
       // Bracket marker, no state change needed today.
       return null;
+    case 'USER_MESSAGE_ANCHOR':
+      return { type: 'user-message-anchor', entry_id: ev.entry_id };
     case 'TEXT_MESSAGE_CONTENT':
       return { type: 'assistant-chunk', message_id: ev.message_id, delta: ev.delta };
     case 'RUN_STARTED':

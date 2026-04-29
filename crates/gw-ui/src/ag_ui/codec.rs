@@ -77,6 +77,9 @@ pub fn loop_event_to_ag_ui(event: &LoopEvent) -> Option<AgUiEvent> {
             is_final: *is_final,
             error: error.clone(),
         }),
+        LoopEvent::UserMessageAnchor { entry_id } => Some(AgUiEvent::UserMessageAnchor {
+            entry_id: entry_id.0.to_string(),
+        }),
         LoopEvent::SpineEntryExtracted {
             entry_id,
             entities,

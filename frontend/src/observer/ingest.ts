@@ -235,9 +235,10 @@ export function observerReducer(
     case 'DEBUG_CODE_EXEC':
     case 'DEBUG_SPINE_ENTRY_EXTRACTED':
     case 'DEBUG_SPINE_SEGMENTS_UPDATED':
+    case 'USER_MESSAGE_ANCHOR':
       // Not rendered directly by the observer in v1; could add a
-      // dedicated panel later. Spine events surface in the
-      // DebugPane's spine tab inside the main App.
+      // dedicated panel later. Spine + user-anchor events surface
+      // in the DebugPane / chat anchors inside the main App.
       return base;
   }
 }

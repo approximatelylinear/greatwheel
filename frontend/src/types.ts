@@ -54,6 +54,9 @@ export type AgUiEvent =
    *  CONTENT per message with the full text; wire is forward-
    *  compatible with token-level streaming. */
   | { type: 'TEXT_MESSAGE_START'; message_id: string; entry_id?: string }
+  /** Stamps the entry_id on the next unmatched user-message Message
+   *  so the chat row can carry `data-entry-id` for spine anchoring. */
+  | { type: 'USER_MESSAGE_ANCHOR'; entry_id: string }
   | { type: 'TEXT_MESSAGE_CONTENT'; message_id: string; delta: string }
   | { type: 'TEXT_MESSAGE_END'; message_id: string }
   | { type: 'RUN_STARTED'; run_id?: string }

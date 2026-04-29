@@ -107,6 +107,15 @@ pub enum AgUiEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// A typed user message has been persisted server-side; carries
+    /// the `session_entries.id` so the frontend can stamp the
+    /// already-rendered chat row (the local optimistic
+    /// `appendUser` runs before any server round-trip). The spine
+    /// rail uses the resulting `data-entry-id` to anchor markers
+    /// to the user's question. Greatwheel-specific extension; the
+    /// `USER_` prefix marks it as outside the AG-UI standard
+    /// vocabulary so spec-strict clients can drop it.
+    UserMessageAnchor { entry_id: String },
     /// Diagnostic: spine extraction landed for one entry. Carries the
     /// counts (entities + relations) plus the entry id so the
     /// DebugPane can correlate with chat messages. Greatwheel-
