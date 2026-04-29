@@ -41,6 +41,11 @@ interface Props {
    *  current state. Optional — when absent the workspace just
    *  refetches on its own next open. */
   onWorkspaceInvalidate?: () => void;
+  /** Issue #6: forwarded to App.tsx so ChatPane can highlight the
+   *  entities of the focused segment in their corresponding chat
+   *  rows. Fires on every successful detail load (segment change /
+   *  refetch) and with `null` when the sidebar unmounts. */
+  onDetailLoaded?: (detail: SegmentDetail | null) => void;
 }
 
 type SpineActionKind = 'revisit' | 'expand' | 'compare';
@@ -94,6 +99,7 @@ export function SpineSidebar({
   onJump,
   onClose,
   onWorkspaceInvalidate,
+  onDetailLoaded,
 }: Props) {
   const [tab, setTab] = useState<Tab>('entities');
   const [detail, setDetail] = useState<SegmentDetail | null>(null);
@@ -111,6 +117,7 @@ export function SpineSidebar({
       .then((d) => {
         setDetail(d);
         setLoading(false);
+        onDetailLoaded?.(d);
       })
       .catch((e: unknown) => {
         // Aborted requests show up as DOMException AbortError; ignore.
@@ -118,7 +125,17 @@ export function SpineSidebar({
         setError(String(e));
         setLoading(false);
       });
-    return () => ac.abort();
+    return () => {
+      ac.abort();
+      // Sidebar unmounting (segment change, focus dismiss) — clear
+      // the upstream cache so the chat-pane highlighter doesn't
+      // keep marking stale entities.
+      onDetailLoaded?.(null);
+    };
+    // onDetailLoaded purposely excluded from deps — its identity may
+    // change every render in the parent (useCallback deps), and we
+    // don't want to refetch just because the callback was rebuilt.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, segmentId]);
 
   const onToggleCommit = async () => {
