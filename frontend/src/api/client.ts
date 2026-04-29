@@ -64,6 +64,13 @@ export interface SegmentSummary {
   entity_count: number;
   summary: string | null;
   created_at: string;
+  /** Set when the user has saved the segment to the workspace
+   *  (Issue #5). Drives the sidebar's "Saved" toggle state. */
+  committed_at: string | null;
+  /** True when a later resegment superseded this segment. Committed
+   *  segments are kept so the workspace can still link to them with
+   *  a "(superseded)" tag. */
+  invalidated: boolean;
 }
 
 export interface EntrySummary {
@@ -96,4 +103,53 @@ export interface RelationRow {
   directed: boolean;
   surface: string;
   confidence: number;
+}
+
+// ─── Workspace (Issue #5) ────────────────────────────────────────
+
+/** One committed segment as it appears in the workspace listing. */
+export interface WorkspaceItem {
+  segment_id: string;
+  label: string;
+  kind: string;
+  entry_first: string;
+  entry_last: string;
+  entity_count: number;
+  top_entities: string[];
+  summary: string | null;
+  committed_at: string;
+  invalidated: boolean;
+}
+
+/** Toggle a segment's commit state. Returns the resulting
+ *  `committed_at` (null when uncommitted) so the caller can stamp
+ *  local state without a refetch. */
+export async function setSegmentCommitted(
+  sessionId: string,
+  segmentId: string,
+  committed: boolean,
+): Promise<{ committed_at: string | null }> {
+  const action = committed ? 'commit' : 'uncommit';
+  const r = await fetch(
+    `${BASE}/sessions/${sessionId}/segments/${segmentId}/${action}`,
+    { method: 'POST' },
+  );
+  if (!r.ok) {
+    throw new Error(`${action} segment ${r.status}: ${await r.text()}`);
+  }
+  return (await r.json()) as { committed_at: string | null };
+}
+
+/** All segments the user has committed in this session. Newest commit
+ *  first. Includes invalidated-but-committed rows so the workspace
+ *  survives resegment churn. */
+export async function fetchWorkspace(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<WorkspaceItem[]> {
+  const r = await fetch(`${BASE}/sessions/${sessionId}/workspace`, { signal });
+  if (!r.ok) {
+    throw new Error(`fetchWorkspace ${r.status}: ${await r.text()}`);
+  }
+  return (await r.json()) as WorkspaceItem[];
 }

@@ -11,6 +11,7 @@ import { MessageInput } from './components/MessageInput';
 import { DragSplitter } from './components/DragSplitter';
 import { SpinePane, type SpineSegment } from './components/SpinePane';
 import { SpineSidebar } from './components/SpineSidebar';
+import { WorkspaceDrawer } from './components/WorkspaceDrawer';
 import { registry } from './jr/registry';
 import type { Widget } from './types';
 import {
@@ -154,6 +155,12 @@ interface AppShellProps {
 function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProps) {
   const branding = useStateValue<{ layout?: string | null }>('/branding');
   const layout = branding?.layout ?? 'chat-primary';
+  // Workspace drawer state (Issue #5). `reloadKey` bumps every time
+  // a SpineSidebar commit toggle fires so the drawer's open-on-mount
+  // refetch sees the new state without us having to keep its list
+  // in sync from outside.
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [workspaceReloadKey, setWorkspaceReloadKey] = useState(0);
   // Widget map + canvas slot — read here so log-line "re-pin" clicks
   // can find the EntityCloud widget and replay the same widget event
   // a point click would have fired.
@@ -317,11 +324,53 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
     }
   }, [focusedSegment]);
 
+  // Workspace card actions (Issue #5).
+  const onWorkspaceInvalidate = useCallback(() => {
+    // Bump the reload key so the drawer refetches on its next open.
+    setWorkspaceReloadKey((k) => k + 1);
+  }, []);
+
+  const onWorkspaceOpenSegment = useCallback(
+    (segmentId: string) => {
+      setWorkspaceOpen(false);
+      // Re-uses the spine focus path so the SpineSidebar takes over
+      // with the same context the user committed from.
+      onSegmentFocus(segmentId);
+    },
+    [onSegmentFocus],
+  );
+
+  const onWorkspaceJump = useCallback(
+    (entryFirst: string, entryLast: string) => {
+      setWorkspaceOpen(false);
+      for (const id of [entryFirst, entryLast]) {
+        if (!id) continue;
+        const el = document.querySelector<HTMLElement>(
+          `[data-entry-id="${id}"]`,
+        );
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          return;
+        }
+      }
+    },
+    [],
+  );
+
   return (
     <div className={`app app-${layout}`}>
       <header className="app-header">
         <BrandedTitle />
         {streamError && <span className="app-error">{streamError}</span>}
+        <button
+          type="button"
+          className="app-workspace-btn"
+          onClick={() => setWorkspaceOpen(true)}
+          title="Open workspace — segments you've saved"
+        >
+          <span aria-hidden>★</span>
+          <span>Workspace</span>
+        </button>
         <span className="app-mark" title={`session ${sessionId}`}>greatwheel</span>
       </header>
       <main
@@ -352,6 +401,7 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
               }
               onJump={onSegmentJump}
               onClose={onSegmentClose}
+              onWorkspaceInvalidate={onWorkspaceInvalidate}
             />
           )}
           <CanvasPane />
@@ -367,6 +417,14 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
       <footer className="app-footer">
         <MessageInput onSend={onSend} disabled={state.running} />
       </footer>
+      <WorkspaceDrawer
+        sessionId={sessionId}
+        open={workspaceOpen}
+        reloadKey={workspaceReloadKey}
+        onClose={() => setWorkspaceOpen(false)}
+        onOpen={onWorkspaceOpenSegment}
+        onJump={onWorkspaceJump}
+      />
     </div>
   );
 }
