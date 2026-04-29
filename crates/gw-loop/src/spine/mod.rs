@@ -44,7 +44,6 @@ pub use extract::SpineExtractor;
 pub use resegment::{resegment, ResegmentOpts, ResegmentReport, SegmentSnapshot};
 pub use segment::{
     segment, ProposedSegment, SegmentEntry, SegmentOpts, DEFAULT_MAX_ENTRIES_PER_SEGMENT,
-    DEFAULT_MIN_SHARED_ENTITIES,
 };
 pub use types::{
     EntryEntityLink, EntryExtraction, EntryRelation, RecommendedPredicate,

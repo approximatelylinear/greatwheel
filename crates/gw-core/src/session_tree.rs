@@ -38,6 +38,18 @@ pub enum EntryType {
         content: String,
         model: Option<String>,
     },
+    /// User-visible narration the agent produced this turn — the
+    /// resolved `FINAL("...")` string or any other prose channelled
+    /// to the chat. Distinct from `AssistantMessage` (which holds the
+    /// LLM's raw response, mostly Python source for tool-using
+    /// agents) so the spine extractor and any downstream "what the
+    /// user actually saw" consumer can read prose without the code
+    /// noise. Persisted alongside the raw assistant entry; the
+    /// frontend's chat row anchors to this entry's id via
+    /// `TEXT_MESSAGE_START.entry_id`.
+    AssistantNarration {
+        content: String,
+    },
     CodeExecution {
         code: String,
         stdout: String,

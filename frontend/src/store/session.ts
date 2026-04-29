@@ -35,6 +35,13 @@ export interface Message {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  /** Persistent `session_entries.id` of the entry that produced this
+   *  message. Sent for assistant messages via `TEXT_MESSAGE_START.entry_id`;
+   *  user messages don't carry it today (the entry is appended server-
+   *  side after the client locally optimistic-renders the user's
+   *  message). The spine rail uses this to anchor segments to chat
+   *  rows via `data-entry-id`. */
+  entryId?: string;
 }
 
 /**
@@ -69,11 +76,18 @@ export interface SessionState {
    *  pane's "spine" tab so the user can see extraction + re-segment
    *  passes as they fire. Capped to keep memory bounded. */
   spineEvents: SpineDebugEvent[];
+  /** Buffer mapping `message_id → entry_id` populated by
+   *  `TEXT_MESSAGE_START`. Drained on the matching `assistant-chunk`
+   *  to stamp `Message.entryId` so the spine can anchor segments to
+   *  chat rows. Server emits START before any CONTENT, so the lookup
+   *  is always populated by the time the message is created. */
+  pendingAssistantEntryIds: Record<string, string>;
 }
 
 type Action =
   | { type: 'append-user'; content: string }
   | { type: 'mark-running' }
+  | { type: 'text-message-start'; message_id: string; entry_id?: string }
   | { type: 'assistant-chunk'; message_id: string; delta: string }
   | { type: 'run-finished' }
   | { type: 'widget-emitted'; widget: Widget }
@@ -101,6 +115,7 @@ const initial: SessionState = {
   messageFollowUps: {},
   pendingFollowUps: [],
   spineEvents: [],
+  pendingAssistantEntryIds: {},
 };
 
 function reducer(state: SessionState, action: Action): SessionState {
@@ -116,6 +131,20 @@ function reducer(state: SessionState, action: Action): SessionState {
       };
     case 'mark-running':
       return { ...state, running: true };
+    case 'text-message-start': {
+      // Buffer the entry_id keyed by message_id; the matching
+      // 'assistant-chunk' creates the Message and consumes it. If the
+      // server omitted entry_id (synthetic emit, no tree entry), we
+      // skip the buffer entry — the message just won't be anchorable.
+      if (!action.entry_id) return state;
+      return {
+        ...state,
+        pendingAssistantEntryIds: {
+          ...state.pendingAssistantEntryIds,
+          [action.message_id]: action.entry_id,
+        },
+      };
+    }
     case 'assistant-chunk': {
       // If the last message is from the assistant with this id, append.
       // Otherwise, start a new assistant message. Either way the agent
@@ -141,15 +170,30 @@ function reducer(state: SessionState, action: Action): SessionState {
         };
         pendingFollowUps = [];
       }
+      // Drain entry_id buffered by the prior TEXT_MESSAGE_START so
+      // the new message carries the data-entry-id anchor the spine
+      // uses for timeline alignment.
+      const entryId = state.pendingAssistantEntryIds[action.message_id];
+      let pendingAssistantEntryIds = state.pendingAssistantEntryIds;
+      if (entryId !== undefined) {
+        pendingAssistantEntryIds = { ...pendingAssistantEntryIds };
+        delete pendingAssistantEntryIds[action.message_id];
+      }
       return {
         ...state,
         messages: [
           ...state.messages,
-          { id: action.message_id, role: 'assistant', content: action.delta },
+          {
+            id: action.message_id,
+            role: 'assistant',
+            content: action.delta,
+            entryId,
+          },
         ],
         running: false,
         messageFollowUps,
         pendingFollowUps,
+        pendingAssistantEntryIds,
       };
     }
     case 'run-finished':
@@ -259,11 +303,16 @@ export function useSessionStore() {
 function agUiToAction(ev: AgUiEvent): Action | null {
   switch (ev.type) {
     case 'TEXT_MESSAGE_START':
+      // Carries entry_id so the spine rail can anchor segments to
+      // chat rows. The reducer buffers it keyed by message_id; the
+      // matching CONTENT event drains it onto Message.entryId.
+      return {
+        type: 'text-message-start',
+        message_id: ev.message_id,
+        entry_id: ev.entry_id,
+      };
     case 'TEXT_MESSAGE_END':
-      // Bracket markers. The reducer's assistant-chunk logic keys on
-      // message_id in the CONTENT events, so no state change is
-      // needed here. Future: clients could use START to show a
-      // placeholder before the first delta arrives.
+      // Bracket marker, no state change needed today.
       return null;
     case 'TEXT_MESSAGE_CONTENT':
       return { type: 'assistant-chunk', message_id: ev.message_id, delta: ev.delta };

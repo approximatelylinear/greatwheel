@@ -63,7 +63,17 @@ pub enum LoopEvent {
     /// `TextMessageDelta` and `TextMessageEnd` events carrying the
     /// same `message_id` belong to this message. Maps to AG-UI
     /// `TEXT_MESSAGE_START`.
-    TextMessageStart { message_id: String },
+    ///
+    /// `entry_id` is the persistent `session_entries.id` for this
+    /// assistant turn — emitted so clients can anchor the rendered
+    /// chat row to spine segments (which index by entry_id). `None`
+    /// when the message isn't tied to a tree entry (e.g. a synthetic
+    /// hand-emitted message from a non-loop code path).
+    TextMessageStart {
+        message_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry_id: Option<EntryId>,
+    },
     /// A delta (partial text) of an in-flight message. Today the
     /// conversation loop emits one of these per message carrying the
     /// full text (LLM output isn't plumbed as a live token stream yet

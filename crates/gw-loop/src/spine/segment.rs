@@ -1,27 +1,26 @@
-//! Segmentation: contiguous-entry clustering by shared entities.
+//! Segmentation: one segment per turn.
 //!
 //! The pure half of design-semantic-spine.md §4.2 — given a list of
-//! entries with their entity-id lists, group adjacent entries into
-//! segments where each entry shares ≥`min_shared_entities` with the
-//! growing segment's entity set, capped at `max_entries_per_segment`.
+//! entries flagged with their turn boundary (`is_turn_start`), group
+//! all entries from one turn-start (inclusive) up to the next into
+//! a single segment, with the union of their entity_ids ranked by
+//! mention count.
 //!
-//! No DB, no LLM, no embedder dependency: the algorithm just operates
-//! on `Vec<Uuid>` per entry. The orchestrator (step B) loads entries +
-//! entity links from Postgres, calls this, then labels new segments
-//! via LLM and diffs against the cache.
+//! "Turn" here = "what the user kicked off with one message." Each
+//! `UserMessage` entry opens a new segment; the assistant_message,
+//! assistant_narration, and code_execution entries that follow it
+//! join that segment until the next user message arrives.
 //!
-//! ### Why not the cosine fallback yet?
+//! This is a deliberate simplification of the earlier shared-entity
+//! contiguity heuristic. In practice the semantic spine reads more
+//! cleanly when each turn is one rail marker carrying everything the
+//! agent did in response to one user input — pin chains, narration
+//! prose, and entities all collect under a single label.
 //!
-//! The design doc allows extending a segment when a new entry's
-//! entity-vector centroid has cosine ≥ 0.6 with the segment's
-//! centroid. That's strictly more permissive than the count-based
-//! check and would catch e.g. "BM25 → ColBERT" → "ColBERT →
-//! cross-encoder rerank" (which share only 1 entity directly but are
-//! topically tight). Implementing it requires loading
-//! `kb_entities.vector` for each entity, which makes the algorithm
-//! DB-touching and turns a unit test into an integration test. Punt
-//! to a follow-up; the count-based heuristic alone produces sensible
-//! groupings on the corpora we have.
+//! No DB, no LLM, no embedder dependency. The orchestrator (step B)
+//! loads entries + entity links from Postgres, derives `is_turn_start`
+//! from `entry_type`, calls this, then labels new segments via LLM
+//! and diffs against the cache.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -29,36 +28,37 @@ use uuid::Uuid;
 
 use gw_core::EntryId;
 
-/// Default minimum shared entities required to extend a segment with
-/// the next entry. Matches design-semantic-spine.md §4.2.
-pub const DEFAULT_MIN_SHARED_ENTITIES: usize = 2;
-/// Default cap on segment length, so one entity-rich span doesn't
-/// monopolise the whole spine.
-pub const DEFAULT_MAX_ENTRIES_PER_SEGMENT: usize = 8;
+/// Default cap on segment length, so one ridiculously long turn
+/// doesn't monopolise the whole spine. Turns rarely exceed this in
+/// practice but the cap keeps the rail predictable.
+pub const DEFAULT_MAX_ENTRIES_PER_SEGMENT: usize = 16;
 
 /// Tunable knobs for the segmenter.
 #[derive(Debug, Clone, Copy)]
 pub struct SegmentOpts {
-    pub min_shared_entities: usize,
     pub max_entries_per_segment: usize,
 }
 
 impl Default for SegmentOpts {
     fn default() -> Self {
         Self {
-            min_shared_entities: DEFAULT_MIN_SHARED_ENTITIES,
             max_entries_per_segment: DEFAULT_MAX_ENTRIES_PER_SEGMENT,
         }
     }
 }
 
-/// One entry's input to segmentation: its id and the canonical
+/// One entry's input to segmentation: its id, the canonical
 /// entity_ids appearing in it (already canonicalised through
-/// `kb_entities` by the spine extractor).
+/// `kb_entities` by the spine extractor), and whether it opens a
+/// new turn (true for `UserMessage` entries, false otherwise).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentEntry {
     pub entry_id: EntryId,
     pub entity_ids: Vec<Uuid>,
+    /// True if this entry opens a new turn — used to mark segment
+    /// boundaries. Set by the orchestrator from the entry's type
+    /// (`user_message` → true, everything else → false).
+    pub is_turn_start: bool,
 }
 
 /// One computed segment: a contiguous range of entries plus the
@@ -78,18 +78,19 @@ pub struct ProposedSegment {
     pub entry_ids: Vec<EntryId>,
 }
 
-/// Segment a sequence of entries by shared-entity contiguity. Returns
+/// Segment a sequence of entries by turn boundary. Returns
 /// segments in entry order. Empty input → empty output.
 ///
-/// Algorithm (greedy single-pass):
+/// Algorithm (single-pass):
 ///   1. The first entry seeds segment 0.
-///   2. For each subsequent entry, count overlap with the current
-///      segment's entity set. If overlap ≥ `min_shared_entities`
-///      AND the segment hasn't hit `max_entries_per_segment`, append.
-///      Otherwise close the segment and start a new one.
-///   3. Singleton entries (no entity overlap with neighbour) become
-///      their own segment. The labeller's fallback ("N entities")
-///      handles those gracefully.
+///   2. For each subsequent entry: if `is_turn_start` is true OR the
+///      current segment has hit `max_entries_per_segment`, close the
+///      current segment and start a new one with this entry.
+///      Otherwise append.
+///
+/// Entries before the first turn-start (rare — typically a system
+/// banner) collect into a leading segment that closes as soon as the
+/// first user message arrives.
 pub fn segment(entries: &[SegmentEntry], opts: &SegmentOpts) -> Vec<ProposedSegment> {
     if entries.is_empty() {
         return Vec::new();
@@ -102,18 +103,14 @@ pub fn segment(entries: &[SegmentEntry], opts: &SegmentOpts) -> Vec<ProposedSegm
     // rank the entity_ids field at segment close.
     let mut cur_counts: std::collections::HashMap<Uuid, (u32, u32)> =
         std::collections::HashMap::new();
-    // (count, first_seen_seq) for ordering: count desc, then
-    // first-seen ascending so ties are stable across runs.
     let mut seq: u32 = 0;
 
     for e in entries {
-        let entry_set: HashSet<Uuid> = e.entity_ids.iter().copied().collect();
+        let must_break = !cur_entry_ids.is_empty()
+            && (e.is_turn_start
+                || cur_entry_ids.len() >= opts.max_entries_per_segment);
 
-        let can_extend = !cur_entry_ids.is_empty()
-            && cur_entry_ids.len() < opts.max_entries_per_segment
-            && entry_set.intersection(&cur_set).count() >= opts.min_shared_entities;
-
-        if !can_extend && !cur_entry_ids.is_empty() {
+        if must_break {
             segments.push(close_segment(&cur_entry_ids, &cur_counts));
             cur_entry_ids.clear();
             cur_set.clear();
@@ -168,12 +165,13 @@ mod tests {
         Uuid::from_bytes(bytes)
     }
 
-    fn entry(id: u8, ents: &[usize]) -> SegmentEntry {
+    fn entry(id: u8, ents: &[usize], is_turn_start: bool) -> SegmentEntry {
         let mut bytes = [0u8; 16];
         bytes[0] = id;
         SegmentEntry {
             entry_id: EntryId(Uuid::from_bytes(bytes)),
             entity_ids: ents.iter().map(|n| ent(*n)).collect(),
+            is_turn_start,
         }
     }
 
@@ -185,62 +183,60 @@ mod tests {
 
     #[test]
     fn single_entry_makes_singleton_segment() {
-        let entries = vec![entry(1, &[1, 2, 3])];
+        let entries = vec![entry(1, &[1, 2, 3], true)];
         let out = segment(&entries, &SegmentOpts::default());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].entry_ids.len(), 1);
-        // Top entities = all three, in first-seen order (counts equal).
         assert_eq!(out[0].entity_ids.len(), 3);
     }
 
     #[test]
-    fn merges_adjacent_when_two_entities_shared() {
+    fn one_turn_collects_all_followers() {
+        // user → assistant → narration → code: all one segment.
         let entries = vec![
-            entry(1, &[1, 2, 3]),
-            // shares {2, 3} with previous → 2 overlap → extend
-            entry(2, &[2, 3, 4]),
-            // shares {3, 4} with current segment {1,2,3,4} → still
-            // ≥2 overlap → extend
-            entry(3, &[3, 4, 5]),
+            entry(1, &[1], true),     // UserMessage
+            entry(2, &[1, 2], false), // AssistantMessage
+            entry(3, &[2, 3], false), // AssistantNarration
+            entry(4, &[3], false),    // CodeExecution (entity-less in practice)
         ];
         let out = segment(&entries, &SegmentOpts::default());
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].entry_ids.len(), 3);
+        assert_eq!(out[0].entry_ids.len(), 4);
+        // Union: {1,2,3}; counts {1:2, 2:2, 3:2}; tiebreak first-seen.
+        assert_eq!(out[0].entity_ids, vec![ent(1), ent(2), ent(3)]);
     }
 
     #[test]
-    fn breaks_when_only_one_entity_shared() {
+    fn second_user_message_opens_new_segment() {
         let entries = vec![
-            entry(1, &[1, 2, 3]),
-            // shares {3} with previous → 1 overlap → break
-            entry(2, &[3, 4, 5]),
+            entry(1, &[1, 2], true),  // turn 1 user
+            entry(2, &[1, 3], false), // turn 1 assistant
+            entry(3, &[4, 5], true),  // turn 2 user
+            entry(4, &[4, 6], false), // turn 2 assistant
         ];
         let out = segment(&entries, &SegmentOpts::default());
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].entry_ids.len(), 1);
-        assert_eq!(out[1].entry_ids.len(), 1);
-    }
-
-    #[test]
-    fn breaks_when_no_entities_shared() {
-        let entries = vec![entry(1, &[1, 2, 3]), entry(2, &[4, 5, 6])];
-        let out = segment(&entries, &SegmentOpts::default());
-        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].entry_ids.len(), 2);
+        assert_eq!(out[1].entry_ids.len(), 2);
+        // Each segment carries only its own turn's entities.
+        assert!(out[0].entity_ids.contains(&ent(1)));
+        assert!(out[0].entity_ids.contains(&ent(3)));
+        assert!(!out[0].entity_ids.contains(&ent(4)));
+        assert!(out[1].entity_ids.contains(&ent(4)));
+        assert!(out[1].entity_ids.contains(&ent(6)));
     }
 
     #[test]
     fn caps_at_max_entries_per_segment() {
-        // Every entry shares 2 entities with the next, so without a
-        // cap they'd all merge into one giant segment.
+        // One huge turn — capped so the spine doesn't get one massive
+        // marker.
         let entries: Vec<SegmentEntry> = (1..=10)
-            .map(|i| entry(i as u8, &[1, 2, 3]))
+            .map(|i| entry(i as u8, &[1], i == 1))
             .collect();
         let opts = SegmentOpts {
             max_entries_per_segment: 4,
-            ..Default::default()
         };
         let out = segment(&entries, &opts);
-        // 10 / 4 = 2 full + 1 remainder of 2
         assert_eq!(out.iter().map(|s| s.entry_ids.len()).sum::<usize>(), 10);
         assert!(out.iter().all(|s| s.entry_ids.len() <= 4));
         assert_eq!(out.len(), 3);
@@ -249,27 +245,26 @@ mod tests {
     #[test]
     fn entity_ranking_by_mention_count() {
         let entries = vec![
-            entry(1, &[1, 2, 3]),
-            entry(2, &[1, 2, 4]),
-            entry(3, &[1, 2, 5]),
+            entry(1, &[1, 2, 3], true),
+            entry(2, &[1, 2, 4], false),
+            entry(3, &[1, 2, 5], false),
         ];
-        // ent(1) and ent(2) appear in all 3 (tied top), ent(3,4,5) in 1.
         let out = segment(&entries, &SegmentOpts::default());
         assert_eq!(out.len(), 1);
         let seg = &out[0];
-        // Top two: counts equal (3), tiebreaker is first-seen → ent(1), ent(2).
+        // Counts: 1→3, 2→3, 3→1, 4→1, 5→1. Top two by count, then
+        // first-seen tiebreak.
         assert_eq!(seg.entity_ids[0], ent(1));
         assert_eq!(seg.entity_ids[1], ent(2));
-        // Remaining three: counts equal (1), first-seen order → ent(3), ent(4), ent(5).
         assert_eq!(seg.entity_ids[2..], [ent(3), ent(4), ent(5)]);
     }
 
     #[test]
     fn entry_first_and_last_match_range() {
         let entries = vec![
-            entry(1, &[1, 2, 3]),
-            entry(2, &[1, 2, 3]),
-            entry(3, &[1, 2, 3]),
+            entry(1, &[1, 2, 3], true),
+            entry(2, &[1, 2, 3], false),
+            entry(3, &[1, 2, 3], false),
         ];
         let out = segment(&entries, &SegmentOpts::default());
         assert_eq!(out.len(), 1);
@@ -278,30 +273,18 @@ mod tests {
     }
 
     #[test]
-    fn singleton_with_no_entities_starts_fresh_segment() {
-        // An entry with empty entity list can never satisfy
-        // min_shared_entities ≥ 2 — it always lands in its own segment.
+    fn entries_before_first_turn_start_get_their_own_segment() {
+        // Defensive: a leading entry that's not a turn-start (rare —
+        // typically a system banner) collects until the first user
+        // message arrives.
         let entries = vec![
-            entry(1, &[1, 2]),
-            entry(2, &[]),
-            entry(3, &[1, 2]),
+            entry(1, &[9], false),    // no turn-start yet
+            entry(2, &[1, 2], true),  // turn 1 user
+            entry(3, &[1, 3], false), // turn 1 assistant
         ];
         let out = segment(&entries, &SegmentOpts::default());
-        assert_eq!(out.len(), 3);
-    }
-
-    #[test]
-    fn min_shared_one_relaxes_grouping() {
-        let entries = vec![
-            entry(1, &[1, 2, 3]),
-            entry(2, &[3, 4, 5]),
-        ];
-        let opts = SegmentOpts {
-            min_shared_entities: 1,
-            ..Default::default()
-        };
-        let out = segment(&entries, &opts);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].entry_ids.len(), 2);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].entry_ids.len(), 1);
+        assert_eq!(out[1].entry_ids.len(), 2);
     }
 }

@@ -265,7 +265,14 @@ fn tree_to_records(conv_loop: &ConversationLoop) -> (Vec<ResultEntry>, Vec<Traje
             | EntryType::ReplSnapshot(_)
             | EntryType::Compaction { .. }
             | EntryType::BranchSummary(_)
-            | EntryType::System(_) => {}
+            | EntryType::System(_)
+            | EntryType::AssistantNarration { .. } => {
+                // Narration is the user-visible FINAL prose — for
+                // benchmark trajectories we already capture it via
+                // the AssistantMessage above (the LLM's raw response
+                // contains the FINAL call), so skipping here avoids
+                // double-counting messages.
+            }
         }
     }
 

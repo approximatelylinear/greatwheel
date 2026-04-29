@@ -196,6 +196,11 @@ impl SpineExtractor {
     ) -> Result<RawJointExtraction, LoopError> {
         let (text, role) = match &entry.entry_type {
             EntryType::UserMessage(s) => (s.as_str(), "user"),
+            // Narration is the resolved FINAL prose the user actually
+            // saw — preferred extraction source for tool-using agents
+            // whose AssistantMessage is mostly Python source. Both
+            // share role "assistant".
+            EntryType::AssistantNarration { content } => (content.as_str(), "assistant"),
             EntryType::AssistantMessage { content, .. } => (content.as_str(), "assistant"),
             // Skip everything else — code, host-fn results, snapshots,
             // compaction summaries, branch summaries, system messages.
@@ -279,7 +284,15 @@ fn build_joint_prompt(text: &str, role: &str) -> String {
         Extract two things:\n\n\
         1) NAMED entities literally mentioned in the turn. For each, choose `kind` from \
         {{{kinds}}}. Skip generic terms (\"the model\", \"our method\"), pronouns, and \
-        anaphoric references. `surface` is the form as it appears; `canonical_form` is \
+        anaphoric references. DO NOT extract UI / metadata field names — words that label \
+        a column, axis, filter, or visual property of a chart rather than name a real \
+        research entity. Examples to REJECT: \"paper\", \"papers\", \"point\", \"points\", \
+        \"point ID\", \"cluster\", \"category\", \"categories\", \"year\", \"label\", \"id\", \
+        \"kind\", \"type\", \"color\", \"axis\", \"filter\", \"row\", \"column\", \"field\", \
+        \"entity\", \"node\", \"edge\". A bare unqualified noun like \"paper\" or \"cluster\" \
+        is never an entity; only proper names (people, datasets, methods, venues, specific \
+        concepts named with a unique identifier or acronym) count. `surface` is the form as \
+        it appears; `canonical_form` is \
         the most complete / standard form (e.g. \"Patrick Lewis\" rather than \"P. Lewis\"; \
         \"Retrieval-Augmented Generation\" rather than \"RAG\"); when you can't improve on \
         the surface, repeat it. `role` is what the turn was DOING with the entity — pick \
@@ -365,7 +378,11 @@ struct RelationWire {
     predicate: String,
     #[serde(default)]
     directed: Option<bool>,
-    #[serde(default)]
+    // `surface` accepts null too — qwen sometimes emits
+    // `"surface": null` when it couldn't anchor the predicate to a
+    // span. Without this the whole payload (entities included) is
+    // rejected and the entry is left with zero spine rows.
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     surface: String,
     #[serde(default)]
     confidence: Option<f64>,

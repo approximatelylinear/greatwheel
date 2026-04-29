@@ -167,6 +167,7 @@ fn entry_type_tag(entry_type: &EntryType) -> &'static str {
     match entry_type {
         EntryType::UserMessage(_) => "user_message",
         EntryType::AssistantMessage { .. } => "assistant_message",
+        EntryType::AssistantNarration { .. } => "assistant_narration",
         EntryType::CodeExecution { .. } => "code_execution",
         EntryType::HostCall { .. } => "host_call",
         EntryType::ReplSnapshot(_) => "repl_snapshot",

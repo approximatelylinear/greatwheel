@@ -110,12 +110,19 @@ pub fn build_turn_context_with_opts(
                 });
             }
             // Skip other entry types (CodeExecution when not include_code_output,
-            // HostCall, ReplSnapshot, System, Compaction)
+            // HostCall, ReplSnapshot, System, Compaction).
+            //
+            // AssistantNarration carries the resolved FINAL prose for
+            // the spine extractor + frontend chat anchoring; the raw
+            // AssistantMessage above already contains the same intent
+            // (as `FINAL("...")` literal or its template), so we omit
+            // narration from LLM context to avoid duplicating turns.
             EntryType::CodeExecution { .. }
             | EntryType::HostCall { .. }
             | EntryType::ReplSnapshot(_)
             | EntryType::Compaction { .. }
-            | EntryType::System(_) => {}
+            | EntryType::System(_)
+            | EntryType::AssistantNarration { .. } => {}
         }
     }
 

@@ -22,7 +22,39 @@ import {
 interface Props {
   sessionId: string;
   segmentId: string;
+  /** Fires a spine action-menu click. The adapter forwards it to
+   *  ConversationLoop, which translates `revisit`/`expand`/`compare`
+   *  into a server-side templated prompt and runs the next turn. */
+  onAction: (action: 'revisit' | 'expand' | 'compare') => void;
 }
+
+type SpineActionKind = 'revisit' | 'expand' | 'compare';
+
+const ACTIONS: Array<{
+  key: SpineActionKind;
+  label: string;
+  glyph: string;
+  hint: string;
+}> = [
+  {
+    key: 'revisit',
+    label: 'Revisit',
+    glyph: '↻',
+    hint: 'Summarise what we concluded and what is still open',
+  },
+  {
+    key: 'expand',
+    label: 'Go deeper',
+    glyph: '↳',
+    hint: "Explore what we haven't covered",
+  },
+  {
+    key: 'compare',
+    label: 'Compare',
+    glyph: '⇄',
+    hint: 'Compare with current direction',
+  },
+];
 
 type Tab = 'entities' | 'relations' | 'notes';
 
@@ -40,7 +72,7 @@ function kindColor(kind: string): string {
   return KIND_COLORS[kind.toLowerCase()] ?? '#a8b1bf';
 }
 
-export function SpineSidebar({ sessionId, segmentId }: Props) {
+export function SpineSidebar({ sessionId, segmentId, onAction }: Props) {
   const [tab, setTab] = useState<Tab>('entities');
   const [detail, setDetail] = useState<SegmentDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -93,6 +125,22 @@ export function SpineSidebar({ sessionId, segmentId }: Props) {
       {segment.summary && (
         <p className="spine-sidebar-summary">{segment.summary}</p>
       )}
+      <div className="spine-action-row">
+        {ACTIONS.map((a) => (
+          <button
+            key={a.key}
+            type="button"
+            className="spine-action"
+            title={a.hint}
+            onClick={() => onAction(a.key)}
+          >
+            <span className="spine-action-glyph" aria-hidden>
+              {a.glyph}
+            </span>
+            <span className="spine-action-label">{a.label}</span>
+          </button>
+        ))}
+      </div>
       <nav className="spine-sidebar-tabs" role="tablist">
         <TabButton
           tab="entities"

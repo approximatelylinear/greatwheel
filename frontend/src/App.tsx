@@ -172,6 +172,13 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
   const spineState = useMemo(() => {
     for (const w of Object.values(widgets)) {
       if (w.kind !== 'A2ui') continue;
+      // Skip superseded / resolved widgets — when the spine fires a
+      // new SpineSegmentsUpdated, the adapter supersedes the old
+      // widget but it stays in /widgets with state="Superseded".
+      // Without this filter the walk can return the stale widget,
+      // leaving the rail showing entity_count=0 even though a newer
+      // widget with the real count is also present.
+      if (w.state !== 'Active') continue;
       if (!('Inline' in w.payload)) continue;
       const inline = (w.payload as { Inline: unknown }).Inline as
         | { type?: unknown; segments?: unknown }
@@ -225,6 +232,27 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
     [sessionId, spineState],
   );
 
+  // Spine action menu: revisit / expand / compare. Each fires a
+  // WidgetInteraction with the action verb; the adapter forwards
+  // it to ConversationLoop, which translates the action + segment
+  // detail into a server-side templated prompt and runs the next
+  // turn. The user sees a real agent response with the synthetic
+  // prompt in the conversation log.
+  const onSegmentAction = useCallback(
+    (segmentId: string, action: 'revisit' | 'expand' | 'compare') => {
+      if (!spineState) return;
+      void postWidgetEvent(sessionId, {
+        widget_id: spineState.widgetId,
+        surface_id: spineState.surfaceId,
+        action,
+        data: { segment_id: segmentId },
+      }).catch(() => {
+        /* surfaced via stream-error path on next event */
+      });
+    },
+    [sessionId, spineState],
+  );
+
   const onRepin = useCallback(
     (arxivId: string) => {
       const cloud = findEntityCloud(widgets, canvasSlot);
@@ -267,6 +295,7 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
             focusedSegmentId={focusedSegmentId}
             onSegmentFocus={onSegmentFocus}
             sessionId={sessionId}
+            onSegmentAction={onSegmentAction}
           />
         )}
         <DragSplitter storageKey={`app.chatW.${layout}`} />
