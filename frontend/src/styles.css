@@ -1570,6 +1570,37 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
   white-space: pre-wrap; word-break: break-all;
 }
 
+/* ─── In-message entity highlights (Issue #6) ────────────────── */
+
+/* `<mark class="entity-mark">` is injected by ChatPane's rehype
+   plugin (markdown rows) and the inline HighlightedText component
+   (plain-text rows) when the focused segment's entity surface
+   forms appear inside a row that falls in the segment's range. */
+.entity-mark {
+  background: color-mix(in oklab, var(--accent) 18%, transparent);
+  color: inherit;
+  padding: 0 2px;
+  border-radius: 3px;
+  border-bottom: 1px solid color-mix(in oklab, var(--accent) 55%, transparent);
+}
+
+/* Subtle left-border accent on rows whose entryId is inside the
+   focused segment's range — pairs with the marks to make the
+   "this is the segment you're reading" boundary visible without
+   being loud about it. */
+.message-row-highlighted {
+  position: relative;
+}
+.message-row-highlighted::before {
+  content: '';
+  position: absolute;
+  top: 0; bottom: 0;
+  left: -10px;
+  width: 2px;
+  background: color-mix(in oklab, var(--accent) 60%, transparent);
+  border-radius: 1px;
+}
+
 /* ─── Workspace drawer (Issue #5) ────────────────────────────── */
 
 .workspace-drawer-backdrop {

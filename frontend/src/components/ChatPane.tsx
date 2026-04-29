@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
@@ -15,6 +16,15 @@ interface Props {
    *  Called from a log-line click when the message matches the
    *  `Pinned · arxiv:<id> · <title>` shape. */
   onRepin: (arxivId: string) => void;
+  /** Issue #6: surface forms / labels / aliases of the focused
+   *  segment's entities. Each occurrence inside a row that falls
+   *  within `highlightRange` gets wrapped in `<mark>` so the user
+   *  can spot them while reading. Empty / undefined → no highlight. */
+  highlightTerms?: string[];
+  /** Issue #6: only highlight rows whose `entryId` falls in this
+   *  range (inclusive on both ends), measured by index in the
+   *  messages array. Mirrors the segment's [entry_first, entry_last]. */
+  highlightRange?: { first: string; last: string };
 }
 
 interface Welcome {
@@ -40,6 +50,8 @@ export function ChatPane({
   messageFollowUps,
   onSuggest,
   onRepin,
+  highlightTerms,
+  highlightRange,
 }: Props) {
   // Widget records, order, and pinned set now live in the json-render
   // StateStore (populated by STATE_SNAPSHOT + STATE_DELTA). Components
@@ -73,11 +85,51 @@ export function ChatPane({
     messages.length === 0 && !running && inlineIds.length === 0;
   const welcome =
     useStateValue<Welcome | null>('/branding/welcome') ?? FALLBACK_WELCOME;
+
+  // Issue #6: build the highlight regex once per terms-list change.
+  // Sort by length descending so "FAIR-RAG" matches before "RAG"
+  // (regex alternation picks the first match at a given position).
+  const highlightRegex = useMemo(
+    () => buildHighlightRegex(highlightTerms),
+    [highlightTerms],
+  );
+
+  // Compute the [firstIdx, lastIdx] inclusive range of messages
+  // whose entryId falls between the segment's entry_first and
+  // entry_last. Lookup is done by entryId match — messages whose
+  // entryId hasn't landed yet (race between SSE and append) just
+  // miss the highlight on this render and get it next time.
+  const highlightIndices = useMemo(() => {
+    if (!highlightRange || !highlightRegex) return null;
+    const firstIdx = messages.findIndex(
+      (m) => m.entryId === highlightRange.first,
+    );
+    const lastIdx = messages.findIndex(
+      (m) => m.entryId === highlightRange.last,
+    );
+    if (firstIdx < 0 && lastIdx < 0) return null;
+    // If only one bound is found, clamp the other to the array edge
+    // so we still highlight the partial range.
+    const lo = firstIdx < 0 ? 0 : firstIdx;
+    const hi = lastIdx < 0 ? messages.length - 1 : lastIdx;
+    return { lo, hi };
+  }, [messages, highlightRange, highlightRegex]);
+
+  // Memoise the rehype plugin so ReactMarkdown doesn't see a new
+  // function identity on every render (would force a full re-parse).
+  const rehypePluginsActive = useMemo(
+    () =>
+      highlightRegex
+        ? [rehypeRaw, rehypeHighlightTerms(highlightRegex)]
+        : [rehypeRaw],
+    [highlightRegex],
+  );
+  const rehypePluginsInert = useMemo(() => [rehypeRaw], []);
   return (
     <div className="chat-pane">
       {isEmpty && <EmptyState welcome={welcome} onSuggest={onSuggest} />}
       <div className="messages" data-chat-messages>
-        {messages.map((m) => {
+        {messages.map((m, idx) => {
           const followUps = messageFollowUps[m.id] ?? [];
           // A "log line" is a short assistant turn with no markdown
           // structure (no headers / lists / code) and no anchored
@@ -92,10 +144,18 @@ export function ChatPane({
           const repin = isAssistantLogLine
             ? parseRepinLogLine(m.content)
             : null;
+          // Issue #6: row falls inside the focused segment's range?
+          const inHighlightRange =
+            highlightRegex != null &&
+            highlightIndices != null &&
+            idx >= highlightIndices.lo &&
+            idx <= highlightIndices.hi;
           return (
             <div
               key={m.id}
-              className="message-row"
+              className={`message-row${
+                inHighlightRange ? ' message-row-highlighted' : ''
+              }`}
               data-entry-id={m.entryId ?? undefined}
               data-message-id={m.id}
               data-role={m.role}
@@ -111,7 +171,16 @@ export function ChatPane({
                   <span className="message-log-title">{repin.title}</span>
                 </button>
               ) : isAssistantLogLine ? (
-                <div className="message-log">{m.content.trim()}</div>
+                <div className="message-log">
+                  {inHighlightRange && highlightRegex ? (
+                    <HighlightedText
+                      text={m.content.trim()}
+                      regex={highlightRegex}
+                    />
+                  ) : (
+                    m.content.trim()
+                  )}
+                </div>
               ) : (
                 <div className={`message message-${m.role}`}>
                   <div className="message-role">{m.role}</div>
@@ -119,10 +188,19 @@ export function ChatPane({
                     {m.role === 'assistant' ? (
                       <ReactMarkdown
                         remarkPlugins={[remarkGfm]}
-                        rehypePlugins={[rehypeRaw]}
+                        rehypePlugins={
+                          inHighlightRange
+                            ? rehypePluginsActive
+                            : rehypePluginsInert
+                        }
                       >
                         {pullQuote(normaliseNewlines(m.content))}
                       </ReactMarkdown>
+                    ) : inHighlightRange && highlightRegex ? (
+                      <HighlightedText
+                        text={m.content}
+                        regex={highlightRegex}
+                      />
                     ) : (
                       m.content
                     )}
@@ -254,4 +332,144 @@ function TypingBubble() {
       </div>
     </div>
   );
+}
+
+/* ─── Issue #6: in-message entity highlighting ──────────────────── */
+
+/** Build a single case-insensitive regex from the highlight terms.
+ *  Returns null when there's nothing useful to match — empty list,
+ *  or every term shorter than 2 chars (which would cause noise on
+ *  any prose). Sorts terms by length descending so longer matches
+ *  win the alternation (e.g. "FAIR-RAG" beats "RAG"). */
+function buildHighlightRegex(terms: string[] | undefined): RegExp | null {
+  if (!terms || terms.length === 0) return null;
+  const usable = Array.from(
+    new Set(
+      terms
+        .map((t) => t.trim())
+        .filter((t) => t.length >= 2),
+    ),
+  );
+  if (usable.length === 0) return null;
+  usable.sort((a, b) => b.length - a.length);
+  const escaped = usable.map((t) =>
+    t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+  );
+  // \b is ASCII-only in JS regex but works for all our entity surface
+  // forms in practice (acronyms + name-ish tokens). Hyphenated names
+  // like "FAIR-RAG" still match because the inner `-` is literal —
+  // \b at the boundaries (before F, after G) hits non-word chars.
+  return new RegExp(`\\b(?:${escaped.join('|')})\\b`, 'gi');
+}
+
+/** Render plain text with regex matches wrapped in `<mark>`. Used
+ *  for log lines and user-message rows where ReactMarkdown isn't
+ *  in play. */
+function HighlightedText({ text, regex }: { text: string; regex: RegExp }) {
+  const parts = useMemo(() => splitOnRegex(text, regex), [text, regex]);
+  return (
+    <>
+      {parts.map((p, i) =>
+        p.match ? (
+          <mark key={i} className="entity-mark">
+            {p.text}
+          </mark>
+        ) : (
+          <span key={i}>{p.text}</span>
+        ),
+      )}
+    </>
+  );
+}
+
+interface RegexPart {
+  text: string;
+  match: boolean;
+}
+
+function splitOnRegex(text: string, regex: RegExp): RegexPart[] {
+  const parts: RegexPart[] = [];
+  let last = 0;
+  // Defensive: clone the regex with a fresh lastIndex so reuse
+  // across calls doesn't drop matches mid-string.
+  const re = new RegExp(regex.source, regex.flags);
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) {
+      parts.push({ text: text.slice(last, m.index), match: false });
+    }
+    parts.push({ text: m[0], match: true });
+    last = m.index + m[0].length;
+    // Guard against zero-width matches (shouldn't happen with our
+    // pattern but defensive for future regex changes).
+    if (m[0].length === 0) re.lastIndex++;
+  }
+  if (last < text.length) {
+    parts.push({ text: text.slice(last), match: false });
+  }
+  return parts.length > 0 ? parts : [{ text, match: false }];
+}
+
+/** Rehype plugin (no external deps) that walks the HAST tree from
+ *  ReactMarkdown and wraps regex matches inside text nodes with
+ *  `<mark class="entity-mark">`. Skips `<code>` / `<pre>` so we
+ *  don't garble code blocks, and skips text already inside `<mark>`
+ *  (defensive — we only mount this plugin on focused-segment rows
+ *  but a future caller might double-wrap).  */
+type HastNode = {
+  type: string;
+  tagName?: string;
+  value?: string;
+  children?: HastNode[];
+  properties?: Record<string, unknown>;
+};
+
+function rehypeHighlightTerms(regex: RegExp) {
+  const SKIP_TAGS = new Set(['code', 'pre', 'mark', 'script', 'style']);
+  return () => (tree: HastNode) => {
+    walk(tree, false);
+    function walk(node: HastNode, insideSkip: boolean) {
+      if (!node.children) return;
+      const out: HastNode[] = [];
+      for (const child of node.children) {
+        if (
+          child.type === 'element' &&
+          child.tagName &&
+          SKIP_TAGS.has(child.tagName)
+        ) {
+          // Pass through unchanged but recurse so nested marks still
+          // get their inert text preserved.
+          walk(child, true);
+          out.push(child);
+          continue;
+        }
+        if (child.type === 'text' && !insideSkip && child.value) {
+          const parts = splitOnRegex(child.value, regex);
+          if (parts.length === 1 && !parts[0]!.match) {
+            out.push(child);
+          } else {
+            for (const p of parts) {
+              if (!p.text) continue;
+              if (p.match) {
+                out.push({
+                  type: 'element',
+                  tagName: 'mark',
+                  properties: { className: ['entity-mark'] },
+                  children: [{ type: 'text', value: p.text }],
+                });
+              } else {
+                out.push({ type: 'text', value: p.text });
+              }
+            }
+          }
+          continue;
+        }
+        if (child.children) {
+          walk(child, insideSkip);
+        }
+        out.push(child);
+      }
+      node.children = out;
+    }
+  };
 }

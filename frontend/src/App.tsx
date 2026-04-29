@@ -12,6 +12,7 @@ import { DragSplitter } from './components/DragSplitter';
 import { SpinePane, type SpineSegment } from './components/SpinePane';
 import { SpineSidebar } from './components/SpineSidebar';
 import { WorkspaceDrawer } from './components/WorkspaceDrawer';
+import type { SegmentDetail } from './api/client';
 import { registry } from './jr/registry';
 import type { Widget } from './types';
 import {
@@ -161,6 +162,39 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
   // in sync from outside.
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [workspaceReloadKey, setWorkspaceReloadKey] = useState(0);
+  // Issue #6: focused segment's loaded detail, captured from the
+  // SpineSidebar so ChatPane can highlight the segment's entities
+  // in the corresponding chat rows. Cleared on focus dismiss.
+  const [focusedDetail, setFocusedDetail] = useState<SegmentDetail | null>(
+    null,
+  );
+
+  const onSegmentDetailLoaded = useCallback((d: SegmentDetail | null) => {
+    setFocusedDetail(d);
+  }, []);
+
+  // Build the highlight terms list — entity label + each alias —
+  // from the focused segment's detail. Skipping entries with no
+  // detail keeps ChatPane's highlight off when nothing's focused.
+  const highlightTerms = useMemo(() => {
+    if (!focusedDetail) return undefined;
+    const out: string[] = [];
+    for (const e of focusedDetail.entities) {
+      if (e.label) out.push(e.label);
+      for (const a of e.aliases) {
+        if (a) out.push(a);
+      }
+    }
+    return out;
+  }, [focusedDetail]);
+
+  const highlightRange = useMemo(() => {
+    if (!focusedDetail) return undefined;
+    return {
+      first: focusedDetail.segment.entry_first,
+      last: focusedDetail.segment.entry_last,
+    };
+  }, [focusedDetail]);
   // Widget map + canvas slot — read here so log-line "re-pin" clicks
   // can find the EntityCloud widget and replay the same widget event
   // a point click would have fired.
@@ -441,6 +475,8 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
           messageFollowUps={state.messageFollowUps}
           onSuggest={onSend}
           onRepin={onRepin}
+          highlightTerms={highlightTerms}
+          highlightRange={highlightRange}
         />
         {spineSegments && (
           <SpinePane
@@ -461,6 +497,7 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
               onJump={onSegmentJump}
               onClose={onSegmentClose}
               onWorkspaceInvalidate={onWorkspaceInvalidate}
+              onDetailLoaded={onSegmentDetailLoaded}
             />
           )}
           <CanvasPane />
