@@ -1,0 +1,30 @@
+{
+  "metadata": {
+    "model": "qwen3.5:9b",
+    "llm_backend": "ollama",
+    "llm_url": "http://localhost:11434",
+    "searcher": "rlm-ouros",
+    "max_turns": 12,
+    "k": 10
+  },
+  "query_id": "1002",
+  "tool_call_counts": {"search": 2},
+  "usage": {"input_tokens": 6000, "output_tokens": 600, "total_tokens": 6600},
+  "timing": {
+    "total_ms": 90000,
+    "bm25_ms": 15,
+    "embed_ms": 0,
+    "vector_ms": 0,
+    "llm_query_ms": 0,
+    "get_doc_ms": 0,
+    "root_llm_ms": 89000,
+    "other_ms": 985
+  },
+  "status": "completed",
+  "termination_reason": "final_called",
+  "iterations_used": 5,
+  "retrieved_docids": ["40", "50"],
+  "result": [
+    {"type": "output_text", "tool_name": null, "arguments": null, "output": "Exact Answer: Beethoven"}
+  ]
+}

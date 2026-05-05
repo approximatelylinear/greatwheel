@@ -1,0 +1,30 @@
+{
+  "metadata": {
+    "model": "qwen3.5:9b",
+    "llm_backend": "ollama",
+    "llm_url": "http://localhost:11434",
+    "searcher": "rlm-ouros",
+    "max_turns": 12,
+    "k": 10
+  },
+  "query_id": "1003",
+  "tool_call_counts": {"search": 2},
+  "usage": {"input_tokens": 4000, "output_tokens": 400, "total_tokens": 4400},
+  "timing": {
+    "total_ms": 80000,
+    "bm25_ms": 10,
+    "embed_ms": 0,
+    "vector_ms": 0,
+    "llm_query_ms": 0,
+    "get_doc_ms": 0,
+    "root_llm_ms": 79000,
+    "other_ms": 990
+  },
+  "status": "completed",
+  "termination_reason": "final_called",
+  "iterations_used": 3,
+  "retrieved_docids": [],
+  "result": [
+    {"type": "output_text", "tool_name": null, "arguments": null, "output": "Exact Answer: Camberra"}
+  ]
+}

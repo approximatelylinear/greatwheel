@@ -1,0 +1,30 @@
+{
+  "metadata": {
+    "model": "qwen3.5:9b",
+    "llm_backend": "ollama",
+    "llm_url": "http://localhost:11434",
+    "searcher": "rlm-ouros",
+    "max_turns": 12,
+    "k": 10
+  },
+  "query_id": "1003",
+  "tool_call_counts": {"search": 4},
+  "usage": {"input_tokens": 9000, "output_tokens": 700, "total_tokens": 9700},
+  "timing": {
+    "total_ms": 150000,
+    "bm25_ms": 25,
+    "embed_ms": 0,
+    "vector_ms": 0,
+    "llm_query_ms": 0,
+    "get_doc_ms": 0,
+    "root_llm_ms": 149000,
+    "other_ms": 975
+  },
+  "status": "completed",
+  "termination_reason": "final_called",
+  "iterations_used": 8,
+  "retrieved_docids": [],
+  "result": [
+    {"type": "output_text", "tool_name": null, "arguments": null, "output": "Exact Answer: Sydney"}
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "metadata": {
+    "model": "qwen3.5:9b",
+    "llm_backend": "ollama",
+    "llm_url": "http://localhost:11434",
+    "searcher": "rlm-ouros",
+    "max_turns": 12,
+    "k": 10
+  },
+  "query_id": "1001",
+  "tool_call_counts": {"search": 2},
+  "usage": {"input_tokens": 5000, "output_tokens": 500, "total_tokens": 5500},
+  "timing": {
+    "total_ms": 100000,
+    "bm25_ms": 10,
+    "embed_ms": 0,
+    "vector_ms": 0,
+    "llm_query_ms": 0,
+    "get_doc_ms": 0,
+    "root_llm_ms": 99000,
+    "other_ms": 990
+  },
+  "status": "completed",
+  "termination_reason": "final_called",
+  "iterations_used": 4,
+  "retrieved_docids": ["10", "20"],
+  "result": [
+    {"type": "tool_call", "tool_name": "search", "arguments": {"q": "philippines"}, "output": null},
+    {"type": "output_text", "tool_name": null, "arguments": null, "output": "Reasoning...\nExact Answer: Tagalog\n"}
+  ]
+}
