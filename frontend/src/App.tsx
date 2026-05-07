@@ -12,6 +12,7 @@ import { DragSplitter } from './components/DragSplitter';
 import { SpinePane, type SpineSegment } from './components/SpinePane';
 import { SpineSidebar } from './components/SpineSidebar';
 import { WorkspaceDrawer } from './components/WorkspaceDrawer';
+import { WikiPane } from './components/WikiPane';
 import type { EntityCard, SegmentDetail } from './api/client';
 import { registry } from './jr/registry';
 import type { Widget } from './types';
@@ -243,6 +244,7 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
   // a point click would have fired.
   const widgets = useStateValue<Record<string, Widget>>('/widgets') ?? {};
   const canvasSlot = useStateValue<string | null>('/canvasSlot') ?? null;
+  const wikiSlot = useStateValue<string | null>('/wikiSlot') ?? null;
 
   // Find the SemanticSpine widget the AG-UI adapter emits/supersedes
   // on each SpineSegmentsUpdated. Only one is live per session at a
@@ -476,6 +478,20 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
     [onSegmentFocus],
   );
 
+  const onWikiClose = useCallback(() => {
+    if (!wikiSlot) return;
+    const w = widgets[wikiSlot];
+    if (!w) return;
+    void postWidgetEvent(sessionId, {
+      widget_id: w.id,
+      surface_id: w.surface_id,
+      action: 'close_wiki',
+      data: {},
+    }).catch(() => {
+      /* surfaced via stream-error path on next event */
+    });
+  }, [sessionId, widgets, wikiSlot]);
+
   const onWorkspaceJump = useCallback(
     (entryFirst: string, entryLast: string) => {
       setWorkspaceOpen(false);
@@ -566,6 +582,7 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
         onOpen={onWorkspaceOpenSegment}
         onJump={onWorkspaceJump}
       />
+      <WikiPane onClose={onWikiClose} />
     </div>
   );
 }

@@ -23,6 +23,7 @@ pub mod server;
 pub mod source;
 pub mod synthesize;
 pub mod topics;
+pub mod wiki;
 
 pub use error::KbError;
 pub use extract::Extracted;

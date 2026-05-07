@@ -7,6 +7,7 @@ import { SpinePane } from '../components/SpinePane';
 import { CodeBlock } from '../widgets/CodeBlock';
 import { DifficultyMatrixWidget } from '../widgets/DifficultyMatrixWidget';
 import { CostTrendWidget } from '../widgets/CostTrendWidget';
+import { KbDocWikiWidget, type WikiDoc } from '../widgets/KbDocWiki';
 
 function formatCell(v: unknown): string {
   if (v == null) return '—';
@@ -148,6 +149,14 @@ const built = defineRegistry(spikeCatalog, {
     ),
     CostTrend: ({ props }) => (
       <CostTrendWidget rows={props.rows} metric={props.metric ?? 'tokens'} />
+    ),
+    KbDocWiki: ({ props, emit }) => (
+      <KbDocWikiWidget
+        doc={props.doc as unknown as WikiDoc}
+        onEntityClick={(id) => emit(`entity:${id}`)}
+        onTopicClick={(id) => emit(`topic:${id}`)}
+        onClose={() => emit('close')}
+      />
     ),
     EntityCloud: ({ props, emit }) => (
       <EntityCloudWidget

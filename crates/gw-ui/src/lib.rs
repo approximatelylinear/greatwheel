@@ -7,6 +7,7 @@
 pub mod ag_ui;
 pub mod mcp_ui;
 pub mod plugin;
+pub mod sessions_api;
 pub mod surface;
 
 pub use ag_ui::{AgUiAdapter, AgUiEvent};

@@ -133,6 +133,56 @@ export const spikeCatalog = defineCatalog(schema, {
       description:
         'Inline sparkline of token usage (default) or estimated USD per run, sorted by `mtime`. `est_usd` is null for local-Ollama rows; if `metric: "usd"` and any rows are null, those points are omitted from the line.',
     },
+    KbDocWiki: {
+      props: z.object({
+        doc: z.object({
+          source: z.object({
+            source_id: z.string(),
+            title: z.string(),
+            author: z.string().nullable().optional(),
+            url: z.string().nullable().optional(),
+            file_path: z.string().nullable().optional(),
+            source_format: z.string(),
+            published_at: z.string().nullable().optional(),
+            ingested_at: z.string(),
+            metadata: z.unknown(),
+          }),
+          toc: z.array(
+            z.object({
+              anchor: z.string(),
+              label: z.string(),
+              depth: z.number().int(),
+            }),
+          ),
+          sections: z.array(
+            z.object({
+              anchor: z.string(),
+              heading_path: z.array(z.string()),
+              markdown: z.string(),
+            }),
+          ),
+          entities: z.array(
+            z.object({
+              entity_id: z.string(),
+              label: z.string(),
+              slug: z.string(),
+              kind: z.string(),
+              mentions_in_doc: z.number().int(),
+            }),
+          ),
+          topics: z.array(
+            z.object({
+              topic_id: z.string(),
+              label: z.string(),
+              slug: z.string(),
+              chunks_in_doc: z.number().int(),
+            }),
+          ),
+        }),
+      }),
+      description:
+        'Wikipedia-style view of one KB source — infobox, TOC, sections (chunks grouped by heading_path), mentioned entities, referenced topics. Built by the kb_get_wiki host fn. Renders in the wiki_slot drawer; entity/topic clicks fire interact with action="open_kb_entity" / "open_kb_topic".',
+    },
     EntityCloud: {
       props: z.object({
         points: z.array(

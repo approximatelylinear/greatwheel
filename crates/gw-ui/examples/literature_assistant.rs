@@ -35,6 +35,7 @@ use gw_loop::{
     ConversationLoop, LoopConfig, OllamaLlmClient, PgSessionStore, SessionTree, SnapshotPolicy,
 };
 use gw_runtime::ReplAgent;
+use gw_ui::sessions_api::{self, SessionsApiConfig};
 use gw_ui::{AgUiAdapter, UiPlugin, UiSurfaceStore};
 use ouros::Object;
 use serde_json::{json, Value};
@@ -88,12 +89,19 @@ UI host functions (same as the other demos):
   - supersede_widget(old_widget_id, session_id, kind, payload, ...)
   - pin_to_canvas(widget_id)
   - pin_below_canvas(widget_id)
+  - pin_to_wiki(widget_id) — pins a widget into the dedicated wiki drawer (a big right-side overlay). Use this for KbDocWiki only; the drawer hosts one doc at a time.
   - FINAL("text") — terminates the turn with a chat narration.
 
-The frontend's json-render catalog includes one literature-specific widget type:
+KB host functions:
+  - kb_get_wiki(source_ref) -> dict
+      Returns a Wikipedia-style payload for one ingested KB source: `{source: {title, author, url, ...}, toc, sections, entities, topics}`. `source_ref` accepts a UUID, UUID prefix (>=4 chars), full source URL, or arXiv id (e.g. "2504.13684"). Errors with a clear message if no source matches. Use this together with `pin_to_wiki` to open the wiki drawer for a paper.
+
+The frontend's json-render catalog includes two literature-specific widget types:
 
   - EntityCloud: payload {"type": "EntityCloud", "points": [{"id", "label", "x", "y", "kind"?, "cluster"?: int, "year"?: str, "category"?: str}, ...], "clusters"?: [{"id": int, "label": str, "x": float, "y": float}], "highlight"?: {<id>: true}}.
     Each point renders at its (x, y) position; the `cluster` field colours it (palette cycles every 8). The optional `clusters` array adds faint always-on centroid labels (your short cluster names like "retrieval methods", "agent eval"). Send the FULL paper title in `label` — the frontend wraps it in a hover card. `year` and `category` (e.g. "2024", "cs.CL") show up in the hover meta row. Click delivers a `[widget-event] action=select data={"pointId": "<arxiv_id>", ...}` line into your context.
+
+  - KbDocWiki: payload {"type": "KbDocWiki", "doc": <full kb_get_wiki return value>}. Renders a Wikipedia-style page (infobox + TOC + sections + entity/topic chips) inside a big right-side drawer. Pass the dict you got from `kb_get_wiki(...)` straight through as `doc`. ALWAYS emit with `multi_use=True` so chip clicks don't terminate the widget on first interaction. Pin it with `pin_to_wiki(widget_id=...)` (NOT `pin_to_canvas`). Entity/topic chip clicks deliver `[widget-event] action=open_kb_entity data={"entity_id", "slug"}` / `action=open_kb_topic data={...}`. The user closing the drawer is handled server-side — you do NOT receive a `close_wiki` event.
 
 # Turn 1 — user asks a topic question
 
@@ -273,7 +281,17 @@ detail = {
         {"type": "Text",
          "text": f"arXiv {arxiv_id} · {paper.get('published', '')[:10]} · {paper.get('category', '')}"},
         {"type": "Text", "text": paper.get("summary", "")},
-        {"type": "Link", "url": paper.get("url", ""), "label": "View on arXiv ↗"},
+        {"type": "Row", "children": [
+            {"type": "Link", "url": paper.get("url", ""), "label": "View on arXiv ↗"},
+            # Opens the wiki drawer for this paper. Click delivers
+            # `[widget-event] action=open_kb_doc data={"arxiv_id": "..."}`
+            # into your context — handle it via the "Turn N — open KB
+            # doc as wiki" section below.
+            {"type": "Button", "id": "btn-wiki",
+             "label": "📖 Open as wiki",
+             "action": "open_kb_doc",
+             "data": {"arxiv_id": arxiv_id}},
+        ]},
         {"type": "Text", "text": "Nearest neighbors:"},
         {"type": "Column", "children": neighbor_cards},
     ],
@@ -299,6 +317,34 @@ emit_widget(
 FINAL(f"Pinned · arxiv:{arxiv_id} · {paper['title']}")
 ```
 
+# Turn N — open KB doc as wiki
+
+Triggered by **either**:
+  (a) Natural language — the user asks "show the wiki for X", "open the wiki for 2504.13684", "wiki view of <paper title>", or similar. Pull the arXiv id (or paper title) from the user's message.
+  (b) A click on the "📖 Open as wiki" button in the paper detail card. The widget event arrives as a literal line in your context:
+      `[widget-event] action=open_kb_doc data={"arxiv_id": "2504.13684"}`
+      Read the `arxiv_id` value out of that text the same way you read `pointId` for drill-downs.
+
+Either way, single iteration:
+
+```python
+arxiv_id = "<paste-the-arxiv-id-here>"  # e.g. "2504.13684"
+# kb_get_wiki accepts arxiv ids directly — no need to look up a source UUID first.
+doc = kb_get_wiki(arxiv_id)
+result = emit_widget(
+    session_id=gw_session_id,
+    kind="a2ui",
+    multi_use=True,  # REQUIRED — chip clicks must not terminate the widget
+    payload={"type": "KbDocWiki", "doc": doc},
+)
+pin_to_wiki(widget_id=result["widget_id"])
+FINAL(f"Opened wiki · {doc['source']['title']}")
+```
+
+If `kb_get_wiki` raises (paper not yet ingested, KB not configured), FINAL gracefully: `FINAL("That paper isn't in the KB yet — run a search that surfaces it first.")` Don't fall back to `pin_to_canvas`; the wiki view only makes sense in the wiki drawer.
+
+When the user clicks an entity or topic chip inside the drawer you'll see `[widget-event] action=open_kb_entity data={"entity_id", "slug"}` / `action=open_kb_topic data=...`. For now treat these as informational and FINAL a one-line ack ("That entity has N other mentions in your library — search '<slug>' to see them.") — full entity/topic drill-downs are a future expansion.
+
 # Turn N — user types a follow-up text question
 
 If the user types something like "show me the most recent ones" or "what cluster is bottom-left?", run a fresh search or describe the layout — same two-iteration pattern, FINAL with prose.
@@ -307,6 +353,7 @@ If the user types something like "show me the most recent ones" or "what cluster
 
   - The EntityCloud widget always pins to the **primary** canvas (`pin_to_canvas`) with `multi_use=True`. It's the persistent workspace; clicks on points should not terminate it.
   - Per-paper detail widgets pin to the **aux** slot (`pin_below_canvas`) with a `scope={"kind": "paper", "key": <id>}` so they auto-hide when the user navigates away.
+  - The KbDocWiki widget pins to the **wiki** slot (`pin_to_wiki`) with `multi_use=True`. Never `pin_to_canvas` it — the canvas is for navigation, the wiki drawer is for reading. No `scope` either; the drawer holds at most one wiki at a time and the user closes it explicitly.
   - Do NOT scope the EntityCloud itself.
   - Cap max_results at 50; arXiv pagination kicks in past that.
   - If arxiv_search returns 0 papers, FINAL gracefully: "No papers found for that query — try a broader topic."
@@ -2214,6 +2261,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "resolve_widget".into(),
         "pin_to_canvas".into(),
         "pin_below_canvas".into(),
+        "pin_to_wiki".into(),
         "highlight_button".into(),
         "arxiv_search".into(),
         "embed_papers".into(),
@@ -2224,6 +2272,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "fetch_paper_text".into(),
         "kb_paper_count".into(),
         "entity_extraction_status".into(),
+        "kb_get_wiki".into(),
     ];
     let mut repl = ReplAgent::new(external_fns, Box::new(conv_bridge));
     repl.set_variable("gw_session_id", Object::String(session_id.0.to_string()))
@@ -2304,8 +2353,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "/sessions/{session_id}/workspace",
                 axum::routing::get(handle_workspace),
             )
-            .with_state(pool);
-        app_base.merge(spine_router)
+            .with_state(pool.clone());
+        // Sessions sidebar API — orthogonal to spine, but gated on
+        // the same KB-configured branch since it also needs PG.
+        let sessions_router = sessions_api::router(
+            pool,
+            SessionsApiConfig {
+                default_org_id: LIT_ORG_ID,
+                default_agent_id: LIT_AGENT_ID,
+            },
+        );
+        app_base.merge(spine_router).merge(sessions_router)
     } else {
         app_base
     };

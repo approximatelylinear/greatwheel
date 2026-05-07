@@ -54,6 +54,7 @@ use crate::linking::{
 use crate::search::hybrid_search;
 use crate::synthesize::fetch_summary;
 use crate::topics::{fetch_topic_by_slug, list_topic_summaries};
+use crate::wiki::{fetch_wiki_doc, resolve_source_for_wiki};
 
 /// Capability string declared by every read-only KB host function.
 pub const KB_READ_CAPABILITY: &str = "kb.read";
@@ -86,6 +87,7 @@ impl Plugin for KbPlugin {
                 "host_fn:kb_topics".into(),
                 "host_fn:kb_entities".into(),
                 "host_fn:kb_entity".into(),
+                "host_fn:kb_get_wiki".into(),
             ],
             requires: vec![],
             priority: 50,
@@ -318,7 +320,33 @@ impl Plugin for KbPlugin {
             },
         );
 
-        debug!("kb plugin registered 6 host functions");
+        // kb_get_wiki(source_id_or_prefix: str) -> dict
+        // Wiki-style payload for a single KB source: infobox + TOC +
+        // sections (chunks grouped by heading_path) + mentioned
+        // entities + referenced topics. The argument accepts either a
+        // full source_id UUID or any unique prefix (>=4 chars).
+        let stores = Arc::clone(&self.stores);
+        ctx.register_host_fn_async(
+            "kb_get_wiki",
+            Some(KB_READ_CAPABILITY),
+            move |args, kwargs| {
+                let stores = Arc::clone(&stores);
+                async move {
+                    let id_arg = get_required_str(&args, &kwargs, 0, "source_id")?;
+                    let source_id = resolve_source_for_wiki(&stores.pg, &id_arg)
+                        .await
+                        .map_err(|e| PluginError::HostFunction(format!("kb.get_wiki: {e}")))?;
+                    let doc = fetch_wiki_doc(&stores.pg, source_id)
+                        .await
+                        .map_err(|e| PluginError::HostFunction(format!("kb.get_wiki: {e}")))?;
+                    serde_json::to_value(doc).map_err(|e| {
+                        PluginError::HostFunction(format!("kb.get_wiki serialize: {e}"))
+                    })
+                }
+            },
+        );
+
+        debug!("kb plugin registered 7 host functions");
         Ok(())
     }
 }

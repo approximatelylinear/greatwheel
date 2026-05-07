@@ -27,6 +27,12 @@ pub struct UiSurface {
     /// auxiliary = information scoped to the current selection.
     #[serde(default)]
     pub canvas_aux_slot: Option<WidgetId>,
+    /// Widget pinned to the dedicated wiki pane — a long-form,
+    /// addressable doc view (e.g. a `KbDocWiki` rendering a single KB
+    /// source). Lives next to the canvas, not inside it, so chat /
+    /// canvas / wiki can coexist.
+    #[serde(default)]
+    pub wiki_slot: Option<WidgetId>,
 }
 
 /// A snapshot of a surface and its widgets — returned to the frontend
@@ -75,6 +81,18 @@ pub enum UiNotification {
     /// auxiliary region below the primary canvas pin).
     AuxPinned {
         id: WidgetId,
+    },
+    /// A widget was moved into the surface's `wiki_slot` (the
+    /// dedicated long-form doc pane).
+    WikiPinned {
+        id: WidgetId,
+    },
+    /// The surface's `wiki_slot` was cleared (close-wiki). Carries the
+    /// session and surface id so adapters can route the resulting
+    /// STATE_DELTA without a widget lookup (the slot is empty).
+    WikiUnpinned {
+        session_id: SessionId,
+        surface_id: UiSurfaceId,
     },
     /// The agent declared that a specific button within a widget is
     /// the "currently focused" one. Transient UI hint; not persisted
@@ -128,6 +146,7 @@ impl UiSurfaceStore {
                     widget_order: Vec::new(),
                     canvas_slot: None,
                     canvas_aux_slot: None,
+                    wiki_slot: None,
                 });
             surface.widget_order.push(widget.id);
             inner.widgets.insert(widget.id, widget.clone());
@@ -170,6 +189,7 @@ impl UiSurfaceStore {
                         widget_order: Vec::new(),
                         canvas_slot: None,
                         canvas_aux_slot: None,
+                        wiki_slot: None,
                     });
                 surface.widget_order.push(new.id);
             }
@@ -245,6 +265,52 @@ impl UiSurfaceStore {
         Ok(())
     }
 
+    /// Pin a widget into its surface's wiki slot. Same shape as
+    /// `pin_to_canvas`; writes `wiki_slot`. The wiki pane is the
+    /// long-form addressable doc view (e.g. KbDocWiki) and sits
+    /// alongside the canvas rather than replacing it.
+    pub async fn pin_to_wiki(&self, id: WidgetId) -> Result<(), UiError> {
+        {
+            let mut inner = self.inner.write().await;
+            let session_id = inner
+                .widgets
+                .get(&id)
+                .ok_or(UiError::WidgetNotFound(id))?
+                .session_id;
+            let surface = inner
+                .surfaces
+                .get_mut(&session_id)
+                .ok_or(UiError::SurfaceNotFound(session_id))?;
+            surface.wiki_slot = Some(id);
+        }
+        let _ = self.tx.send(UiNotification::WikiPinned { id });
+        Ok(())
+    }
+
+    /// Clear a session's `wiki_slot`. Idempotent: returns `Ok(())`
+    /// even when the slot was already empty (so the close handler
+    /// doesn't have to track state). No-op when the surface itself
+    /// doesn't exist.
+    pub async fn clear_wiki_slot(&self, session_id: SessionId) -> Result<(), UiError> {
+        let cleared_surface = {
+            let mut inner = self.inner.write().await;
+            match inner.surfaces.get_mut(&session_id) {
+                Some(surface) if surface.wiki_slot.is_some() => {
+                    surface.wiki_slot = None;
+                    Some(surface.id)
+                }
+                _ => None,
+            }
+        };
+        if let Some(surface_id) = cleared_surface {
+            let _ = self.tx.send(UiNotification::WikiUnpinned {
+                session_id,
+                surface_id,
+            });
+        }
+        Ok(())
+    }
+
     /// Pin a widget into its surface's canvas slot. The widget must
     /// exist; state is not restricted (you can pin a terminal widget
     /// to show its final state on the canvas).
@@ -306,6 +372,16 @@ impl UiSurfaceStore {
             .surfaces
             .get(&session_id)
             .and_then(|s| s.canvas_slot)
+    }
+
+    /// Return the `wiki_slot` widget id for a session, if any.
+    pub async fn wiki_pin(&self, session_id: SessionId) -> Option<WidgetId> {
+        self.inner
+            .read()
+            .await
+            .surfaces
+            .get(&session_id)
+            .and_then(|s| s.wiki_slot)
     }
 
     /// Direct widget lookup — mainly for tests and diagnostics.

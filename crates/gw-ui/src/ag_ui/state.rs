@@ -47,6 +47,9 @@ pub fn canonical_state(
     if let Some(id) = snap.surface.canvas_aux_slot {
         pinned.insert(id.0.to_string(), Value::Bool(true));
     }
+    if let Some(id) = snap.surface.wiki_slot {
+        pinned.insert(id.0.to_string(), Value::Bool(true));
+    }
     let order: Vec<Value> = snap
         .surface
         .widget_order
@@ -79,6 +82,7 @@ pub fn canonical_state(
         "widgetOrder": Value::Array(order),
         "canvasSlot": snap.surface.canvas_slot.map(|id| id.0.to_string()),
         "canvasAuxSlot": snap.surface.canvas_aux_slot.map(|id| id.0.to_string()),
+        "wikiSlot": snap.surface.wiki_slot.map(|id| id.0.to_string()),
         "pinnedIds": Value::Object(pinned),
         "pressed": {},
         "focusedScope": Value::Object(focus_map),
@@ -122,6 +126,13 @@ pub async fn notification_to_patches(
             json!({"op": "replace", "path": "/canvasAuxSlot", "value": id.0.to_string()}),
             json!({"op": "add", "path": format!("/pinnedIds/{}", id.0), "value": true}),
         ]),
+        UiNotification::WikiPinned { id } => Some(vec![
+            json!({"op": "replace", "path": "/wikiSlot", "value": id.0.to_string()}),
+            json!({"op": "add", "path": format!("/pinnedIds/{}", id.0), "value": true}),
+        ]),
+        UiNotification::WikiUnpinned { .. } => Some(vec![
+            json!({"op": "replace", "path": "/wikiSlot", "value": Value::Null}),
+        ]),
         UiNotification::ButtonHighlighted {
             widget_id,
             button_id,
@@ -157,7 +168,9 @@ pub async fn notification_session(
         UiNotification::Resolved { id, .. }
         | UiNotification::Expired { id }
         | UiNotification::Pinned { id }
-        | UiNotification::AuxPinned { id } => store.get_widget(*id).await.map(|w| w.session_id),
+        | UiNotification::AuxPinned { id }
+        | UiNotification::WikiPinned { id } => store.get_widget(*id).await.map(|w| w.session_id),
+        UiNotification::WikiUnpinned { session_id, .. } => Some(*session_id),
         UiNotification::ButtonHighlighted { widget_id, .. } => {
             store.get_widget(*widget_id).await.map(|w| w.session_id)
         }
@@ -176,10 +189,12 @@ pub async fn notification_surface(
         UiNotification::Resolved { id, .. }
         | UiNotification::Expired { id }
         | UiNotification::Pinned { id }
-        | UiNotification::AuxPinned { id } => store
+        | UiNotification::AuxPinned { id }
+        | UiNotification::WikiPinned { id } => store
             .get_widget(*id)
             .await
             .map(|w| w.surface_id.0.to_string()),
+        UiNotification::WikiUnpinned { surface_id, .. } => Some(surface_id.0.to_string()),
         UiNotification::ButtonHighlighted { widget_id, .. } => store
             .get_widget(*widget_id)
             .await
@@ -229,6 +244,7 @@ mod tests {
                 widget_order: vec![w.id],
                 canvas_slot: Some(w.id),
                 canvas_aux_slot: None,
+                wiki_slot: None,
             },
             widgets: vec![w.clone()],
         };
@@ -253,6 +269,7 @@ mod tests {
                 widget_order: vec![],
                 canvas_slot: None,
                 canvas_aux_slot: None,
+                wiki_slot: None,
             },
             widgets: vec![],
         };

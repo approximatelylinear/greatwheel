@@ -13,6 +13,7 @@ export const INITIAL_CANONICAL_STATE: Record<string, unknown> = {
   widgetOrder: [],
   canvasSlot: null,
   canvasAuxSlot: null,
+  wikiSlot: null,
   pinnedIds: {},
   pressed: {},
   focusedScope: {},

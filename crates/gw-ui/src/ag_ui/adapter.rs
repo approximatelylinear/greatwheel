@@ -552,6 +552,17 @@ async fn post_widget_event(
         return Ok(StatusCode::ACCEPTED);
     }
 
+    // `action: "close_wiki"` is the same kind of pure UI op — fired
+    // by the wiki drawer's close button. Clear `wiki_slot` directly
+    // in the surface store; the resulting WikiUnpinned notification
+    // becomes a `replace /wikiSlot null` STATE_DELTA. No agent involved.
+    if body.action == "close_wiki" {
+        if let Err(e) = state.store.clear_wiki_slot(sid).await {
+            warn!(error = %e, "ag-ui close_wiki: clear_wiki_slot failed");
+        }
+        return Ok(StatusCode::ACCEPTED);
+    }
+
     let inbound = state.inbound.lock().await;
     let tx = inbound.get(&sid).ok_or_else(|| {
         (
@@ -613,6 +624,7 @@ fn empty_snapshot(session_id: SessionId) -> UiSurfaceSnapshot {
             widget_order: Vec::new(),
             canvas_slot: None,
             canvas_aux_slot: None,
+            wiki_slot: None,
         },
         widgets: Vec::new(),
     }

@@ -304,6 +304,66 @@ export function toJrSpec(widget: Widget): Spec | null {
         };
         return key;
       }
+      case 'KbDocWiki': {
+        // The server emits the WikiDoc payload nested under `doc`. We
+        // pass it through unchanged (the React widget knows the shape)
+        // and synthesise per-entity / per-topic / per-section click
+        // bindings so clicks route through `interact`.
+        const doc = (node.doc ?? {}) as Record<string, unknown>;
+        const entities = Array.isArray(doc.entities)
+          ? (doc.entities as Array<Record<string, unknown>>)
+          : [];
+        const topics = Array.isArray(doc.topics)
+          ? (doc.topics as Array<Record<string, unknown>>)
+          : [];
+        const on: Record<string, unknown> = {};
+        for (const e of entities) {
+          const id = String(e.entity_id ?? '');
+          const slug = String(e.slug ?? '');
+          on[`entity:${id}`] = {
+            action: 'interact',
+            params: {
+              widgetId,
+              surfaceId,
+              buttonId: `entity:${id}`,
+              action: 'open_kb_entity',
+              data: { entity_id: id, slug },
+            },
+          };
+        }
+        for (const t of topics) {
+          const id = String(t.topic_id ?? '');
+          const slug = String(t.slug ?? '');
+          on[`topic:${id}`] = {
+            action: 'interact',
+            params: {
+              widgetId,
+              surfaceId,
+              buttonId: `topic:${id}`,
+              action: 'open_kb_topic',
+              data: { topic_id: id, slug },
+            },
+          };
+        }
+        // Generic close button — fires `close` so the server can
+        // unpin the wiki slot.
+        on['close'] = {
+          action: 'interact',
+          params: {
+            widgetId,
+            surfaceId,
+            buttonId: 'close',
+            action: 'close_wiki',
+            data: {},
+          },
+        };
+        elements[key] = {
+          type: 'KbDocWiki',
+          props: { doc },
+          on,
+        } as UIElement;
+        return key;
+      }
       case 'EntityCloud': {
         const rawPoints = Array.isArray(node.points)
           ? (node.points as Array<Record<string, unknown>>)

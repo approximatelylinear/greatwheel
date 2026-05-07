@@ -45,6 +45,7 @@ impl Plugin for UiPlugin {
                 "host_fn:ui.resolve_widget".into(),
                 "host_fn:ui.pin_to_canvas".into(),
                 "host_fn:ui.pin_below_canvas".into(),
+                "host_fn:ui.pin_to_wiki".into(),
                 "host_fn:ui.highlight_button".into(),
                 "host_fn:ui.emit_mcp_resource".into(),
             ],
@@ -125,6 +126,18 @@ impl Plugin for UiPlugin {
                 }
             },
         );
+
+        let s = store.clone();
+        ctx.register_host_fn_async("pin_to_wiki", Some("ui:write"), move |_args, kwargs| {
+            let s = s.clone();
+            async move {
+                let widget_id = WidgetId(parse_uuid(&kwargs, "widget_id")?);
+                s.pin_to_wiki(widget_id)
+                    .await
+                    .map_err(|e| PluginError::HostFunction(e.to_string()))?;
+                Ok(Value::Null)
+            }
+        });
 
         let s = store.clone();
         ctx.register_host_fn_async(
