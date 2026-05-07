@@ -1665,20 +1665,27 @@ const LIT_USER_ID: uuid::Uuid = uuid::uuid!("02000000-0000-0000-0000-00000000000
 const LIT_AGENT_ID: uuid::Uuid = uuid::uuid!("03000000-0000-0000-0000-000000000001");
 
 /// Plant the FK chain `session_entries(session_id)` requires.
-/// Idempotent: every literature_assistant run calls this with the
-/// fresh session UUID; the org/user/agent_def rows persist across
-/// runs. Errors propagate to the caller — without this seed,
-/// `flush_to_pg` would FK-fail on every entry and the spine would
-/// never see anything.
+/// Idempotent: callable on every spawn — the `ON CONFLICT DO NOTHING`
+/// rows make repeat calls no-ops, so the manager can hit this each
+/// time it lazily ensures a session.
+///
+/// `user_id` selects the owning user. The manager passes the row's
+/// `user_id` when one already exists in PG; for ad-hoc URL-pasted
+/// session_ids that don't have a row yet, callers fall back to
+/// `LIT_USER_ID` so the demo flow keeps working.
 async fn ensure_literature_session(
     pg: &sqlx::PgPool,
     session_id: uuid::Uuid,
+    user_id: uuid::Uuid,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("INSERT INTO orgs (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING")
         .bind(LIT_ORG_ID)
         .bind("literature-demo")
         .execute(pg)
         .await?;
+    // The user row may already exist (created via the sessions API).
+    // Insert the demo user as a fallback so URL-pasted sessions still
+    // FK-resolve. Real user rows take precedence via ON CONFLICT.
     sqlx::query(
         r#"
         INSERT INTO users (id, org_id, name, email)
@@ -1686,7 +1693,7 @@ async fn ensure_literature_session(
         ON CONFLICT (id) DO NOTHING
         "#,
     )
-    .bind(LIT_USER_ID)
+    .bind(user_id)
     .bind(LIT_ORG_ID)
     .bind("literature-demo")
     .bind("demo@literature.local")
@@ -1716,12 +1723,29 @@ async fn ensure_literature_session(
     )
     .bind(session_id)
     .bind(LIT_ORG_ID)
-    .bind(LIT_USER_ID)
+    .bind(user_id)
     .bind(LIT_AGENT_ID)
     .bind(session_id.to_string())
     .execute(pg)
     .await?;
     Ok(())
+}
+
+/// Look up the user owning a session, if its row exists. The manager
+/// uses this so spawns inherit the owner picked at session-creation
+/// time (via `POST /users/{uid}/sessions`); falls through to
+/// `LIT_USER_ID` for unknown ids.
+#[allow(dead_code)] // used by SessionManager once wired
+async fn lookup_session_user(
+    pg: &sqlx::PgPool,
+    session_id: uuid::Uuid,
+) -> Result<Option<uuid::Uuid>, sqlx::Error> {
+    let row: Option<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT user_id FROM sessions WHERE id = $1")
+            .bind(session_id)
+            .fetch_optional(pg)
+            .await?;
+    Ok(row.map(|(u,)| u))
 }
 
 /// Build the gw-kb store bundle from environment, returning Ok(None)
@@ -2112,6 +2136,241 @@ fn rayleigh(m: &[Vec<f32>], v: &[f32]) -> f32 {
     acc
 }
 
+// ── Multi-session manager ───────────────────────────────────────────
+
+/// Process-global handles every session needs. Cloned into each spawn;
+/// every field is cheap to clone (Arc'd or itself a `Clone` type).
+#[derive(Clone)]
+struct SessionDeps {
+    adapter: Arc<AgUiAdapter>,
+    kb_stores: Option<Arc<KbStores>>,
+    /// Cloned per-session and wrapped in a fresh `OllamaLlmClient` so
+    /// each `ConversationLoop` has its own LLM client (matches the
+    /// prior single-session boot which built one inline).
+    chat_client: OllamaClient,
+    plugin_router: Arc<gw_engine::HostFnRouter>,
+    config_template: Arc<LoopConfigTemplate>,
+}
+
+/// Subset of `LoopConfig` that's fixed across sessions. Per-session
+/// fields (`answer_validator`, `iteration_callback`) stay default.
+struct LoopConfigTemplate {
+    system_prompt: String,
+    recency_window: usize,
+    max_iterations: usize,
+    include_code_output: bool,
+    repl_output_max_chars: usize,
+    strip_think_tags: bool,
+}
+
+impl LoopConfigTemplate {
+    fn build(&self) -> LoopConfig {
+        LoopConfig {
+            system_prompt: self.system_prompt.clone(),
+            recency_window: self.recency_window,
+            max_iterations: self.max_iterations,
+            include_code_output: self.include_code_output,
+            repl_output_max_chars: self.repl_output_max_chars,
+            strip_think_tags: self.strip_think_tags,
+            answer_validator: None,
+            iteration_callback: None,
+            snapshot_policy: SnapshotPolicy {
+                every_n_turns: 0,
+                before_compaction: false,
+            },
+            compaction_keep_count: 0,
+            auto_compact_after_turns: None,
+        }
+    }
+}
+
+/// Lazy-spawning multi-session manager. Sessions are created on first
+/// reference (via the axum middleware below) and live for the
+/// process lifetime — no eviction in v1, since the literature
+/// assistant is a single-process demo.
+struct LitSessionManager {
+    sessions: tokio::sync::RwLock<HashMap<SessionId, SessionEntry>>,
+    deps: SessionDeps,
+}
+
+struct SessionEntry {
+    /// Kept solely so the thread doesn't get joined / dropped — the
+    /// loop runs inside it for the rest of the process lifetime.
+    #[allow(dead_code)]
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl LitSessionManager {
+    fn new(deps: SessionDeps) -> Self {
+        Self {
+            sessions: tokio::sync::RwLock::new(HashMap::new()),
+            deps,
+        }
+    }
+
+    /// No-op if `session_id` already has a live loop. Otherwise seed
+    /// the FK chain (idempotent), spawn the loop on a dedicated
+    /// thread, register the session with the AG-UI adapter, and
+    /// stash the handle. Picks the owning user from the existing
+    /// `sessions` row when one exists; falls back to `LIT_USER_ID`.
+    async fn ensure(&self, session_id: SessionId) {
+        if self.sessions.read().await.contains_key(&session_id) {
+            return;
+        }
+        let mut map = self.sessions.write().await;
+        if map.contains_key(&session_id) {
+            return; // raced with another middleware call; lost.
+        }
+        let user_id = match self.deps.kb_stores.as_ref() {
+            Some(kb) => lookup_session_user(&kb.pg, session_id.0)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(LIT_USER_ID),
+            None => LIT_USER_ID,
+        };
+        if let Some(kb) = self.deps.kb_stores.as_ref() {
+            if let Err(e) = ensure_literature_session(&kb.pg, session_id.0, user_id).await {
+                tracing::warn!(
+                    error = %e,
+                    ?session_id,
+                    "failed to seed session row — entries will not persist"
+                );
+            }
+        }
+        let thread = spawn_session_loop(session_id, &self.deps);
+        map.insert(session_id, SessionEntry { thread });
+        tracing::info!(?session_id, ?user_id, "session spawned");
+    }
+}
+
+/// Build all per-session state and run its `ConversationLoop` on a
+/// dedicated thread + tokio runtime. Mirrors the original
+/// single-session boot block from `main`; the only behavioural
+/// change is per-session naming on the spawned thread.
+fn spawn_session_loop(
+    session_id: SessionId,
+    deps: &SessionDeps,
+) -> std::thread::JoinHandle<()> {
+    let adapter = deps.adapter.clone();
+    let kb_stores = deps.kb_stores.clone();
+    let chat_client = deps.chat_client.clone();
+    let plugin_router = deps.plugin_router.clone();
+    let config = deps.config_template.build();
+
+    let (tap_tx, mut tap_rx) = mpsc::unbounded_channel::<LoopEvent>();
+    let (loop_tx, loop_rx) = mpsc::unbounded_channel::<LoopEvent>();
+
+    // Register the session with the adapter so the AG-UI router has
+    // an inbound channel to push WidgetInteractions through.
+    // `register_session` is async; spawn a tiny task rather than
+    // forcing this fn to be async (it's called from inside an
+    // already-async `ensure`, but spawning keeps the order with the
+    // tap forwarder simple).
+    let adapter_for_register = adapter.clone();
+    let tap_tx_for_register = tap_tx.clone();
+    tokio::spawn(async move {
+        adapter_for_register
+            .register_session(session_id, tap_tx_for_register)
+            .await;
+    });
+
+    let adapter_for_tap = adapter.clone();
+    tokio::spawn(async move {
+        while let Some(ev) = tap_rx.recv().await {
+            adapter_for_tap.dispatch(session_id, &ev).await;
+            if loop_tx.send(ev).is_err() {
+                break;
+            }
+        }
+    });
+
+    let ask_handle = new_ask_handle();
+    let conv_bridge = ConversationBridge::with_plugin_router(
+        tap_tx.clone(),
+        ask_handle,
+        None,
+        Some(plugin_router),
+    );
+
+    let external_fns = vec![
+        "FINAL".into(),
+        "emit_widget".into(),
+        "supersede_widget".into(),
+        "resolve_widget".into(),
+        "pin_to_canvas".into(),
+        "pin_below_canvas".into(),
+        "pin_to_wiki".into(),
+        "highlight_button".into(),
+        "arxiv_search".into(),
+        "embed_papers".into(),
+        "project_2d".into(),
+        "get_paper".into(),
+        "nearest_neighbors".into(),
+        "cluster_papers".into(),
+        "fetch_paper_text".into(),
+        "kb_paper_count".into(),
+        "entity_extraction_status".into(),
+        "kb_get_wiki".into(),
+    ];
+    let mut repl = ReplAgent::new(external_fns, Box::new(conv_bridge));
+    repl.set_variable("gw_session_id", Object::String(session_id.0.to_string()))
+        .ok();
+
+    let loop_llm: Box<dyn gw_loop::LlmClient> =
+        Box::new(OllamaLlmClient::new(chat_client).with_think(Some(false)));
+
+    let tree = if let Some(kb) = kb_stores.as_ref() {
+        let pg_store = PgSessionStore::new(kb.pg.clone());
+        SessionTree::with_pg(session_id, pg_store)
+    } else {
+        SessionTree::new(session_id)
+    };
+    let mut conv_loop =
+        ConversationLoop::with_tree(tree, repl, loop_llm, config, tap_tx);
+    if let Some(kb) = kb_stores.as_ref() {
+        let extractor = Arc::new(SpineExtractor::new(kb.clone()));
+        conv_loop = conv_loop.with_spine_extractor(extractor);
+    }
+
+    std::thread::Builder::new()
+        .name(format!("gw-loop-{}", session_id.0))
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2)
+                .build()
+                .expect("failed to build loop runtime");
+            rt.block_on(async move {
+                if let Err(e) = conv_loop.run(loop_rx).await {
+                    tracing::error!(?session_id, error = %e, "conversation loop exited");
+                }
+            });
+        })
+        .expect("failed to spawn loop thread")
+}
+
+/// axum middleware: when a request hits `/sessions/{uuid}/...`,
+/// ensure the matching loop is live before the route handler runs.
+/// Unknown ids spawn lazily; live ones are no-ops. Non-`/sessions/`
+/// paths pass straight through.
+async fn ensure_session_middleware(
+    axum::extract::State(manager): axum::extract::State<Arc<LitSessionManager>>,
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::http::Response<axum::body::Body> {
+    if let Some(session_id) = extract_session_id_from_path(req.uri().path()) {
+        manager.ensure(session_id).await;
+    }
+    next.run(req).await
+}
+
+fn extract_session_id_from_path(path: &str) -> Option<SessionId> {
+    let rest = path.strip_prefix("/sessions/")?;
+    let id_str = rest.split('/').next()?;
+    Uuid::parse_str(id_str).ok().map(SessionId)
+}
+
 // ── Server ──────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -2150,8 +2409,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         (ollama, format!("ollama:{OLLAMA_MODEL}"))
     };
-    let loop_llm: Box<dyn gw_loop::LlmClient> =
-        Box::new(OllamaLlmClient::new(chat_client).with_think(Some(false)));
+    // chat_client stays a `Clone` value (not a Box<dyn LlmClient>);
+    // the SessionDeps below clones it into each spawn so every loop
+    // gets its own OllamaLlmClient.
 
     // Best-effort gw-kb setup. When DATABASE_URL is set we wire up
     // Postgres + LanceDB + tantivy + a sentence-transformers embedder
@@ -2219,114 +2479,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Mechanistic interpretability of transformers",
         ],
     );
+    // Bundle every process-global handle the per-session machinery
+    // needs into one cheap-to-clone struct. The manager hands the
+    // bundle to `spawn_session_loop` on each ensure().
+    let deps = SessionDeps {
+        adapter: adapter.clone(),
+        kb_stores: kb_stores.clone(),
+        chat_client,
+        plugin_router,
+        config_template: Arc::new(LoopConfigTemplate {
+            system_prompt: SYSTEM_PROMPT.to_string(),
+            recency_window: 30,
+            max_iterations: 4,
+            include_code_output: true,
+            repl_output_max_chars: 4000,
+            strip_think_tags: true,
+        }),
+    };
+    let manager = Arc::new(LitSessionManager::new(deps));
+
+    // Backward-compat seed session: the prior single-session boot
+    // generated a fresh UUID at startup and printed its URL. Keep
+    // that flow by ensuring one session exists before the listener
+    // binds. New session_ids that hit `/sessions/{id}/*` later get
+    // lazy-spawned by the middleware below.
     let session_id = SessionId(Uuid::new_v4());
-
-    // When the KB is configured, plant the org/user/agent_def chain
-    // session_entries.session_id needs to FK against, then build a
-    // PG-backed session tree so flush_to_pg actually persists. The
-    // spine extractor downstream relies on entries existing in
-    // Postgres before its background extraction tasks fire.
-    if let Some(kb) = kb_stores.as_ref() {
-        if let Err(e) = ensure_literature_session(&kb.pg, session_id.0).await {
-            tracing::warn!(error = %e, "failed to seed literature session — entries will not persist");
-        }
+    manager.ensure(session_id).await;
+    if kb_stores.is_some() {
+        tracing::info!("spine extractor attached per-session via SessionDeps");
     }
-
-    let (tap_tx, mut tap_rx) = mpsc::unbounded_channel::<LoopEvent>();
-    let (loop_tx, loop_rx) = mpsc::unbounded_channel::<LoopEvent>();
-    adapter.register_session(session_id, tap_tx.clone()).await;
-
-    let adapter_for_tap = adapter.clone();
-    tokio::spawn(async move {
-        while let Some(ev) = tap_rx.recv().await {
-            adapter_for_tap.dispatch(session_id, &ev).await;
-            if loop_tx.send(ev).is_err() {
-                break;
-            }
-        }
-    });
-
-    let ask_handle = new_ask_handle();
-    let conv_bridge = ConversationBridge::with_plugin_router(
-        tap_tx.clone(),
-        ask_handle,
-        None,
-        Some(plugin_router),
-    );
-
-    let external_fns = vec![
-        "FINAL".into(),
-        "emit_widget".into(),
-        "supersede_widget".into(),
-        "resolve_widget".into(),
-        "pin_to_canvas".into(),
-        "pin_below_canvas".into(),
-        "pin_to_wiki".into(),
-        "highlight_button".into(),
-        "arxiv_search".into(),
-        "embed_papers".into(),
-        "project_2d".into(),
-        "get_paper".into(),
-        "nearest_neighbors".into(),
-        "cluster_papers".into(),
-        "fetch_paper_text".into(),
-        "kb_paper_count".into(),
-        "entity_extraction_status".into(),
-        "kb_get_wiki".into(),
-    ];
-    let mut repl = ReplAgent::new(external_fns, Box::new(conv_bridge));
-    repl.set_variable("gw_session_id", Object::String(session_id.0.to_string()))
-        .ok();
-
-    let config = LoopConfig {
-        system_prompt: SYSTEM_PROMPT.to_string(),
-        recency_window: 30,
-        max_iterations: 4,
-        include_code_output: true,
-        repl_output_max_chars: 4000,
-        strip_think_tags: true,
-        answer_validator: None,
-        iteration_callback: None,
-        snapshot_policy: SnapshotPolicy {
-            every_n_turns: 0,
-            before_compaction: false,
-        },
-        compaction_keep_count: 0,
-        auto_compact_after_turns: None,
-    };
-    // Build a PG-backed tree when KB is wired up, so flush_to_pg
-    // persists entries (the spine extractor depends on this). Falls
-    // back to the in-memory tree when the KB isn't configured —
-    // demo runs without Postgres still work, just without spine
-    // rows accumulating.
-    let tree = if let Some(kb) = kb_stores.as_ref() {
-        let pg_store = PgSessionStore::new(kb.pg.clone());
-        SessionTree::with_pg(session_id, pg_store)
-    } else {
-        SessionTree::new(session_id)
-    };
-    let mut conv_loop =
-        ConversationLoop::with_tree(tree, repl, loop_llm, config, tap_tx);
-    if let Some(kb) = kb_stores.as_ref() {
-        let extractor = Arc::new(SpineExtractor::new(kb.clone()));
-        conv_loop = conv_loop.with_spine_extractor(extractor);
-        tracing::info!("spine extractor attached — entries → entities + segments");
-    }
-
-    std::thread::Builder::new()
-        .name("gw-loop".into())
-        .spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .worker_threads(2)
-                .build()
-                .expect("failed to build loop runtime");
-            rt.block_on(async move {
-                if let Err(e) = conv_loop.run(loop_rx).await {
-                    tracing::error!(error = %e, "conversation loop exited");
-                }
-            });
-        })?;
 
     // Spine sidebar's segment-detail endpoint. Mounted only when the
     // KB is wired up (it joins across kb_entities and the spine
@@ -2367,7 +2548,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         app_base
     };
+    // Lazy-spawn middleware: any request to `/sessions/{uuid}/...`
+    // ensures the matching ConversationLoop is live before the route
+    // handler runs. New URL-pasted session ids get spawned on first
+    // /stream connect; known ones are no-ops.
     let app = app_with_spine
+        .layer(axum::middleware::from_fn_with_state(
+            manager.clone(),
+            ensure_session_middleware,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive());
     let listener = TcpListener::bind("127.0.0.1:8787").await?;
