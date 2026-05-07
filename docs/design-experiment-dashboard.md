@@ -1,7 +1,7 @@
 # Design: BrowseComp Experiment Dashboard (on `gw-ui`)
 
-**Status:** Steps 1, 2, 5, 6 backend landed; frontend + agent pending
-**Date:** 2026-05-04
+**Status:** Past mode end-to-end. Backend (steps 1, 2, 5, 6), frontend renderers + catalog (step 3), and `BenchAgent` v1 + runnable `bench_dashboard` example (step 4) landed. Live mode (step 7+) and Planning mode (step 9) still pending.
+**Date:** 2026-05-05
 
 ---
 
@@ -25,22 +25,28 @@ EXPERIMENTS.md history.
 | Annotations sidecar (`runs/<slug>/notes.json`) | Done | `src/store.rs::{read,write}_annotations` |
 | Test fixtures + 32 tests | Done | `tests/store_test.rs`, `tests/data/` |
 | Smoke example | Done | `examples/smoke.rs` |
-| Custom React renderers (`Code`, `DifficultyMatrix`, `CostTrend`, markdown) | Not started | `frontend/src/jr/` (TBD) |
-| Widget catalog registration | Not started | `frontend/src/jr/registry.ts` |
-| `BenchAgent` prompt + first-turn pinned widgets | Not started | TBD |
-| `bench_dashboard` runnable example | Not started | `crates/gw-bench-ui/examples/` (TBD) |
+| Custom React renderers (`Code`, `DifficultyMatrix`, `CostTrend`, `Markdown`) | Done (step 3) | `frontend/src/widgets/{CodeBlock,DifficultyMatrixWidget,CostTrendWidget}.tsx` + inline `Markdown` |
+| Widget catalog registration | Done (step 3) | `frontend/src/jr/{catalog.ts,registry.tsx}` |
+| `BenchAgent` prompt + first-turn pinned widgets | Done (step 4) | `crates/gw-bench-ui/examples/bench_dashboard.rs` (`SYSTEM_PROMPT`) |
+| `bench_dashboard` runnable example | Done (step 4) | `crates/gw-bench-ui/examples/bench_dashboard.rs` |
+| Translator cases for `Code` / `Markdown` / `DifficultyMatrix` / `CostTrend` | Done (step 4) | `frontend/src/jr/translate.ts` |
 | Live mode (filesystem watcher) | Not started | `src/store.rs` (TBD) |
 | `ops_status` host fn | Not started | `src/plugin.rs` (TBD) |
 | Spawn (`bench:spawn` capability) | Deferred to v3 | — |
 
 **To pick up in a fresh session, read this section, then jump to §12 for
-the next step (frontend renderers + widget catalog).**
+the next step (Live mode Layer 1 — filesystem watcher, `list_running`,
+`tail_run`, `RunningExperiments` + `LiveRunProgress`, step 7).**
 
-Quick verify the backend still works:
+Quick verify the stack still works:
 
 ```bash
-cargo test -p gw-bench-ui              # 32 tests
-cargo run -p gw-bench-ui --example smoke   # walks real runs/
+cargo test -p gw-bench-ui                       # 32 tests
+cargo run -p gw-bench-ui --example smoke        # walks real runs/
+cargo build -p gw-bench-ui --example bench_dashboard
+# Past-mode dashboard end-to-end (needs Ollama or OPENAI_API_KEY):
+#   cargo run -p gw-bench-ui --example bench_dashboard
+#   then open http://localhost:5173/?session=<printed uuid>
 ```
 
 ---
@@ -411,12 +417,22 @@ prompting.
 2. ✅ **Annotations.** `read_annotations`, `write_annotation`, sidecar
    JSON at `runs/<slug>/notes.json`, atomic tmp+rename writes.
    `RunDetail.notes` and `RunDetail.tags` populate from sidecar.
-3. **Custom renderers.** `Code`, `DifficultyMatrix`, `CostTrend`, and
-   markdown renderer wired into `frontend/src/jr/registry.ts`.
-   *Next session starts here.*
-4. **Past-mode widgets + agent.** Register all Past widgets;
-   `BenchAgent` v1 with system prompt covering Past only. Smoke
-   test: list → select → drill-down → compare → annotate.
+3. ✅ **Custom renderers.** `Code`, `DifficultyMatrix`, `CostTrend`,
+   and `Markdown` registered in `frontend/src/jr/{catalog,registry}.tsx`;
+   custom React components live in `frontend/src/widgets/`. Typecheck
+   and `vite build` clean. No backend wiring yet — these light up in
+   step 4 when the agent emits them.
+4. ✅ **Past-mode widgets + agent.** `BenchAgent` v1 system prompt
+   landed in `crates/gw-bench-ui/examples/bench_dashboard.rs`,
+   covering ExperimentList → SelectedRunSummary + PerQueryTable →
+   QueryDetail → ComparisonTable + ConfigDiff (unified diff via
+   `difflib` in the agent) → DifficultyMatrix → QueryHistory →
+   CostTrend → AnnotationsPanel (write_annotation re-emits the
+   panel). Translator cases for the four new widget types added to
+   `frontend/src/jr/translate.ts` (per-cell ActionBindings on
+   DifficultyMatrix mirror the EntityCloud per-point pattern).
+   `cargo build -p gw-bench-ui --example bench_dashboard` is green;
+   live smoke against an LLM is the user's next step.
 5. ✅ **Difficulty matrix + query history.** Two host fns landed
    (`difficulty_matrix`, `query_history`); widgets pending in step 3.
    Cell schema decided in §13.

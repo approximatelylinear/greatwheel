@@ -1796,3 +1796,149 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
   border-color: var(--fg-dim);
   background: var(--surface);
 }
+
+/* ─── Code (bench dashboard) ─────────────────────────────────── */
+
+.a2ui-code {
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--surface); overflow: hidden;
+}
+.a2ui-code-head {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 6px 12px; border-bottom: 1px solid var(--border);
+  background: var(--bg-soft);
+  font: 11px/1.4 var(--font-ui);
+}
+.a2ui-code-title { color: var(--fg-dim); }
+.a2ui-code-lang {
+  color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em;
+  font-size: 10px;
+}
+.a2ui-code-body {
+  margin: 0; padding: 8px 0;
+  background: #0a0d13;
+  font: 11.5px/1.55 var(--font-mono); color: #a8b1bf;
+  overflow-x: auto;
+}
+.a2ui-code-line {
+  padding: 0 14px; white-space: pre;
+}
+.a2ui-code-line.diff-add    { background: rgba(76, 175, 80, 0.10); color: #b3e0ba; }
+.a2ui-code-line.diff-del    { background: rgba(255, 107, 107, 0.10); color: #f3a8a8; }
+.a2ui-code-line.diff-hunk   { color: var(--accent); }
+.a2ui-code-line.diff-meta   { color: var(--muted); }
+
+/* ─── Markdown (bench dashboard) ─────────────────────────────── */
+
+.a2ui-markdown {
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--surface); padding: 10px 16px;
+  color: var(--fg-dim); font-size: 13px; line-height: 1.55;
+}
+.a2ui-markdown h1, .a2ui-markdown h2, .a2ui-markdown h3 {
+  color: var(--fg); margin: 14px 0 6px;
+}
+.a2ui-markdown h1 { font-size: 16px; }
+.a2ui-markdown h2 { font-size: 14px; }
+.a2ui-markdown h3 { font-size: 13px; color: var(--muted-strong); }
+.a2ui-markdown p { margin: 6px 0; }
+.a2ui-markdown code {
+  background: var(--surface-hi); padding: 1px 5px; border-radius: 3px;
+  font: 11.5px/1.4 var(--font-mono);
+}
+.a2ui-markdown pre {
+  background: var(--bg-soft); padding: 8px 10px; border-radius: 4px;
+  overflow-x: auto;
+}
+.a2ui-markdown pre code { background: transparent; padding: 0; }
+.a2ui-markdown table {
+  border-collapse: collapse; margin: 8px 0; font-size: 12px;
+}
+.a2ui-markdown th, .a2ui-markdown td {
+  border: 1px solid var(--border); padding: 4px 8px; text-align: left;
+}
+.a2ui-markdown th { background: var(--bg-soft); color: var(--fg); }
+.a2ui-markdown a {
+  color: var(--accent); text-decoration: none;
+  border-bottom: 1px dotted var(--accent);
+}
+
+/* ─── DifficultyMatrix ───────────────────────────────────────── */
+
+.a2ui-difmat-wrap {
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--surface); padding: 10px; overflow-x: auto;
+}
+.a2ui-difmat {
+  border-collapse: separate; border-spacing: 1px;
+  font: 10.5px/1.2 var(--font-ui);
+}
+.a2ui-difmat-corner, .a2ui-difmat-qhead {
+  position: sticky; left: 0; background: var(--surface);
+  text-align: right; padding: 0 8px; color: var(--muted-strong);
+  font-weight: 500; min-width: 70px; z-index: 1;
+}
+.a2ui-difmat-runhead {
+  height: 90px; vertical-align: bottom;
+  color: var(--muted-strong); font-weight: 500;
+  padding: 0 2px;
+}
+.a2ui-difmat-runhead span {
+  display: inline-block; transform: rotate(-60deg) translateX(0);
+  transform-origin: left bottom; white-space: nowrap;
+  max-width: 110px; overflow: hidden; text-overflow: ellipsis;
+}
+.a2ui-difmat-cell {
+  width: 14px; height: 14px; padding: 0; cursor: pointer;
+  border-radius: 2px;
+  transition: outline-color 80ms ease;
+  outline: 1px solid transparent;
+}
+.a2ui-difmat-cell:hover { outline-color: var(--fg); }
+.a2ui-difmat .cell-exact   { background: #4caf50; }
+.a2ui-difmat .cell-fuzzy   { background: #8bc34a; }
+.a2ui-difmat .cell-wrong   { background: #b94a4a; }
+.a2ui-difmat .cell-error   { background: #6a3a3a; }
+.a2ui-difmat .cell-missing { background: #1e2230; }
+.a2ui-difmat-legend {
+  display: flex; gap: 12px; align-items: center;
+  margin-top: 10px; font-size: 11px; color: var(--muted-strong);
+}
+.a2ui-difmat-legend span {
+  display: inline-block; width: 10px; height: 10px;
+  border-radius: 2px; margin-right: 4px; vertical-align: middle;
+}
+
+/* ─── CostTrend ──────────────────────────────────────────────── */
+
+.a2ui-costtrend {
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--surface); padding: 10px 14px;
+}
+.a2ui-costtrend-head {
+  display: flex; justify-content: space-between;
+  font: 11px/1.4 var(--font-ui); margin-bottom: 6px;
+}
+.a2ui-costtrend-metric { color: var(--muted-strong); }
+.a2ui-costtrend-total { color: var(--fg); font-weight: 600; }
+.a2ui-costtrend-svg {
+  width: 100%; height: 80px; display: block;
+}
+.a2ui-costtrend-line {
+  stroke: var(--accent); stroke-width: 1.5;
+}
+.a2ui-costtrend-dot {
+  fill: var(--accent-strong); cursor: pointer;
+}
+.a2ui-costtrend-rows {
+  margin-top: 8px; display: flex; flex-direction: column; gap: 2px;
+  font: 11px/1.4 var(--font-mono); color: var(--fg-dim);
+}
+.a2ui-costtrend-row {
+  display: flex; justify-content: space-between;
+}
+.a2ui-costtrend-slug {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  margin-right: 8px;
+}
+.a2ui-costtrend-val { color: var(--fg); }

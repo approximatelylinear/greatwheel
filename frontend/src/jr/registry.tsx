@@ -1,7 +1,12 @@
 import { defineRegistry } from '@json-render/react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { spikeCatalog } from './catalog';
 import { EntityCloudWidget } from '../widgets/EntityCloudWidget';
 import { SpinePane } from '../components/SpinePane';
+import { CodeBlock } from '../widgets/CodeBlock';
+import { DifficultyMatrixWidget } from '../widgets/DifficultyMatrixWidget';
+import { CostTrendWidget } from '../widgets/CostTrendWidget';
 
 function formatCell(v: unknown): string {
   if (v == null) return '—';
@@ -117,6 +122,32 @@ const built = defineRegistry(spikeCatalog, {
         focusedSegmentId={null}
         onSegmentFocus={() => {}}
       />
+    ),
+    Code: ({ props }) => (
+      <CodeBlock
+        content={props.content}
+        language={props.language ?? null}
+        diff={props.diff ?? false}
+        title={props.title ?? null}
+      />
+    ),
+    Markdown: ({ props }) => (
+      <div className="a2ui-markdown">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+          {props.content}
+        </ReactMarkdown>
+      </div>
+    ),
+    DifficultyMatrix: ({ props, emit }) => (
+      <DifficultyMatrixWidget
+        queries={props.queries}
+        runs={props.runs}
+        cells={props.cells}
+        onCellClick={(qid, slug) => emit(`cell:${slug}:${qid}`)}
+      />
+    ),
+    CostTrend: ({ props }) => (
+      <CostTrendWidget rows={props.rows} metric={props.metric ?? 'tokens'} />
     ),
     EntityCloud: ({ props, emit }) => (
       <EntityCloudWidget

@@ -205,6 +205,105 @@ export function toJrSpec(widget: Widget): Spec | null {
         } as UIElement;
         return key;
       }
+      case 'Code': {
+        elements[key] = {
+          type: 'Code',
+          props: {
+            content: String(node.content ?? ''),
+            language: node.language != null ? String(node.language) : null,
+            diff: Boolean(node.diff),
+            title: node.title != null ? String(node.title) : null,
+          },
+        };
+        return key;
+      }
+      case 'Markdown': {
+        elements[key] = {
+          type: 'Markdown',
+          props: { content: String(node.content ?? '') },
+        };
+        return key;
+      }
+      case 'DifficultyMatrix': {
+        const queries = Array.isArray(node.queries)
+          ? (node.queries as unknown[]).map(String)
+          : [];
+        const runs = Array.isArray(node.runs)
+          ? (node.runs as unknown[]).map(String)
+          : [];
+        const rawCells: unknown[][] = Array.isArray(node.cells)
+          ? (node.cells as unknown[][]).map((r) => (Array.isArray(r) ? r : []))
+          : [];
+        const cells = rawCells.map((row) =>
+          row.map((c) => {
+            const v = String(c ?? 'missing');
+            return v === 'exact' ||
+              v === 'fuzzy' ||
+              v === 'wrong' ||
+              v === 'error' ||
+              v === 'missing'
+              ? v
+              : 'missing';
+          }),
+        );
+        // Per-cell ActionBindings, mirrors EntityCloud's per-point
+        // pattern. The renderer emits `cell:<slug>:<qid>`; each entry
+        // here resolves it to an `interact` call with the (slug, qid)
+        // baked in.
+        const on: Record<string, unknown> = {};
+        for (let qi = 0; qi < queries.length; qi++) {
+          for (let ri = 0; ri < runs.length; ri++) {
+            const qid = queries[qi];
+            const slug = runs[ri];
+            const cell = cells[qi]?.[ri] ?? 'missing';
+            on[`cell:${slug}:${qid}`] = {
+              action: 'interact',
+              params: {
+                widgetId,
+                surfaceId,
+                buttonId: `cell:${slug}:${qid}`,
+                action: 'select',
+                data: { slug, query_id: qid, cell },
+              },
+            };
+          }
+        }
+        elements[key] = {
+          type: 'DifficultyMatrix',
+          props: { queries, runs, cells },
+          on,
+        } as UIElement;
+        return key;
+      }
+      case 'CostTrend': {
+        const rawRows = Array.isArray(node.rows)
+          ? (node.rows as Array<Record<string, unknown>>)
+          : [];
+        const rows = rawRows.map((r) => ({
+          slug: String(r.slug ?? ''),
+          model: String(r.model ?? ''),
+          input_tokens:
+            typeof r.input_tokens === 'number' ? r.input_tokens : 0,
+          output_tokens:
+            typeof r.output_tokens === 'number' ? r.output_tokens : 0,
+          est_usd:
+            r.est_usd == null
+              ? null
+              : typeof r.est_usd === 'number'
+                ? r.est_usd
+                : null,
+          mtime: String(r.mtime ?? ''),
+        }));
+        const metric =
+          node.metric === 'usd' || node.metric === 'tokens'
+            ? (node.metric as 'usd' | 'tokens')
+            : 'tokens';
+        elements[key] = {
+          type: 'CostTrend',
+          props: { rows, metric },
+        };
+        return key;
+      }
       case 'EntityCloud': {
         const rawPoints = Array.isArray(node.points)
           ? (node.points as Array<Record<string, unknown>>)

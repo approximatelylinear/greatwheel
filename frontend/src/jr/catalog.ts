@@ -88,6 +88,51 @@ export const spikeCatalog = defineCatalog(schema, {
       description:
         'Vertical rail showing the conversation\'s segments — contiguous runs of session entries that share entities. Each segment carries a label, kind (comparison / decision / deep_dive / construction / other), and the entry-id range it spans so the rail can sync with chat scroll. Emitted by the backend when SpineSegmentsUpdated fires.',
     },
+    Code: {
+      props: z.object({
+        language: z.string().nullable().optional(),
+        content: z.string(),
+        diff: z.boolean().optional(),
+        title: z.string().nullable().optional(),
+      }),
+      description:
+        'Read-only monospace block for source / config / diff content. Set `diff: true` to color lines beginning with `+` / `-` / `@@` as a unified diff. `language` is a hint label rendered in the corner; no actual syntax highlighting is performed.',
+    },
+    Markdown: {
+      props: z.object({
+        content: z.string(),
+      }),
+      description:
+        'Renders GitHub-flavored markdown. Use for `EXPERIMENTS.md` excerpts, hypothesis-ledger narrative, or any longer-form prose the agent emits as a widget rather than in chat.',
+    },
+    DifficultyMatrix: {
+      props: z.object({
+        queries: z.array(z.string()),
+        runs: z.array(z.string()),
+        cells: z.array(
+          z.array(z.enum(['exact', 'fuzzy', 'wrong', 'error', 'missing'])),
+        ),
+      }),
+      description:
+        'Cross-run query difficulty grid. Rows are queries (in order of `queries`), columns are runs (in order of `runs`). `cells[q][r]` classifies the outcome on correctness only: exact / fuzzy / wrong / error / missing. Click a cell to drill into that (run, query).',
+    },
+    CostTrend: {
+      props: z.object({
+        rows: z.array(
+          z.object({
+            slug: z.string(),
+            model: z.string(),
+            input_tokens: z.number().int().nonnegative(),
+            output_tokens: z.number().int().nonnegative(),
+            est_usd: z.number().nullable().optional(),
+            mtime: z.string(),
+          }),
+        ),
+        metric: z.enum(['tokens', 'usd']).optional(),
+      }),
+      description:
+        'Inline sparkline of token usage (default) or estimated USD per run, sorted by `mtime`. `est_usd` is null for local-Ollama rows; if `metric: "usd"` and any rows are null, those points are omitted from the line.',
+    },
     EntityCloud: {
       props: z.object({
         points: z.array(

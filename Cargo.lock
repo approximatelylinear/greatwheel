@@ -3059,15 +3059,26 @@ dependencies = [
 name = "gw-bench-ui"
 version = "0.1.0"
 dependencies = [
+ "axum 0.8.8",
  "chrono",
+ "dotenvy",
  "gw-core",
+ "gw-engine",
+ "gw-llm",
+ "gw-loop",
+ "gw-runtime",
+ "gw-ui",
+ "ouros",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml",
+ "tower-http",
  "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
