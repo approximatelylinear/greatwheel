@@ -86,6 +86,7 @@ export interface SessionState {
 
 type Action =
   | { type: 'append-user'; content: string }
+  | { type: 'hydrate-transcript'; messages: Message[] }
   | { type: 'mark-running' }
   | { type: 'text-message-start'; message_id: string; entry_id?: string }
   | { type: 'user-message-anchor'; entry_id: string }
@@ -130,6 +131,15 @@ function reducer(state: SessionState, action: Action): SessionState {
         ],
         running: true,
       };
+    case 'hydrate-transcript': {
+      // Replace the message list wholesale with the server-shipped
+      // transcript. Called once on session (re)load before any new
+      // events stream in. If the user has already typed a message
+      // locally (unlikely but possible during the brief async
+      // window) it would get clobbered — we keep the rule simple
+      // and let the server-side persisted log win.
+      return { ...state, messages: action.messages };
+    }
     case 'mark-running':
       return { ...state, running: true };
     case 'user-message-anchor': {
@@ -304,6 +314,10 @@ export function useSessionStore() {
   return {
     state,
     appendUser: (content: string) => dispatch({ type: 'append-user', content }),
+    /** Replace the message list with a server-shipped transcript.
+     *  App.tsx fires this once on session load via `fetchTranscript`. */
+    hydrateTranscript: (messages: Message[]) =>
+      dispatch({ type: 'hydrate-transcript', messages }),
     markRunning: () => dispatch({ type: 'mark-running' }),
     /** Called by the state bridge when a new widget lands in
      *  `/widgets/<id>`. Drives the follow-up anchoring heuristic. */

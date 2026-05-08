@@ -140,6 +140,36 @@ export async function setSegmentCommitted(
   return (await r.json()) as { committed_at: string | null };
 }
 
+/** One row in the chat transcript backfill served by
+ *  `GET /sessions/{sid}/transcript`. Mirrors the bare-shape returned
+ *  by the server: only chat-visible roles (user / assistant), no
+ *  code blocks, no host calls. */
+export interface TranscriptEntry {
+  entry_id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  created_at: string;
+}
+
+/** Fetch the chat-visible transcript for a session, oldest first.
+ *  Used on session (re)load to seed the message store before any new
+ *  events stream in. Returns [] for sessions with no entries (and
+ *  for sessions the literature_assistant binary doesn't recognise,
+ *  if KB is wired up — anything else is a real error). */
+export async function fetchTranscript(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<TranscriptEntry[]> {
+  const r = await fetch(
+    `${BASE}/sessions/${sessionId}/transcript`,
+    { signal },
+  );
+  if (!r.ok) {
+    throw new Error(`fetchTranscript ${r.status}: ${await r.text()}`);
+  }
+  return (await r.json()) as TranscriptEntry[];
+}
+
 /** All segments the user has committed in this session. Newest commit
  *  first. Includes invalidated-but-committed rows so the workspace
  *  survives resegment churn. */

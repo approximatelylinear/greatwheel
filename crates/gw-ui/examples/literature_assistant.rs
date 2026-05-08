@@ -1654,6 +1654,92 @@ async fn handle_workspace(
     }
 }
 
+/// One row in the chat-transcript backfill served by
+/// `GET /sessions/{sid}/transcript`. Bare shape: only the
+/// chat-visible roles (user / assistant) so the frontend can seed
+/// `useSessionStore.messages` on session resume without dragging in
+/// code blocks, host calls, snapshots, etc. Those still live in
+/// `session_entries` for the loop's own context replay.
+#[derive(serde::Serialize)]
+struct TranscriptEntry {
+    entry_id: uuid::Uuid,
+    role: &'static str,
+    content: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// HTTP handler for the chat-transcript backfill. Returns all
+/// `user_message` and `assistant_narration` entries for the session
+/// in chronological order; everything else is filtered out at the
+/// SQL level. Cheap enough that we don't paginate in v1.
+async fn handle_transcript(
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    axum::extract::State(pool): axum::extract::State<sqlx::PgPool>,
+) -> Result<axum::Json<Vec<TranscriptEntry>>, (axum::http::StatusCode, String)> {
+    let sid = uuid::Uuid::parse_str(&session_id).map_err(|_| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid session id".to_string(),
+        )
+    })?;
+    type Row = (
+        uuid::Uuid,
+        String,
+        serde_json::Value,
+        chrono::DateTime<chrono::Utc>,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        r#"
+        SELECT id, entry_type, content, created_at
+        FROM session_entries
+        WHERE session_id = $1
+          AND entry_type IN ('user_message', 'assistant_narration')
+        ORDER BY created_at ASC
+        "#,
+    )
+    .bind(sid)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| {
+        tracing::warn!(error = %e, "transcript listing failed");
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            e.to_string(),
+        )
+    })?;
+
+    // The `content` column holds a full `EntryType` JSON dump:
+    //   { "UserMessage": "<text>" }
+    //   { "AssistantNarration": { "content": "<text>" } }
+    // (Discriminant is the variant name, externally tagged by serde
+    // default.) Skip rows where the shape doesn't match — should not
+    // happen in practice but defensive against stale schemas.
+    let entries: Vec<TranscriptEntry> = rows
+        .into_iter()
+        .filter_map(|(id, tag, content, created_at)| {
+            let (role, text) = match tag.as_str() {
+                "user_message" => ("user", content.get("UserMessage")?.as_str()?.to_string()),
+                "assistant_narration" => (
+                    "assistant",
+                    content
+                        .pointer("/AssistantNarration/content")?
+                        .as_str()?
+                        .to_string(),
+                ),
+                _ => return None,
+            };
+            Some(TranscriptEntry {
+                entry_id: id,
+                role,
+                content: text,
+                created_at,
+            })
+        })
+        .collect();
+
+    Ok(axum::Json(entries))
+}
+
 /// Demo-only fixed UUIDs for the literature_assistant's
 /// org/user/agent_def chain. Stable across runs so re-launching the
 /// binary doesn't pile up rows; ON CONFLICT DO NOTHING makes the
@@ -2533,6 +2619,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .route(
                 "/sessions/{session_id}/workspace",
                 axum::routing::get(handle_workspace),
+            )
+            .route(
+                "/sessions/{session_id}/transcript",
+                axum::routing::get(handle_transcript),
             )
             .with_state(pool.clone());
         // Sessions sidebar API — orthogonal to spine, but gated on

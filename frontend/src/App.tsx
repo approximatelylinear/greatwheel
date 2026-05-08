@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createStateStore, type StateStore } from '@json-render/core';
 import { JSONUIProvider, useStateValue } from '@json-render/react';
-import { postMessage, postWidgetEvent } from './api/client';
+import { fetchTranscript, postMessage, postWidgetEvent } from './api/client';
 import { openStream } from './api/sse';
 import { useSessionStore } from './store/session';
 import { ChatPane } from './components/ChatPane';
@@ -43,8 +43,14 @@ export function App() {
   const [sessionId] = useState(resolveSessionId);
   const [debug] = useState(debugEnabled);
   const [streamError, setStreamError] = useState<string | null>(null);
-  const { state, appendUser, markRunning, widgetAdded, ingest: sessionIngest } =
-    useSessionStore();
+  const {
+    state,
+    appendUser,
+    hydrateTranscript,
+    markRunning,
+    widgetAdded,
+    ingest: sessionIngest,
+  } = useSessionStore();
 
   // Single json-render StateStore for the whole app. Populated by
   // STATE_SNAPSHOT + STATE_DELTA events via the stateBridge helper;
@@ -75,6 +81,39 @@ export function App() {
     );
     return close;
     // sessionIngest is stable (useReducer dispatch).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  // Backfill chat transcript on session (re)load. The SSE stream above
+  // hydrates widgets via STATE_SNAPSHOT but doesn't replay prior chat
+  // messages — those live in `session_entries` (PG) and need an
+  // explicit fetch. Runs in parallel with the stream open; on a fresh
+  // session the endpoint returns [] and this is a cheap no-op.
+  useEffect(() => {
+    if (!sessionId) return;
+    const ac = new AbortController();
+    fetchTranscript(sessionId, ac.signal)
+      .then((rows) => {
+        if (ac.signal.aborted) return;
+        hydrateTranscript(
+          rows.map((r) => ({
+            id: r.entry_id,
+            role: r.role,
+            content: r.content,
+            entryId: r.entry_id,
+          })),
+        );
+      })
+      .catch((e: unknown) => {
+        // 404 on backends without the endpoint mounted is fine — log
+        // for debug-level diagnosis rather than surfacing as a stream
+        // error (which would block the chat UI).
+        if (ac.signal.aborted) return;
+        // eslint-disable-next-line no-console
+        console.debug('transcript backfill skipped:', e);
+      });
+    return () => ac.abort();
+    // hydrateTranscript is stable (useReducer dispatch).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
