@@ -1,7 +1,9 @@
 # Design: literature assistant with entity browser
 
 **Status:** Drafted 2026-04-24 · Extended 2026-04-29 with the
-Semantic Spine + Workspace (see §14).
+Semantic Spine + Workspace (see §14) · Extended 2026-05-08 with the
+KB wiki view, sessions API, multi-session manager, and transcript
+backfill (see §15). Frontend sidebar plan in §16.
 
 ## 1. Goal
 
@@ -384,3 +386,410 @@ Items left on the spine punch list, ordered by user-visible impact:
   creation; as it grows entity counts the label can drift. Cheap fix
   is re-prompt when entity_ids changes by ≥N.
 - **GC for invalidated segment rows.** Accumulate forever today.
+
+## 15. Extension: KB wiki + multi-user sessions (2026-05-08)
+
+Four shipped in one push, on branch `browsecomp/apr19`. They turn
+the demo from "single-shot canvas" into a multi-user app you can
+leave and come back to.
+
+### 15.1 What landed
+
+#### a) `KbDocWiki` — Wikipedia-style view per ingested paper
+
+A new long-form drawer surface that renders one KB source as a real
+doc page: serif title + author byline, infobox right rail
+(URL, ingest date, source format, short id), TOC left rail derived
+from chunk `heading_path`, body in the middle, mentioned entities
+grouped by kind + referenced topics as click-through chips.
+
+  - Backend: new `wiki_slot` field on `UiSurface` (alongside
+    `canvas_slot` / `canvas_aux_slot`), `WikiPinned` /
+    `WikiUnpinned` notifications, `pin_to_wiki(widget_id)` host fn,
+    `clear_wiki_slot(session_id)`. AG-UI codec mirrors `wikiSlot`
+    in canonical state and emits `replace /wikiSlot ...` patches on
+    pin/unpin. Close button fires `action: "close_wiki"` which the
+    AG-UI adapter short-circuits like `focus` — clears the slot
+    without involving the agent.
+  - `kb_get_wiki(source_ref)` host fn (new `crates/gw-kb/src/wiki.rs`
+    module) builds the WikiDoc payload: source meta + TOC +
+    chunk-grouped sections + entities + topics. `source_ref`
+    accepts UUID, UUID prefix (≥4 chars), full source URL, or
+    arXiv id (`2504.13684`). The arXiv path matches both
+    `metadata->>'arxiv_id'` and the canonical
+    `https://arxiv.org/abs/<id>` URL so older rows still resolve.
+  - Frontend: `KbDocWiki` widget in the json-render catalog (with
+    matching `translate.ts` case + `registry.tsx` render),
+    `frontend/src/widgets/KbDocWiki.tsx` for the layout,
+    `frontend/src/components/WikiPane.tsx` for the slide-in drawer
+    (80vw / max 1280px, backdrop, Esc-to-close), CSS in
+    `frontend/src/styles.css` keyed `kb-wiki-*`. Entity / topic chip
+    clicks fire `interact` with action `open_kb_entity` /
+    `open_kb_topic`.
+  - Trigger paths in the agent: a "📖 Open as wiki" button on the
+    paper detail card (the existing turn-2 drill-down) and NL
+    recognition of "show wiki for X" / "open the wiki". Single-
+    iteration handler in `SYSTEM_PROMPT` runs
+    `kb_get_wiki(arxiv_id)` → `emit_widget(KbDocWiki, multi_use=True)`
+    → `pin_to_wiki(widget_id)`. **`multi_use=True` is required** so
+    chip clicks don't terminate the widget on first interaction.
+
+#### b) Sessions API — Phase 1 of the multi-user plan
+
+Migration `017_session_titles.sql` adds `title` / `summary` /
+`archived_at` to `sessions` plus an index on
+`(user_id, archived_at, last_active_at DESC)` for the sidebar's hot
+path. New `crates/gw-ui/src/sessions_api.rs` exposes:
+
+  - `POST /users` — idempotent upsert. Body `{user_id?, name?,
+    email?}`. Lets the frontend stamp a localStorage-generated UUID
+    into PG on first load.
+  - `GET /users/{uid}/sessions?include_archived=0` — newest first,
+    bounded to 200 rows. Carries `(session_id, title, summary,
+    created_at, last_active_at, archived_at, message_count)`.
+  - `POST /users/{uid}/sessions` — body `{title?}`. Returns
+    `{session_id}`. 404s when the user row doesn't exist (the
+    frontend POSTs `/users` first).
+  - `PATCH /sessions/{sid}` — body `{title?, archived?}`. Used by
+    the auto-titler and the archive button.
+
+Mounted by `literature_assistant` next to the spine routes when KB
+is configured. Takes a `SessionsApiConfig{default_org_id,
+default_agent_id}` so users + sessions created here pin to the same
+FK chain `flush_to_pg` expects (`LIT_ORG_ID` / `LIT_AGENT_ID` for
+the demo). No auth: trust-the-client `?user=<uuid>` model — real
+auth is layered on later without changing this surface.
+
+#### c) `LitSessionManager` — multi-session per process
+
+`literature_assistant` is no longer single-session-per-process. New
+`LitSessionManager` holds `RwLock<HashMap<SessionId, SessionEntry>>`;
+an axum `from_fn_with_state` middleware on `/sessions/{uuid}/*`
+calls `manager.ensure(session_id)` before each route handler runs.
+First reference to an unknown id triggers a lazy spawn:
+
+  - `lookup_session_user(pg, sid)` reads the existing row's
+    `user_id` (so sessions created via the API inherit their owner);
+    falls back to `LIT_USER_ID` for URL-pasted ids that don't yet
+    have a row.
+  - `ensure_literature_session(pg, sid, user_id)` is now idempotent
+    and parameterised (was hard-coded to `LIT_USER_ID`). Seeds the
+    full FK chain on every spawn — repeat calls are no-ops via
+    `ON CONFLICT DO NOTHING`.
+  - `spawn_session_loop(session_id, &deps)` builds the per-session
+    machinery (channels, `register_session`, tap forwarder,
+    `ConversationBridge`, `ReplAgent` with `gw_session_id` pre-set,
+    `SessionTree::with_pg`, `ConversationLoop` + optional
+    `SpineExtractor`) and spawns a dedicated `std::thread` running
+    a fresh `tokio::Runtime` to host `conv_loop.run`.
+  - `SessionDeps` struct bundles the process-global handles
+    (`Arc<AgUiAdapter>`, `Option<Arc<KbStores>>`, `OllamaClient`
+    by clone, `Arc<HostFnRouter>`, `Arc<LoopConfigTemplate>`).
+
+Plugin caches (`paper_cache` / `vector_cache` / `text_cache` on
+`LiteraturePlugin`) stay process-global and shared across sessions —
+they're keyed by arxiv_id, so two users searching "GNN chemistry"
+correctly see the same ingested papers.
+
+Backward compat: `main()` still seeds one session at boot via
+`manager.ensure(...)` and prints its URL. The existing
+`?session=<uuid>` flow is untouched. No idle eviction in v1 —
+sessions live for the process lifetime.
+
+#### d) Chat transcript backfill on resume
+
+The AG-UI `STATE_SNAPSHOT` rehydrates widgets on `/stream`
+resubscribe but doesn't replay prior chat messages — those live in
+`session_entries` (PG) and the frontend's `useSessionStore` starts
+empty on each page load. So reloading a session brought back the
+canvas + follow-up widgets while the user/assistant history above
+them stayed blank.
+
+  - New `GET /sessions/{sid}/transcript` handler in
+    `literature_assistant.rs` filters `session_entries` to the
+    chat-visible rows (`user_message` + `assistant_narration` —
+    deliberately *not* `assistant_message`, which is mostly Python)
+    and returns them oldest-first as `[{entry_id, role, content,
+    created_at}]`.
+  - `frontend/src/api/client.ts` exports `fetchTranscript`. A new
+    `useEffect` in `App.tsx` runs it alongside the SSE-stream open
+    and dispatches `hydrate-transcript` to seed `useSessionStore`.
+    Code blocks, host calls, and snapshots stay out of the chat UI
+    by design — a wider endpoint can serve the debug pane later.
+
+### 15.2 Schema changes since §14
+
+```
+-- 017_session_titles.sql
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summary TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS sessions_user_active
+    ON sessions (user_id, archived_at, last_active_at DESC);
+```
+
+(Existing `users`, `orgs`, `agent_defs`, `sessions`, `session_entries`
+schemas were already there from §14 / earlier. No migration touches
+were needed for the wiki view — `kb_sources.metadata->>'arxiv_id'`
+already exists.)
+
+### 15.3 New host functions
+
+  - `kb_get_wiki(source_ref) -> dict` — under `kb.read` capability.
+  - `pin_to_wiki(widget_id)` — under `ui:write`.
+
+Updated tool_permissions list in `literature_assistant.rs` adds
+both alongside the existing `pin_to_canvas` / `pin_below_canvas` /
+`emit_widget` / etc.
+
+### 15.4 What §15 deliberately leaves out
+
+  - **Cluster wiki** (a global `KbClusterWiki` rendering N related
+    sources together). Slot + drawer pattern reuses cleanly when we
+    add it.
+  - **REPL state persistence on resume.** The conversation loop's
+    `SessionTree::with_pg` reloads prior entries into LLM context,
+    and the transcript backfill restores chat UI; but Python REPL
+    variables and the `LiteraturePlugin` in-memory caches still
+    rebuild lazily. Acceptable trade for v1 — the persistent KB
+    means most "I already saw this paper" facts come back via
+    `get_paper(...)` on demand.
+  - **REST-level cross-session activity.** Workspace still scopes
+    to one session (committed segments per session). The user-level
+    "all my saved segments / papers / queries" view (Phase 4 of the
+    data plan) is deferred until the sidebar lands.
+  - **Auth.** `?user=<uuid>` is trust-the-client.
+
+## 16. Plan: frontend sidebar (next session)
+
+What the rest of Phase 1 looks like — written so a fresh Claude
+session can pick this up without reading the conversation log.
+
+### 16.1 Goal
+
+Replace the `?session=<uuid>` paste-the-URL flow with a real
+left-rail sidebar that lists the user's prior sessions, lets them
+switch between them, archive ones they don't want, and create new
+ones with a single click. Plus a minimal user-identity hook so the
+sidebar knows which sessions to fetch.
+
+The backend that supports this already exists (§15.1.b, §15.1.c).
+This is a frontend-only piece.
+
+### 16.2 What's already there to lean on
+
+  - **APIs.** `POST /users`, `GET /users/{uid}/sessions`,
+    `POST /users/{uid}/sessions`, `PATCH /sessions/{sid}` — see
+    §15.1.b for shapes. Lazy-spawn middleware (§15.1.c) means
+    *any* session_id the frontend navigates to will cause its
+    `ConversationLoop` to spin up on first `/stream` connect. The
+    sidebar doesn't need to "ask the binary to spawn" — clicking a
+    session and updating the URL is enough.
+  - **Drawer pattern.** `frontend/src/components/WorkspaceDrawer.tsx`
+    is a working example of an overlay panel that fetches via the
+    API client, renders a list, and dispatches actions on click.
+    Mirror its skeleton for the session list interactions
+    (selection, archive, rename).
+  - **Layout grid.** `App.tsx` already has a layout switch
+    (`chat-primary` / `canvas-primary`). The sidebar adds a fixed
+    left column that lives outside both, as a sibling of `app-main`.
+  - **Identity placeholder.** The "no session configured" empty
+    state in `App.tsx:81` becomes the bootstrap path for users with
+    no localStorage UUID yet.
+
+### 16.3 Decisions already made (per the planning conversation)
+
+  - **(A)** Multi-session-per-process refactor — done in §15.1.c.
+  - **(a)** User identity = silent UUID auto-mint into localStorage,
+    no login UI. Optional display name set via header click later.
+  - **First-6-words auto-titler** — derive a session title from the
+    first user message; LLM-titler optional follow-up if titles
+    look bad.
+
+### 16.4 Implementation plan, file-level
+
+#### 16.4.1 User identity hook
+
+New: `frontend/src/api/users.ts` (api wrappers for `POST /users` and
+the sessions endpoints) + a `useUserId()` hook that reads in this
+order:
+
+  1. `?user=<uuid>` URL param (so the user can paste a profile
+     URL).
+  2. `localStorage.gw_user_id`.
+  3. Generate fresh UUID, persist to localStorage, fire
+     `POST /users` once to create the row server-side.
+
+Returns `{userId: string, displayName: string | null,
+setDisplayName(name)}`. The display name is read from the response
+of `POST /users` (server defaults to `user-<8hex>`); a future
+header click can `PATCH` it.
+
+#### 16.4.2 Session routing
+
+`App.tsx`'s `resolveSessionId` becomes `useSessionRouting()` that
+returns `{userId, sessionId, switchSession(id)}`. URL becomes
+`?user=<u>&session=<s>`. `switchSession` updates the URL via
+`history.pushState` (no full reload — the existing SSE / transcript
+effects re-fire on `sessionId` change, which they already key on).
+
+When `userId` is set but `sessionId` is null, the app should
+auto-fetch `GET /users/{uid}/sessions` and either:
+
+  - Land on the most recently active session (`last_active_at` is
+    descending in the response).
+  - Or, if there are no sessions yet, auto-create one via
+    `POST /users/{uid}/sessions` and navigate to it.
+
+This replaces today's "no session configured" placeholder.
+
+#### 16.4.3 `SessionSidebar` component
+
+New: `frontend/src/components/SessionSidebar.tsx`. Layout, top to
+bottom:
+
+  - **Header:** display name (truncated, hover for full uid). Click
+    to rename via PATCH. Default names are `user-<8hex>`.
+  - **`+ New session` button:** primary CTA. Calls
+    `POST /users/{uid}/sessions` with empty body, then
+    `switchSession(new_id)`.
+  - **List:** scrollable, each row: title (or first-6-words
+    fallback for untitled), relative timestamp ("3m ago", "yesterday"),
+    hover-reveal archive icon. Active session has a left-border
+    accent. Click → `switchSession(id)`.
+  - **Empty state:** "No sessions yet — start one." with the
+    `+ New session` button only.
+  - **Archived toggle (optional v1):** a "Show archived" checkbox
+    that flips the fetch to `?include_archived=1`. Archived rows
+    render dimmer with a small "(archived)" badge.
+
+State management: the sidebar manages its own list via local
+`useState` + `fetchSessionsForUser`. Refetches when:
+
+  - Component mounts.
+  - `switchSession` is called (so a fresh session that just got
+    `last_active_at` bumped re-sorts to the top).
+  - `archive` / `rename` actions complete.
+
+A small `bumpReloadKey()` pattern (see `WorkspaceDrawer`) avoids
+state coupling with the rest of the app.
+
+#### 16.4.4 Layout shift
+
+`App.tsx`'s top-level grid currently has `app-header` /
+`app-main` / `app-footer`. Add the sidebar as a left rail:
+
+```
+┌─────────────────────────────────────┐
+│ app-header (existing)               │
+├──────────┬──────────────────────────┤
+│          │                          │
+│ sidebar  │ app-main (existing grid) │
+│ (240px)  │                          │
+│          │                          │
+├──────────┴──────────────────────────┤
+│ app-footer (existing input)         │
+└─────────────────────────────────────┘
+```
+
+Sidebar width is fixed at first (240px); a drag splitter could
+follow `DragSplitter` (frontend/src/components/) if desired.
+
+#### 16.4.5 Auto-titler
+
+Server-side, in `LitSessionManager::ensure` (or right after the
+first user message lands — `ConversationLoop` already emits the
+`UserMessageAnchor` event). The cheapest hook: when the first
+`session_entries` row of `entry_type = 'user_message'` is inserted
+and the `sessions.title IS NULL`, run:
+
+```rust
+let title = msg.split_whitespace().take(6).collect::<Vec<_>>().join(" ");
+sqlx::query("UPDATE sessions SET title = $1 WHERE id = $2 AND title IS NULL")
+    .bind(title)
+    .bind(session_id)
+    .execute(pg)
+    .await?;
+```
+
+Where to wire it: the easiest spot is the tap-forwarder spawned by
+`spawn_session_loop` — it already sees every `LoopEvent`. When the
+event is `UserMessage(content)` AND the title check is needed, fire
+the update. Alternatively defer this to the LLM-titler follow-up.
+
+For v1 the sidebar should just show the title field if set,
+otherwise fall back to "Untitled session" or the first 30 chars of
+the most-recent user message — this keeps the UI working even if
+the auto-titler is shipped later.
+
+### 16.5 Acceptance criteria
+
+  - Open `localhost:5173` with no `?user` / `?session` — auto-mints
+    a user, creates a first session, lands on it. Existing search
+    flow works.
+  - Click `+ New session` — new session appears at top of sidebar,
+    URL updates to `?user=...&session=<new>`, chat is empty,
+    canvas is empty. EntityCloud renders fresh on next search.
+  - Click a different session in the sidebar — chat history,
+    EntityCloud, and any pinned wiki rehydrate (transcript backfill
+    + STATE_SNAPSHOT do this already; just verify no regressions).
+  - Archive a session — disappears from default listing, shows up
+    under "Show archived". Unarchive flips it back.
+  - Open the same user in two browser windows — both see the same
+    session list. Archiving in one updates the other on next
+    refresh / sidebar reload.
+
+### 16.6 Out of scope for this slice
+
+  - **Real auth.** Still trust-the-client. A login flow can wrap
+    `useUserId` later without touching the sidebar.
+  - **Cross-user sharing of sessions.** Each session has one owner;
+    no "share" affordance.
+  - **Cross-session workspace.** Workspace stays per-session for
+    now; the user-level "everything I've saved" view is Phase 4 of
+    the data plan.
+  - **Search within the sidebar.** A growing list eventually wants
+    a filter input; punt until it's needed.
+
+### 16.7 Files to touch (cheat sheet)
+
+```
+NEW   frontend/src/api/users.ts
+NEW   frontend/src/components/SessionSidebar.tsx
+NEW   frontend/src/components/UserBadge.tsx        (optional split)
+EDIT  frontend/src/App.tsx                          (layout + routing)
+EDIT  frontend/src/main.tsx                         (only if URL parsing
+                                                     moves there — likely
+                                                     stays in App.tsx)
+EDIT  frontend/src/styles.css                       (sidebar CSS)
+EDIT  frontend/src/api/client.ts                    (re-export TranscriptEntry
+                                                     etc; or split into users.ts)
+```
+
+If the auto-titler is bundled in:
+
+```
+EDIT  crates/gw-ui/examples/literature_assistant.rs (tap forwarder hook
+                                                     in spawn_session_loop)
+```
+
+### 16.8 Likely first commit
+
+Single feature commit:
+`feat(frontend): user-aware session sidebar (Phase 1 finish)`
+covering identity hook + routing + sidebar component + auto-create-
+on-first-load + layout. Auto-titler can be a follow-up if it grows.
+
+### 16.9 Reading order for a fresh Claude session
+
+  1. `docs/design-demo-literature-assistant.md` §15 (this document,
+     the section above) for context on what already shipped.
+  2. `crates/gw-ui/src/sessions_api.rs` for the API shapes.
+  3. `frontend/src/components/WorkspaceDrawer.tsx` as a working
+     example of fetch + render + actions.
+  4. `frontend/src/App.tsx` `resolveSessionId` (~line 30) and the
+     "no session configured" empty state (~line 81) for the routing
+     touchpoints.
+  5. `frontend/src/store/session.ts` `hydrate-transcript` action
+     for how the chat seeds on session change — confirms
+     `sessionId` is the right re-render key.
