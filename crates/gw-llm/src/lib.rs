@@ -142,6 +142,33 @@ impl OllamaClient {
         }
     }
 
+    /// Returns the embedding endpoint URL based on the active backend.
+    /// Embeddings use `direct_url`, which may point at a different server
+    /// than chat (e.g. chat on a hosted API, embeddings on a Modal sglang
+    /// deployment).
+    fn embed_url(&self) -> String {
+        match self.backend {
+            LlmBackend::Ollama => format!("{}/api/embed", self.direct_url),
+            LlmBackend::Sglang | LlmBackend::OpenAi => {
+                format!("{}/v1/embeddings", self.direct_url)
+            }
+        }
+    }
+
+    /// Extract embedding vectors from a batch response, handling both the
+    /// Ollama shape (`{"embeddings": [[..]]}`) and the OpenAI-compatible
+    /// shape (`{"data": [{"embedding": [..]}]}`) used by SGLang/vLLM/OpenAI.
+    fn extract_embeddings(&self, json: &serde_json::Value) -> Option<Vec<Vec<f32>>> {
+        match self.backend {
+            LlmBackend::Ollama => json["embeddings"]
+                .as_array()
+                .map(|a| a.iter().map(parse_embedding).collect()),
+            LlmBackend::Sglang | LlmBackend::OpenAi => json["data"]
+                .as_array()
+                .map(|a| a.iter().map(|e| parse_embedding(&e["embedding"])).collect()),
+        }
+    }
+
     /// Non-streaming chat completion.
     /// For SGLang backend, defaults to think=false (Qwen3.5 thinking mode off).
     pub async fn chat(
@@ -278,7 +305,7 @@ impl OllamaClient {
         const MAX_CHARS: usize = 8192;
         const RETRY_MAX_CHARS: usize = 4096;
 
-        let url = format!("{}/api/embed", self.direct_url);
+        let url = self.embed_url();
         let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
         let mut embedding_dim: Option<usize> = None;
 
@@ -299,19 +326,26 @@ impl OllamaClient {
                 "input": truncated,
             });
 
-            let resp = self.client.post(&url).json(&body).send().await?;
+            let mut req = self.client.post(&url).json(&body);
+            if let Some(key) = &self.api_key {
+                req = req.bearer_auth(key);
+            }
+            let resp = req.send().await?;
             let status = resp.status();
 
             if status.is_success() {
                 let json: serde_json::Value = resp.json().await?;
-                if let Some(embeddings) = json["embeddings"].as_array() {
-                    for emb in embeddings {
-                        let vec = parse_embedding(emb);
-                        if embedding_dim.is_none() && !vec.is_empty() {
-                            embedding_dim = Some(vec.len());
-                        }
-                        all_embeddings.push(vec);
+                let embeddings = self.extract_embeddings(&json).ok_or_else(|| {
+                    format!(
+                        "embed: response missing embeddings (model={}, body={})",
+                        self.embedding_model, json
+                    )
+                })?;
+                for vec in embeddings {
+                    if embedding_dim.is_none() && !vec.is_empty() {
+                        embedding_dim = Some(vec.len());
                     }
+                    all_embeddings.push(vec);
                 }
             } else {
                 // Batch failed — retry individually.
@@ -326,21 +360,33 @@ impl OllamaClient {
                         "model": self.embedding_model,
                         "input": [t],
                     });
-                    let vec = match self.client.post(&url).json(&body).send().await {
-                        Ok(r) if r.status().is_success() => {
-                            let json: serde_json::Value = r.json().await?;
-                            json["embeddings"]
-                                .as_array()
-                                .and_then(|a| a.first())
-                                .map(parse_embedding)
-                                .unwrap_or_default()
-                        }
-                        _ => {
-                            tracing::warn!("Single embed failed, using zero-vector fallback");
-                            Vec::new()
-                        }
-                    };
-                    if embedding_dim.is_none() && !vec.is_empty() {
+                    let mut rreq = self.client.post(&url).json(&body);
+                    if let Some(key) = &self.api_key {
+                        rreq = rreq.bearer_auth(key);
+                    }
+                    let r = rreq.send().await?;
+                    let r_status = r.status();
+                    if !r_status.is_success() {
+                        let r_body = r.text().await.unwrap_or_default();
+                        return Err(format!(
+                            "embed: upstream {} returned {} (model={}, body={})",
+                            url, r_status, self.embedding_model, r_body
+                        )
+                        .into());
+                    }
+                    let json: serde_json::Value = r.json().await?;
+                    let vec = self
+                        .extract_embeddings(&json)
+                        .and_then(|mut v| if v.is_empty() { None } else { Some(v.remove(0)) })
+                        .unwrap_or_default();
+                    if vec.is_empty() {
+                        return Err(format!(
+                            "embed: upstream {} returned empty vector for text (model={}, response={})",
+                            url, self.embedding_model, json
+                        )
+                        .into());
+                    }
+                    if embedding_dim.is_none() {
                         embedding_dim = Some(vec.len());
                     }
                     if vec.is_empty() {
