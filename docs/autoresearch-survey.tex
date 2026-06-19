@@ -1,0 +1,812 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{graphicx}
+\usepackage{tabularx}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{natbib}
+\usepackage{multirow}
+\usepackage{array}
+
+\definecolor{accent}{HTML}{2563EB}
+\definecolor{codebg}{HTML}{F5F5F5}
+\definecolor{codetext}{HTML}{333333}
+\definecolor{gray60}{HTML}{666666}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=accent,
+  urlcolor=accent,
+  citecolor=accent,
+}
+
+\titleformat{\section}{\large\bfseries\color{accent}}{}{0em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{}{0em}{}
+\titleformat{\subsubsection}{\normalsize\itshape}{}{0em}{}
+
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+
+\title{\textbf{Automated Research Systems}\\[0.3em]
+  \large A Survey of Architectures, Approaches, and Trade-Offs\\
+  in LLM-Driven Research Automation}
+\author{M.\ Berends \and Claude (Anthropic)}
+\date{March 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Large language models have enabled a new class of systems that automate
+aspects of the research process---from literature discovery and synthesis
+to hypothesis generation, experimental optimisation, and full paper
+writing. This survey examines the major approaches to automated research
+(``autoresearch''), organising them into four categories: \emph{deep
+research} (multi-step web search and report generation), \emph{literature
+agents} (scientific question answering over academic corpora),
+\emph{full-pipeline science} (end-to-end idea-to-paper systems), and
+\emph{empirical optimisation} (autonomous code-level
+edit--benchmark--iterate loops). For each category we analyse the
+architectures and design decisions of leading systems, identify shared
+patterns and key differentiators, and discuss the trade-offs that shape
+system behaviour. We find that decomposition strategy, quality-control
+mechanisms, and context management are the principal axes along which
+systems diverge, and that open-source implementations have reached or
+exceeded commercial systems on several benchmarks.
+\end{abstract}
+
+% =================================================================
+\section{Introduction}
+\label{sec:intro}
+
+The application of LLMs to research automation has expanded rapidly
+since 2023. Early systems used retrieval-augmented generation (RAG) for
+single-turn question answering; current systems employ multi-agent
+architectures, iterative search loops, and tool use to conduct extended
+autonomous research sessions lasting minutes to hours.
+
+Despite this proliferation, the landscape lacks a unifying framework.
+Systems marketed under similar labels---``deep research'',
+``AI scientist'', ``research agent''---often automate fundamentally
+different aspects of the research process. A literature synthesis agent
+that finds and cites papers has little architectural overlap with an
+evolutionary code optimiser that discovers new algorithms through
+mutation and fitness evaluation.
+
+This survey proposes a four-category taxonomy based on \emph{what is
+being automated} (Section~\ref{sec:taxonomy}), then provides detailed
+analysis of exemplar systems in each category
+(Sections~\ref{sec:deep}--\ref{sec:empirical}). Section~\ref{sec:cross}
+identifies cross-cutting patterns, and Section~\ref{sec:conclusion}
+discusses implications for future system design.
+
+% =================================================================
+\section{Taxonomy}
+\label{sec:taxonomy}
+
+We organise automated research systems along two dimensions: the
+\emph{input} (what triggers the system) and the \emph{output} (what it
+produces). This yields four natural categories:
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}L{2.8cm}L{3.5cm}L{3.5cm}L{4cm}@{}}
+\toprule
+\textbf{Category} & \textbf{Input} & \textbf{Output} & \textbf{Exemplars} \\
+\midrule
+Deep Research & Natural-language question & Multi-page cited report &
+  OpenAI, Gemini, Perplexity, STORM, GPT-Researcher \\[0.5em]
+Literature Agents & Research question & Cited answer with evidence &
+  PaperQA2, OpenScholar, Elicit \\[0.5em]
+Full-Pipeline Science & Domain + seed ideas & Paper, code, results &
+  AI Scientist, ShinkaEvolve, Coscientist, SciAgents \\[0.5em]
+Empirical Optimisation & Objective + codebase & Optimised code + log &
+  pi-autoresearch, ShinkaEvolve, AlphaEvolve \\
+\bottomrule
+\end{tabular}
+\caption{Taxonomy of automated research systems. ShinkaEvolve appears
+in two categories as it combines evolutionary algorithm discovery
+(full-pipeline) with code-level optimisation (empirical).}
+\label{tab:taxonomy}
+\end{table}
+
+\noindent
+These categories are not mutually exclusive. The most ambitious systems
+(e.g.\ FutureHouse Robin) aim to span multiple categories by combining
+literature synthesis with hypothesis generation and experimental
+validation.
+
+% =================================================================
+\section{Deep Research Systems}
+\label{sec:deep}
+
+Deep research systems accept a natural-language question and produce a
+comprehensive, cited report after conducting autonomous multi-step web
+search. All share a common architectural pattern---the iterative
+\emph{ReAct loop} (plan $\to$ search $\to$ read $\to$ reason $\to$
+repeat $\to$ synthesise)---but diverge significantly in depth, speed,
+and search strategy.
+
+\subsection{Commercial Systems}
+
+\subsubsection{OpenAI Deep Research.}
+Launched February 2025 as a ChatGPT feature, OpenAI Deep Research is
+powered by a fine-tuned o3-class reasoning model trained via
+reinforcement learning on simulated browsing tasks. It executes
+30--60 web searches per query across 150--200 reasoning iterations,
+visiting dozens of pages over 5--30 minutes. A secondary o3-mini model
+summarises the chain-of-thought for user display. At launch it achieved
+51.5\% on BrowseComp~\citep{browsecomp2025}---versus 1.9\% for GPT-4o
+with browsing---and 26.6\% on Humanity's Last Exam. Its primary
+limitation is latency: the system optimises for depth at the expense of
+speed, with queries routinely taking 20+ minutes.
+
+\subsubsection{Google Gemini Deep Research.}
+Launched December 2024 on Gemini 2.0 Flash Thinking (later Gemini 3
+Pro), Google's system introduces an \emph{asynchronous task manager}
+that maintains shared state between a planner model and parallel
+task-execution models. This enables graceful recovery from individual
+sub-task failures without restarting the entire research session.
+The user can review and edit the research plan before execution. Native
+Google Search integration provides arguably the highest-quality search
+backend of any system. On DRACO~\citep{draco2026}, Gemini Deep Research
+scores 58.97\%, and on BrowseComp, Gemini-3.1-Pro reaches 85.9.
+
+\subsubsection{Perplexity Deep Research.}
+Perplexity optimises for the opposite end of the speed--depth
+trade-off. Using a modular planner--retriever--synthesiser architecture
+with 3--5 sequential refinement cycles, it completes most queries in
+under 3 minutes---approximately 9$\times$ faster than OpenAI. It
+references $\sim$50 sources per query on average (vs.\ $\sim$20 for
+competitors) via on-demand web crawling rather than static indexes. As
+of February 2026, it integrates Claude Opus as the underlying reasoning
+model and achieves the highest DRACO score of any system at
+70.5\%~\citep{draco2026}. Perplexity also published the DRACO benchmark
+itself, designed to evaluate cross-domain deep research quality.
+
+\subsubsection{Grok DeepSearch / DeeperSearch.}
+xAI's Grok 4.20 Beta introduced a native 4-agent multi-agent
+architecture: a coordinator (Grok), a research specialist (Harper), a
+logic/code specialist (Benjamin), and a creative/divergent specialist
+(Lucas). All four share the same $\sim$3T parameter MoE backbone with
+lightweight LoRA persona adapters. Multi-Agent Reinforcement Learning
+(MARL) during post-training rewards convergence on truthful answers.
+Uniquely, Grok integrates real-time X/Twitter data, giving it access
+to breaking news and social sentiment unavailable to other systems.
+
+\subsubsection{Comparison.}
+Table~\ref{tab:deep_commercial} summarises the key parameters.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}L{2.8cm}C{2cm}C{1.8cm}C{2.2cm}C{2.5cm}@{}}
+\toprule
+\textbf{System} & \textbf{Searches} & \textbf{Time} & \textbf{BrowseComp} & \textbf{DRACO} \\
+\midrule
+OpenAI Deep Research & 30--60 & 5--30\,min & 51.5 & 52.1 \\
+Gemini Deep Research & 100+ pages & 3--10\,min & 85.9 & 59.0 \\
+Perplexity & $\sim$50 sources & 1--3\,min & --- & 70.5 \\
+Grok DeepSearch & 10 iterations & 2--3\,min & --- & --- \\
+Claude Research & multi-pass & 5--45\,min & 84.0 & --- \\
+\bottomrule
+\end{tabular}
+\caption{Commercial deep research systems. BrowseComp scores use latest
+available model variants. Dashes indicate unreported scores.}
+\label{tab:deep_commercial}
+\end{table}
+
+\subsection{Open-Source Systems}
+
+\subsubsection{GPT-Researcher.}
+GPT-Researcher~\citep{gptresearcher2024} uses a plan-and-execute
+pattern with a planner agent, researcher agent, and writer agent. The
+planner generates sub-queries from the research question; these are
+processed \emph{concurrently} via \texttt{asyncio.gather}. Retrieval
+supports 12+ backends (Tavily, Google, Bing, DuckDuckGo, Serper, Arxiv,
+PubMed, Semantic Scholar, etc.). Scraped content is compressed via
+cosine-similarity filtering (threshold 0.35) over 1000-character chunks.
+
+The system's \emph{deep research mode} implements recursive
+breadth-first exploration: at each level, it generates \texttt{breadth}
+queries (default 4), spawns nested \texttt{GPTResearcher} instances for
+each, extracts learnings and follow-up questions via LLM, and recurses
+to \texttt{depth} levels (default 2). Context is capped at 25,000 words.
+A separate multi-agent mode built on LangGraph adds role-specialised
+agents (editor, researcher, writer, reviewer, publisher) with optional
+human-in-the-loop review.
+
+\subsubsection{STORM.}
+STORM~\citep{storm2024} (Stanford) takes a fundamentally different
+approach to question decomposition. Rather than generating sub-queries
+directly, it \emph{simulates multi-expert dialogue}:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Persona generation.} The system finds related Wikipedia
+    topics, scrapes their tables of contents, and asks the LLM to create
+    diverse ``editor'' personas (e.g.\ ``Historian focusing on early
+    development'', ``Policy analyst examining regulation'').
+  \item \textbf{Conversation simulation.} For each persona, a
+    multi-turn dialogue (default 3 turns) runs between a
+    \texttt{WikiWriter} (the persona asking questions via DSPy
+    \texttt{ChainOfThought}) and a \texttt{TopicExpert} (answering via
+    retrieval). Conversations run concurrently.
+  \item \textbf{Outline and article generation.} The information table
+    from all dialogues feeds hierarchical outline generation (merging a
+    ``direct'' and ``informed'' outline), then section-by-section
+    article writing with inline citations.
+  \item \textbf{Polishing.} A dedicated refinement pass handles
+    deduplication and summarisation.
+\end{enumerate}
+
+\noindent
+STORM uses five separate LLM configurations (conversation, question
+asking, outline generation, article writing, polishing), reflecting a
+design philosophy where different cognitive tasks benefit from different
+model sizes and prompting strategies. Co-STORM~\citep{costorm2024}
+extends this with collaborative human-in-the-loop discourse.
+
+The multi-perspective approach is the most architecturally novel
+decomposition strategy in this category: by simulating \emph{who would
+care about this topic}, it produces more diverse coverage than direct
+sub-query generation.
+
+\subsubsection{MiroThinker.}
+MiroThinker~\citep{mirothinker2025} (MiroMind AI) achieves the highest
+reported BrowseComp score of any system: MiroThinker-H1 reaches 88.2,
+surpassing Gemini-3.1-Pro (85.9) and Claude-4.6-Opus (84.0). Limited
+architectural details are publicly available; the system is open source
+on GitHub.
+
+% =================================================================
+\section{Literature Agents}
+\label{sec:lit}
+
+Literature agents specialise in answering questions grounded in
+academic publications. Unlike deep research systems that search the
+open web, these systems operate over curated corpora of scientific
+papers, with strong emphasis on citation faithfulness and structured
+evidence extraction.
+
+\subsection{PaperQA2}
+
+PaperQA2~\citep{paperqa2024} (FutureHouse) models research as a
+reinforcement learning problem. The \texttt{PaperQAEnvironment} class
+implements an RL-style \texttt{Environment} with \texttt{reset()} and
+\texttt{step(action)} methods, returning observations, rewards, and
+termination signals.
+
+The agent selects from five tools at each timestep:
+
+\begin{description}[nosep, style=nextline, labelwidth=3cm, leftmargin=3.5cm]
+  \item[\texttt{PaperSearch}] Queries a pre-built search index, adds
+    papers to the working \texttt{Docs} collection.
+  \item[\texttt{GatherEvidence}] Retrieves relevant chunks from loaded
+    papers, scores each chunk 0--10 for relevance via a summary LLM,
+    and stores scored \texttt{Context} objects.
+  \item[\texttt{GenerateAnswer}] Synthesises an answer from top-ranked
+    contexts with inline citations.
+  \item[\texttt{Reset}] Clears all gathered evidence (recovery from bad
+    search directions).
+  \item[\texttt{Complete}] Terminates the session with a certainty
+    assessment.
+\end{description}
+
+\noindent
+Three model roles serve different functions: a main LLM for answer
+generation, a summary LLM for evidence scoring, and an embedding model
+for semantic search. Paper metadata is enriched via four clients
+(Semantic Scholar, CrossRef, OpenAlex, Unpaywall), and a retraction
+checker flags withdrawn papers.
+
+On LitQA2, PaperQA2 achieves \textbf{superhuman accuracy}
+($\sim$60\% vs.\ $\sim$50\% for PhD-level human experts) with very low
+hallucination rates---the strongest evidence that tool-augmented LLM
+agents can exceed human performance on academic question answering when
+properly grounded in source material.
+
+\subsection{OpenScholar}
+
+OpenScholar~\citep{openscholar2024} (AI2) takes a different approach:
+rather than dynamic tool use, it performs dense retrieval over 45M+
+full-text paper passages, reranks results, and synthesises answers with
+a fine-tuned 8B model specifically trained for citation faithfulness.
+On ScholarBench, this 8B model matches or exceeds GPT-4o and PaperQA2
+on four scientific QA datasets while using a fraction of the compute.
+The key insight is that domain specialisation and retrieval
+augmentation can substitute for model scale in well-defined scientific
+QA tasks.
+
+\subsection{Elicit}
+
+Elicit (Ought/Elicit Inc.) focuses on \emph{structured extraction}
+rather than free-form QA. It searches 200M+ papers via Semantic Scholar,
+then uses LLMs to extract structured data columns (study design, sample
+size, methods, findings) from abstracts and full texts. This makes it
+uniquely suited for systematic reviews and meta-analyses, where the goal
+is not a narrative answer but a structured comparison across studies.
+It is the most workflow-oriented system in this category, functioning
+as an assisted tool rather than an autonomous agent.
+
+\subsection{Consensus}
+
+Consensus indexes 200M+ academic papers and answers questions by
+extracting and aggregating claims from abstracts. Its signature feature
+is a ``consensus meter'' showing the degree of scientific agreement on
+a given claim across studies. A GPT-4-powered synthesis module
+(``Consensus Copilot'') provides narrative summaries. The system
+demonstrates that useful research automation need not require deep
+autonomy---sometimes aggregation across many simple extractions is
+more valuable than sophisticated reasoning over a few sources.
+
+% =================================================================
+\section{Full-Pipeline Science}
+\label{sec:pipeline}
+
+Full-pipeline systems attempt to automate the complete research cycle:
+from idea generation through experimentation to paper writing and review.
+These are the most ambitious---and most controversial---automated
+research systems.
+
+\subsection{The AI Scientist}
+
+The AI Scientist~\citep{aiscientist2024} (Sakana AI) implements a
+five-phase sequential pipeline:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Idea generation.} The LLM generates research ideas as
+    structured JSON (name, title, experiment plan, novelty/feasibility
+    ratings), with up to 5 rounds of self-reflection. All previously
+    generated ideas are included in the prompt to encourage diversity.
+  \item \textbf{Novelty check.} A multi-round interactive loop (up to
+    10 iterations) where the LLM searches Semantic Scholar, reviews
+    results, and decides whether to search again or declare the idea
+    novel/not novel.
+  \item \textbf{Experimentation.} Uses Aider (an AI coding assistant) to
+    modify \texttt{experiment.py}, run it, and iterate (up to 5 runs,
+    4 retries each). The system edits real code and runs real experiments.
+  \item \textbf{Writeup.} Section-by-section \LaTeX{} generation with
+    per-section prompts, a citation loop (up to 20 rounds of Semantic
+    Scholar search and BibTeX integration), and two full refinement
+    passes. Compilation errors are auto-corrected via Aider.
+  \item \textbf{Review.} Simulated NeurIPS-style peer review with
+    ensemble of 5 reviews (temperature 0.1), scoring originality,
+    quality, clarity, significance, and soundness.
+\end{enumerate}
+
+\noindent
+The system produces full \LaTeX{} papers compiled to PDF for $\sim$\$15
+per paper (with Claude Sonnet 3.5). Papers score $\sim$4--5/10 on the
+automated reviewer---borderline reject at best venues. The primary
+limitation is quality: while technically correct, the papers lack
+novelty and depth. The system is also restricted to ML/DL domains where
+experiments are code-runnable; it cannot perform wet-lab science.
+
+Nevertheless, the AI Scientist demonstrates that end-to-end research
+automation is technically feasible, and its open-source release has
+enabled significant follow-on work.
+
+\subsection{ShinkaEvolve}
+
+ShinkaEvolve~\citep{shinkaevolve2025} (Sakana AI) shifts from paper
+writing to \emph{algorithm discovery} via evolutionary optimisation.
+The core loop maintains an archive of evaluated programs, uses LLMs to
+generate mutations and crossovers, and evaluates fitness against
+concrete metrics. Three innovations drive its sample efficiency:
+
+\begin{description}[nosep, style=nextline, labelwidth=4.5cm, leftmargin=5cm]
+  \item[Novelty-based rejection] Before expensive evaluation, program
+    text embedding similarity plus an LLM-as-novelty-judge filters
+    near-duplicates and trivial variations.
+  \item[Multi-armed bandit LLM selection] A bandit dynamically picks the
+    best model from an ensemble as evolution progresses, adapting to
+    problem structure.
+  \item[Exploration/exploitation balancing] An intelligent parent
+    sampling strategy decides when to refine known solutions versus try
+    novel directions.
+\end{description}
+
+\noindent
+Results are striking: ShinkaEvolve found a state-of-the-art circle
+packing solution ($n=26$) in only 150 samples, where prior systems
+(including Google DeepMind's AlphaEvolve) required thousands. It evolved
+a 3-stage agentic architecture for AIME math reasoning in 75
+generations, and outperformed DeepSeek's Global Load Balancing Loss for
+Mixture-of-Experts routing in 30 generations. The system is fully open
+source under Apache 2.0, in contrast to AlphaEvolve.
+
+ShinkaEvolve's key insight is that LLM-guided search over program space
+is dramatically more sample-efficient than random mutation when combined
+with novelty filtering---the LLM's prior knowledge about what
+constitutes a ``meaningfully different'' program acts as an implicit
+regulariser.
+
+\subsection{Coscientist and ChemCrow}
+
+Coscientist~\citep{coscientist2023} (CMU, published in \emph{Nature})
+and ChemCrow~\citep{chemcrow2024} (EPFL) extend automated research into
+wet-lab chemistry. Both use tool-augmented LLM agents: ChemCrow
+integrates 18 chemistry tools (RDKit, safety databases, reaction
+predictors) in a ReAct-style loop; Coscientist additionally controls
+robotic lab equipment (Opentrons) to autonomously plan and execute
+chemical experiments. Coscientist successfully optimised
+palladium-catalysed cross-coupling reactions without human intervention.
+
+These systems demonstrate that the agent paradigm extends beyond
+information tasks to physical-world experimentation, though they require
+specialised infrastructure and raise safety concerns around autonomous
+chemical synthesis.
+
+\subsection{SciAgents}
+
+SciAgents~\citep{sciagents2024} (MIT) takes a unique approach to
+hypothesis generation: rather than searching text, it reasons over
+\emph{knowledge graphs}. Multiple LLM agents with different roles
+(ontologist, scientists, critic) interact over a graph of domain
+concepts. The ontology agent structures knowledge; scientist agents
+propose hypotheses by finding novel connections in the graph; a critic
+agent evaluates plausibility. This graph-based approach is particularly
+suited to materials science, where novel material properties often arise
+from unexpected combinations of known components.
+
+% =================================================================
+\section{Empirical Optimisation}
+\label{sec:empirical}
+
+Empirical optimisation systems automate the
+\emph{edit--benchmark--iterate} cycle: they modify code, measure the
+effect, keep improvements, discard regressions, and repeat. Unlike the
+previous categories, these systems generate \emph{new knowledge through
+experimentation} rather than synthesising existing knowledge.
+
+\subsection{pi-autoresearch}
+
+pi-autoresearch~\citep{piautoresearch2025} is an extension for the
+\texttt{pi} AI coding agent that adds an autonomous experiment loop.
+Inspired by Karpathy's autoresearch concept, it targets optimisation
+tasks with clear metrics: test speed, bundle size, ML training loss,
+build times, Lighthouse scores.
+
+\subsubsection{Architecture.}
+The system has three layers:
+
+\begin{description}[nosep, style=nextline, labelwidth=3cm, leftmargin=3.5cm]
+  \item[Extension] Registers three tools into the agent's namespace:
+    \texttt{init\_experiment} (once), \texttt{run\_experiment}
+    (benchmark), and \texttt{log\_experiment} (keep/discard). Manages
+    session state and TUI dashboard.
+  \item[Skills] Prompt-based instructions (\texttt{SKILL.md} files) that
+    teach the agent the full workflow, including how to create benchmark
+    scripts, correctness checks, and the loop rules.
+  \item[Finalize] A bash script that splits a messy experiment branch
+    into clean, independently-mergeable PR branches, verifying that
+    their union matches the original.
+\end{description}
+
+\subsubsection{Context management.}
+pi-autoresearch addresses the context exhaustion problem---the central
+challenge for long-running agent sessions---through several mechanisms:
+
+\begin{itemize}[nosep]
+  \item \textbf{Append-only JSONL log.} Every experiment result (metric
+    values, status, description, confidence) is persisted regardless of
+    whether the code change was kept or discarded.
+  \item \textbf{ASI (Actionable Side Information).} Structured
+    key--value annotations on each experiment that survive code reverts.
+    When the agent's context is reset, ASI prevents it from repeating
+    failed experiments---the code is gone but the learnings persist.
+  \item \textbf{Token-aware auto-resume.} The system tracks token
+    consumption per iteration, predicts when the context window will
+    overflow (with 1.2$\times$ safety margin), gracefully stops, and
+    auto-resumes in a fresh context up to 20 times. This enables
+    multi-hour unattended optimisation sessions.
+  \item \textbf{Output truncation.} Benchmark output sent to the LLM is
+    capped at 10 lines / 4\,KB, with structured \texttt{METRIC
+    name=value} lines parsed automatically.
+\end{itemize}
+
+\subsubsection{Quality control.}
+Confidence scoring uses Median Absolute Deviation (MAD): the ratio
+$|\text{best\_delta}| / \text{MAD}$ across all runs distinguishes real
+improvements ($\geq$2.0$\times$) from benchmark noise ($<$1.0$\times$).
+Optional \emph{backpressure checks} (\texttt{autoresearch.checks.sh})
+run correctness validation (tests, types, lint) after each passing
+benchmark, preventing optimisation that breaks correctness.
+
+\subsection{Relationship to ShinkaEvolve and AlphaEvolve}
+
+ShinkaEvolve (Section~\ref{sec:pipeline}) operates in the same
+edit--evaluate--iterate paradigm but at a different level of
+abstraction. Where pi-autoresearch optimises \emph{within a codebase}
+(making incremental changes to existing code), ShinkaEvolve evolves
+\emph{entire algorithms} (generating novel programs from scratch or via
+crossover). AlphaEvolve (Google DeepMind, closed-source) occupies a
+similar niche to ShinkaEvolve but requires orders of magnitude more
+evaluations.
+
+The key architectural difference is \emph{what persists between
+iterations}: pi-autoresearch persists the codebase itself (via git
+commits) plus structured learnings (ASI); ShinkaEvolve persists a
+population archive with fitness scores; AlphaEvolve persists an
+evolutionary island model. All three demonstrate that LLMs are
+effective mutation operators for code, but the surrounding
+infrastructure---novelty filtering, confidence scoring, context
+management---determines practical utility.
+
+% =================================================================
+\section{Cross-Cutting Analysis}
+\label{sec:cross}
+
+\subsection{Decomposition Strategy}
+
+How a system breaks a research question into sub-tasks is the single
+most consequential architectural decision. We observe five distinct
+strategies:
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}L{3.5cm}L{3.5cm}L{6cm}@{}}
+\toprule
+\textbf{Strategy} & \textbf{Systems} & \textbf{Trade-off} \\
+\midrule
+LLM sub-query generation & GPT-Researcher, OpenAI, Perplexity &
+  Simple and fast; queries cluster around obvious angles \\[0.3em]
+Multi-perspective simulation & STORM &
+  Broader coverage; slower; more creative \\[0.3em]
+Interactive novelty search & AI Scientist &
+  Good for finding literature gaps; requires domain API \\[0.3em]
+Evolutionary mutation & ShinkaEvolve &
+  Efficient solution-space exploration; needs fitness function \\[0.3em]
+Dynamic agent decision & PaperQA2 &
+  Most flexible; hardest to debug and control \\
+\bottomrule
+\end{tabular}
+\caption{Decomposition strategies across systems.}
+\label{tab:decomposition}
+\end{table}
+
+\subsection{The Speed--Depth Trade-Off}
+
+The central design tension in all automated research systems is how much
+compute to spend per query. This manifests differently across categories:
+
+\begin{itemize}[nosep]
+  \item \textbf{Deep research:} Perplexity/Grok (1--3\,min, broad
+    coverage) vs.\ OpenAI (5--30\,min, deep reasoning).
+  \item \textbf{Literature agents:} OpenScholar (single-pass retrieval +
+    fine-tuned model) vs.\ PaperQA2 (multi-step tool use).
+  \item \textbf{Full-pipeline:} AI Scientist ($\sim$\$15/paper, moderate
+    quality) vs.\ human researchers ($\sim$months/paper, high quality).
+  \item \textbf{Empirical optimisation:} pi-autoresearch (hours of
+    autonomous iteration) vs.\ ShinkaEvolve (150 samples to SOTA).
+\end{itemize}
+
+\noindent
+No system has resolved this trade-off; the optimal point depends
+entirely on the use case. Speed-optimised systems excel at factual
+lookups and current-events research; depth-optimised systems excel at
+complex analytical questions requiring multi-hop reasoning.
+
+\subsection{Quality Control Mechanisms}
+
+The mechanisms systems use to ensure output quality are the strongest
+predictors of practical utility:
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}L{3.8cm}L{3.5cm}L{5.5cm}@{}}
+\toprule
+\textbf{Mechanism} & \textbf{Systems} & \textbf{Effect} \\
+\midrule
+Relevance scoring per chunk & PaperQA2 &
+  Prevents low-quality evidence from diluting answers \\[0.3em]
+Multi-perspective diversity & STORM &
+  Prevents tunnel vision and query clustering \\[0.3em]
+Novelty rejection sampling & ShinkaEvolve &
+  Prevents wasted compute on near-duplicates \\[0.3em]
+Backpressure checks & pi-autoresearch &
+  Prevents correctness regressions during optimisation \\[0.3em]
+Confidence via MAD & pi-autoresearch &
+  Distinguishes signal from benchmark noise \\[0.3em]
+AI peer review & AI Scientist &
+  Catches errors post-hoc (weak calibration) \\[0.3em]
+Retraction checking & PaperQA2 &
+  Flags withdrawn papers before citation \\
+\bottomrule
+\end{tabular}
+\caption{Quality control mechanisms and their effects.}
+\label{tab:quality}
+\end{table}
+
+\subsection{Context Management}
+
+Long-running agent sessions inevitably exhaust context windows. Systems
+address this in three ways:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Large windows.} Commercial systems use 128K--1M token
+    contexts (Gemini, Claude). Effective but expensive, and still
+    insufficient for multi-hour sessions.
+  \item \textbf{Compression.} GPT-Researcher caps deep research at
+    25K words; PaperQA2 uses relevance scoring to prioritise what enters
+    context.
+  \item \textbf{External memory.} pi-autoresearch uses append-only logs,
+    ASI annotations, and session documents to persist learnings across
+    context resets. This is the most sophisticated approach and the only
+    one that enables truly multi-hour autonomous sessions.
+\end{enumerate}
+
+\subsection{Multi-Model Architectures}
+
+Most systems use multiple LLM configurations for different cognitive
+tasks. STORM uses five (conversation, question asking, outline, article
+writing, polishing). GPT-Researcher uses two (strategic for planning,
+smart for writing). PaperQA2 uses three (main, summary, embedding).
+ShinkaEvolve dynamically selects from an ensemble via multi-armed
+bandit.
+
+The pattern suggests that \emph{no single model is optimal for all
+sub-tasks} in a research workflow: lightweight models suffice for
+evidence scoring and query generation, while capable models are needed
+for synthesis and reasoning.
+
+\subsection{Open Source vs.\ Commercial}
+
+Open-source systems have reached or exceeded commercial systems on
+key benchmarks:
+
+\begin{itemize}[nosep]
+  \item \textbf{BrowseComp:} MiroThinker-H1 (88.2) $>$ all commercial
+    systems.
+  \item \textbf{Algorithm discovery:} ShinkaEvolve (150 samples) beats
+    AlphaEvolve (thousands of samples).
+  \item \textbf{Scientific QA:} OpenScholar 8B matches GPT-4o on
+    ScholarBench.
+  \item \textbf{Literature QA:} PaperQA2 exceeds human PhD-level
+    performance on LitQA2.
+\end{itemize}
+
+\noindent
+The commercial advantage lies in integration (search quality, UI,
+ecosystem) rather than raw capability. For researchers building custom
+systems, open-source components provide building blocks that match or
+exceed proprietary alternatives.
+
+% =================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+The automated research landscape has matured rapidly from single-turn
+RAG systems to multi-agent architectures capable of extended autonomous
+research sessions. Our four-category taxonomy---deep research, literature
+agents, full-pipeline science, and empirical optimisation---captures
+fundamentally different automation targets that share common
+architectural patterns but diverge in decomposition strategy, quality
+control, and context management.
+
+Three findings stand out:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Decomposition matters most.} STORM's multi-perspective
+    simulation produces more diverse research than direct sub-query
+    generation; ShinkaEvolve's novelty-filtered evolution is dramatically
+    more sample-efficient than random mutation. How a system breaks
+    problems apart determines coverage, efficiency, and output quality.
+  \item \textbf{Quality control is the differentiator.} The gap between
+    a useful and useless research agent is not the underlying LLM but
+    the surrounding quality infrastructure: relevance scoring (PaperQA2),
+    confidence estimation (pi-autoresearch), novelty filtering
+    (ShinkaEvolve), and perspective diversity (STORM).
+  \item \textbf{The two paradigms will converge.} Information synthesis
+    (finding existing knowledge) and empirical discovery (generating new
+    knowledge through experimentation) are currently separate. The most
+    impactful future systems will combine both---using literature agents
+    to generate hypotheses, then empirical optimisation to test them.
+    FutureHouse Robin and the AI Scientist are early attempts, but
+    neither does both halves well yet.
+\end{enumerate}
+
+\noindent
+For practitioners building automated research systems, the evidence
+favours composing specialised open-source components (PaperQA2 for
+literature, STORM-style decomposition for breadth, pi-autoresearch-style
+context management for long sessions) over relying on monolithic
+commercial offerings. The tools are available; the remaining challenge is
+integration.
+
+% =================================================================
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{99}
+
+\bibitem[{Boiko et~al.(2023)}]{coscientist2023}
+Boiko, D.~A., MacKnight, R., and Gomes, G.
+\newblock Autonomous chemical research with large language models.
+\newblock \emph{Nature}, 624:570--578, 2023.
+
+\bibitem[{Bran et~al.(2024)}]{chemcrow2024}
+Bran, A.~M., Cox, S., Schilter, O., Baldassari, C., White, A.~D., and
+Schwaller, P.
+\newblock ChemCrow: Augmenting large-language models with chemistry tools.
+\newblock \emph{Nature Machine Intelligence}, 6:525--535, 2024.
+
+\bibitem[{Elovic(2024)}]{gptresearcher2024}
+Elovic, A.
+\newblock GPT-Researcher: Autonomous agent for comprehensive online research.
+\newblock \url{https://github.com/assafelovic/gpt-researcher}, 2024.
+
+\bibitem[{Lu et~al.(2024)Lu, Lu, Lange, Foerster, Clune, and
+  Ha}]{aiscientist2024}
+Lu, C., Lu, Y., Lange, R.~T., Foerster, J., Clune, J., and Ha, D.
+\newblock The {AI Scientist}: Towards fully automated open-ended scientific
+  discovery.
+\newblock \emph{arXiv preprint arXiv:2408.06292}, 2024.
+
+\bibitem[{Lu et~al.(2024)Lu, Choi}]{storm2024}
+Lu, Y., et~al.
+\newblock {STORM}: Synthesis of topic outlines through retrieval and
+  multi-perspective question asking.
+\newblock \emph{arXiv preprint arXiv:2402.14207}, 2024.
+
+\bibitem[{Jiang et~al.(2024)}]{costorm2024}
+Jiang, Y., et~al.
+\newblock Into the unknown unknowns: Engaged human learning through
+  participation in language model agent conversations.
+\newblock \emph{arXiv preprint arXiv:2408.15232}, 2024.
+
+\bibitem[{Lala et~al.(2024)}]{paperqa2024}
+Lala, J., O'Donoghue, O., Mondal, A., Wallace, B., and White, A.~D.
+\newblock {PaperQA}: Retrieval-augmented generative agent for scientific
+  research.
+\newblock \emph{arXiv preprint arXiv:2312.07559}, 2024.
+
+\bibitem[{Asai et~al.(2024)}]{openscholar2024}
+Asai, A., et~al.
+\newblock {OpenScholar}: Synthesizing scientific literature with
+  retrieval-augmented {LM}s.
+\newblock \emph{arXiv preprint arXiv:2411.14199}, 2024.
+
+\bibitem[{Buehler(2024)}]{sciagents2024}
+Buehler, M.~J., et~al.
+\newblock {SciAgents}: Automating scientific discovery through multi-agent
+  intelligent graph reasoning.
+\newblock \emph{arXiv preprint arXiv:2409.05556}, 2024.
+
+\bibitem[{Sakana AI(2025)}]{shinkaevolve2025}
+Sakana AI.
+\newblock {ShinkaEvolve}: Evolutionary code optimization with {LLMs}.
+\newblock \emph{arXiv preprint arXiv:2509.19349}, 2025.
+
+\bibitem[{Zechner and Beorlegui(2025)}]{piautoresearch2025}
+Zechner, M. and Beorlegui, D.
+\newblock pi-autoresearch: Autonomous experiment loops for {AI} coding agents.
+\newblock \url{https://github.com/davebcn87/pi-autoresearch}, 2025.
+
+\bibitem[{OpenAI(2025)}]{browsecomp2025}
+OpenAI.
+\newblock {BrowseComp}: A simple challenge for browsing agents.
+\newblock \url{https://openai.com/index/browsecomp/}, 2025.
+
+\bibitem[{MiroMind AI(2025)}]{mirothinker2025}
+MiroMind AI.
+\newblock {MiroThinker}: Open research agent.
+\newblock \url{https://github.com/MiroMindAI/MiroThinker}, 2025.
+
+\bibitem[{Perplexity AI(2026)}]{draco2026}
+Perplexity AI.
+\newblock {DRACO}: Evaluating deep research performance in the wild.
+\newblock \emph{arXiv preprint arXiv:2602.11685}, 2026.
+
+\end{thebibliography}
+
+\end{document}

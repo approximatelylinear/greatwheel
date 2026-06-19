@@ -1,0 +1,278 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+
+\definecolor{accent}{HTML}{2563EB}
+\definecolor{codebg}{HTML}{F5F5F5}
+\definecolor{codetext}{HTML}{333333}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=accent,
+  urlcolor=accent,
+}
+
+\titleformat{\section}{\large\bfseries\color{accent}}{}{0em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{}{0em}{}
+
+\lstset{
+  backgroundcolor=\color{codebg},
+  basicstyle=\small\ttfamily\color{codetext},
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{codebg},
+  xleftmargin=1em,
+  framexleftmargin=0.5em,
+}
+
+\title{\textbf{Greatwheel}\\[0.3em]
+  \large An rLM-Coordinated Agentic Runtime:\\
+  System Overview and Experimental Findings}
+\author{M.\ Berends}
+\date{March 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Greatwheel is an agentic runtime built on the \emph{Recursive Language Model}
+(rLM) paradigm: language models write Python code in sandboxed REPLs, using
+variables---not the context window---as their working memory. A Rust core
+manages execution, routing, and observability while Python agents run inside
+\texttt{ouros} sandboxes. This report describes the system architecture,
+summarises experiments conducted on the BrowseComp-Plus factoid retrieval
+benchmark, and outlines planned next steps.
+\end{abstract}
+
+% -----------------------------------------------------------------
+\section{Introduction}
+
+Most agentic systems pass retrieved context directly into an LLM's context
+window. Greatwheel takes a different approach: the model never sees full
+context. Instead, every external operation---LLM calls, memory queries,
+inter-agent messages---is a \emph{pause point} where the Rust runtime
+intercepts, validates permissions, records traces, and resumes execution. The
+agent's working state lives as Python variables that persist across turns,
+giving the system perfect auditability and fine-grained resource control.
+
+A ``bare agent'' with no predefined code is still functional: the rLM can
+compose SDK globals (\texttt{llm}, \texttt{memory}, \texttt{agent},
+\texttt{channel}) into ad-hoc tools on the fly, and those tools survive to the
+next turn because they are ordinary Python functions in a persistent session.
+
+% -----------------------------------------------------------------
+\section{Architecture}
+
+The system is organised as a nine-crate Rust workspace with the following
+responsibilities:
+
+\begin{description}[style=nextline, labelwidth=2.5cm, leftmargin=3cm]
+  \item[\texttt{gw-core}] Shared types: IDs, Task, AgentDef, CallContext, permissions.
+  \item[\texttt{gw-runtime}] \texttt{ouros} integration, REPL session management, host-function bridge.
+  \item[\texttt{gw-llm}] LLM provider trait and Ollama client (via \texttt{rl-play} proxy).
+  \item[\texttt{gw-memory}] Hybrid search: LanceDB vectors + tantivy BM25 + Postgres, with RRF fusion.
+  \item[\texttt{gw-bus}] Inter-agent message bus (call/notify).
+  \item[\texttt{gw-channels}] Channel adapters (HTTP, WebSocket, webhooks).
+  \item[\texttt{gw-scheduler}] Task queue, per-org concurrency, rate limiting.
+  \item[\texttt{gw-trace}] OpenTelemetry GenAI instrumentation with Postgres export.
+  \item[\texttt{gw-server}] Binary crate: HTTP/WS API that wires everything together.
+\end{description}
+
+\noindent
+The production stack runs four Docker Compose services: the Greatwheel binary,
+\texttt{rl-play} (an LLM proxy that captures conversations for fine-tuning),
+Postgres, and Ollama.
+
+\subsection{The rLM Execution Loop}
+
+\begin{enumerate}
+  \item A user message creates a \textbf{Task} dispatched to an agent's
+        \texttt{ouros} session.
+  \item Context is injected as a Python variable
+        (\texttt{\_task = \{"payload": ...\}}).
+  \item The rLM receives a system prompt, a truncated session summary, and the
+        user message. It outputs Python code.
+  \item \texttt{ouros} executes the code. Pure computation runs immediately;
+        host-function calls (\texttt{llm}, \texttt{memory}, etc.) \emph{pause}
+        the session, and the Rust runtime fulfils each call before resuming.
+  \item The loop repeats until the rLM produces a \texttt{FINAL()} response or
+        an iteration limit is reached.
+  \item All Python variables persist to the next conversational turn.
+\end{enumerate}
+
+\subsection{Observability and Fine-Tuning}
+
+Every operation emits OpenTelemetry spans following GenAI semantic conventions.
+Spans are exported to the console, OTLP, and Postgres (the latter enables
+fine-tuning dataset extraction). All LLM calls also flow through
+\texttt{rl-play}, which groups conversations by session and supports SFT, DPO,
+and PPO exports---creating a closed loop from production traces to improved
+models.
+
+% -----------------------------------------------------------------
+\section{BrowseComp-Plus Experiments}
+
+BrowseComp-Plus is a factoid retrieval benchmark: 30 queries over a 100K web
+document corpus. It serves as the primary testbed for our rLM + retrieval
+research. We have conducted over 40 experiment runs, methodically varying
+retrieval strategy, prompting, and model configuration.
+
+\subsection{Current Best Result}
+
+Our best configuration achieves \textbf{36.7\% (11/30)} with a reproducibility
+range of 9--11 across runs (mean $\approx$10). Per-query timing averages 115\,s,
+of which 90\% is LLM inference in the rLM loop and 10\% is pre-search
+(decomposition + BM25 + PRF).
+
+\subsection{What Has Worked}
+
+\paragraph{Retrieval.}
+\begin{itemize}[nosep]
+  \item \textbf{Boosted BM25}: Phrase match (4$\times$), slop phrase (2$\times$),
+        AND'd terms (1.5$\times$), OR'd terms (1$\times$). This was the single
+        largest contributor, lifting accuracy by 2--3 queries.
+  \item \textbf{Pseudo-relevance feedback (PRF)}: Extracting distinctive terms
+        from round-1 snippets for expanded queries added $\sim$1--2 queries.
+  \item \textbf{Multi-query decomposition}: Breaking multi-hop questions into
+        independent sub-fact searches (1$\to$5 queries) meaningfully broadened
+        retrieval coverage.
+  \item \textbf{$k=10$ retrieval breadth}: More documents per search without
+        overwhelming the model.
+\end{itemize}
+
+\paragraph{Prompting and loop control.}
+\begin{itemize}[nosep]
+  \item \textbf{Document-grounded prompts}: Forcing \texttt{get\_document()} +
+        \texttt{llm\_query()} and emphasising corpus-only answers.
+  \item \textbf{VERIFY directive}: ``Search for the candidate answer by name to
+        confirm'' catches extraction errors.
+  \item \textbf{12 iterations}: Enough to explore, verify, and submit. 16
+        iterations caused second-guessing.
+  \item \textbf{\texttt{think:false} for utility calls}: Saves tokens on
+        pre-search extraction and fallback.
+  \item \textbf{Fallback extraction}: Recovers answers when the model does not
+        call \texttt{FINAL()} in time.
+\end{itemize}
+
+\subsection{What Has Not Worked}
+
+\begin{itemize}[nosep]
+  \item \textbf{HyDE (hypothetical document embeddings)}: No benefit for
+        BM25 queries.
+  \item \textbf{Dense vector search} (all six variants tested): Added zero
+        lift to BM25-only. Variants included asymmetric prefixes, BM25-weighted
+        RRF fusion, increased IVF-PQ probes, and a fully re-embedded corpus.
+        BrowseComp queries are entity-heavy (names, dates, places) where BM25
+        keyword matching naturally excels; 768-dimensional dense vectors
+        (\texttt{nomic-embed-text}) lack discrimination at 100K scale.
+  \item \textbf{Best-of-$N$ majority voting}: Wrong answers agreed more often
+        than correct ones---3$\times$ cost, same accuracy.
+  \item \textbf{Wider pre-search} (8+5 queries): Overwhelmed the model with
+        context.
+\end{itemize}
+
+\subsection{Key Insight: The Retrieval Ceiling}
+
+\textbf{86\% of failures are retrieval misses}---the relevant documents are
+never found. The 9B model reasons well once it has the right documents; the
+bottleneck is search, not extraction. However, the missing documents often lack
+both keyword \emph{and} semantic overlap with the query. They require reasoning
+about \emph{what kind of document would contain the answer}, which neither BM25
+nor dense retrieval performs.
+
+% -----------------------------------------------------------------
+\section{Challenges}
+
+Beyond the retrieval ceiling, several broader challenges have shaped
+development:
+
+\begin{enumerate}[nosep]
+  \item \textbf{High per-query variance.} The same configuration scores 9--11
+        out of 30 across runs. Individual queries flip between correct and
+        incorrect nondeterministically, making it hard to distinguish real gains
+        from noise.
+  \item \textbf{Token cost.} Each query consumes $\sim$150K tokens across a
+        12-iteration loop. The rLM loop dominates wall-clock time, and reducing
+        iterations hurts accuracy.
+  \item \textbf{Incomplete runtime.} Several crates (\texttt{gw-bus},
+        \texttt{gw-scheduler}, \texttt{gw-channels}) have trait definitions but
+        lack concrete implementations. The Python-side agent SDK is designed but
+        not yet wired to the host bridge.
+  \item \textbf{Multi-tenancy.} Core types support org/user/session hierarchy
+        and per-agent permissions, but auth middleware and session lifecycle
+        (idle timeout, snapshot, eviction) are not yet implemented.
+\end{enumerate}
+
+% -----------------------------------------------------------------
+\section{Next Steps}
+
+Our roadmap separates retrieval-quality improvements from orchestration and
+infrastructure work.
+
+\subsection{Near-Term: Retrieval}
+
+\begin{description}[style=nextline, labelwidth=4.5cm, leftmargin=5cm]
+  \item[ColBERT reranking (R2)] Use Reason-ModernColBERT (149M params) as
+    either a primary retriever or a BM25 reranker. ColBERT's late-interaction
+    token-level MaxSim scoring has demonstrated strong results on
+    BrowseComp-Plus in external work. We plan three modes: ColBERT-only, BM25 +
+    ColBERT RRF fusion, and BM25$\to$ColBERT rerank. Requires $\sim$10--16\,GB
+    VRAM.
+  \item[Larger rLM model (A3)] Use a 32B model (\texttt{qwen2.5:32b} or
+    \texttt{qwen3.5:32b}) for the main rLM loop, keeping the 9B model for
+    utility calls. Better reasoning should produce better search queries and
+    extraction.
+  \item[Ensemble (A4)] Run 2--3 diverse configurations per query and take the
+    union of correct answers. Historical analysis suggests the union across
+    existing configs reaches $\sim$40\%.
+\end{description}
+
+\subsection{Near-Term: Optimisation Infrastructure}
+
+\begin{description}[style=nextline, labelwidth=4.5cm, leftmargin=5cm]
+  \item[GEPA integration] Use GEPA's \texttt{optimize\_anything} API for
+    systematic prompt and parameter optimisation. The key unlock is
+    \emph{actionable side information} (ASI): per-query failure-mode
+    diagnostics that tell the optimiser \emph{why} a run scored as it did, not
+    just the scalar accuracy.
+  \item[ASI infrastructure] Even without GEPA, structured per-query diagnostics
+    (failure mode, retrieval recall, searches issued, tokens consumed) enable
+    smarter manual iteration.
+\end{description}
+
+\subsection{Medium-Term: Runtime Completion}
+
+\begin{itemize}[nosep]
+  \item \textbf{Episodes}: Compressed summaries of agent work that flow as
+        context between agents, enabling composability and multi-agent
+        collaboration.
+  \item \textbf{Agent SDK}: Wire Python-side \texttt{llm}, \texttt{memory},
+        \texttt{agent}, \texttt{channel} globals to the host bridge.
+  \item \textbf{Session lifecycle}: Idle timeout, snapshot to Postgres, eviction.
+  \item \textbf{Scheduler and bus}: Concrete implementations of task queuing,
+        rate limiting, and inter-agent messaging.
+\end{itemize}
+
+% -----------------------------------------------------------------
+\section{Conclusion}
+
+The core architectural bet---context as Python variables, not context
+window---has proven sound. The rLM + ouros execution model delivers
+auditability, composability, and resource control that would be difficult to
+achieve in a purely prompt-based system. On BrowseComp-Plus, boosted BM25 with
+pseudo-relevance feedback and document-grounded prompting reaches 37\%
+accuracy, with clear evidence that the retrieval ceiling (not model reasoning)
+is the binding constraint. ColBERT reranking and larger models are the most
+promising levers for the next phase of work.
+
+\end{document}
