@@ -1,0 +1,18 @@
+# Caddy reverse proxy — the single public front door.
+#
+# - Automatic HTTPS: Caddy fetches & renews a Let's Encrypt cert for $DOMAIN
+#   on first request. No manual cert handling.
+# - basic_auth: one shared username/password gates the entire app, so it is
+#   not anonymous-public. Generate the hash with:
+#       docker run --rm caddy:2 caddy hash-password --plaintext 'your-password'
+#   and put it in .env as BASIC_AUTH_HASH (escape each '$' as '$$').
+# - reverse_proxy: forwards to the greatwheel container on the private
+#   network. greatwheel itself has no public port.
+
+{$DOMAIN} {
+	basic_auth {
+		{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
+	}
+
+	reverse_proxy greatwheel:8090
+}

@@ -1,0 +1,68 @@
+# Production topology — the hybrid deployment.
+#
+# ONLY Caddy is exposed to the internet (80/443). greatwheel and Postgres
+# talk over the private default network and are never published to the host
+# (`expose:` is intra-network only; `ports:` would publish to the host).
+#
+# Prereqs on the VM:
+#   - cp config/greatwheel.prod.toml.example config/greatwheel.prod.toml  (then edit)
+#   - cp .env.example .env  (then fill in)
+#   - a DNS A/AAAA record for $DOMAIN pointing at this VM
+#
+# Run:  docker compose -f docker/docker-compose.prod.yml up -d --build
+
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER}
+      BASIC_AUTH_HASH: ${BASIC_AUTH_HASH}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - greatwheel
+
+  greatwheel:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    command: ["--config", "/etc/greatwheel/greatwheel.prod.toml"]
+    environment:
+      # LLM bearer token (Modal embed endpoint, and chat if same key).
+      GW_LLM_API_KEY: ${GW_LLM_API_KEY}
+    expose:
+      - "8090"
+    volumes:
+      # Mount the real (gitignored) prod config so secrets aren't baked into
+      # the image and edits don't require a rebuild.
+      - ../config/greatwheel.prod.toml:/etc/greatwheel/greatwheel.prod.toml:ro
+      - lance-data:/data/lance
+      - ../agents:/agents
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: greatwheel
+      POSTGRES_USER: gw
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    expose:
+      - "5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+
+volumes:
+  pg-data:
+  lance-data:
+  caddy-data:
+  caddy-config:

@@ -16,6 +16,10 @@ Thumbs.db
 # Environment
 .env
 .env.*
+!.env.example
+
+# Filled-in production config (keep the .example template in git)
+config/greatwheel.prod.toml
 
 # Python venvs and caches
 **/.venv/
