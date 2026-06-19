@@ -69,6 +69,9 @@ def make_searcher(name: str, encoder: EncoderClient, args: argparse.Namespace):
     elif base_name == "qdrant":
         from searchers.qdrant_searcher import QdrantSearcher
         s = QdrantSearcher(encoder, qdrant_url=args.qdrant_url, collection=args.qdrant_collection)
+    elif base_name == "qwen3":
+        from searchers.qwen3_searcher import Qwen3Searcher
+        s = Qwen3Searcher(args.qwen3_index_dir, encoder_url=args.qwen3_encoder_url)
     elif base_name == "tantivy":
         # Lightweight wrapper around the existing TantivySearcher in retrieval_benchmark.py
         from retrieval_benchmark import TantivySearcher
@@ -135,10 +138,21 @@ def measure_recall(hits: list[ScoredDoc], gold: set[str], k_values: list[int]) -
 
 
 def run(args):
-    print(f"Connecting to encoder service: {args.encoder_url}", flush=True)
-    encoder = EncoderClient(args.encoder_url)
-    health = encoder.health()
-    print(f"  encoder ready: {health.get('model')} on {health.get('device')}", flush=True)
+    # Only connect to the shared ColBERT encoder if a selected backend actually needs it.
+    # The qwen3 backend uses its own encoder service; tantivy needs no encoder at all.
+    needs_colbert_encoder = any(
+        name.removesuffix("+rerank") in {"brute_force", "lancedb_mv", "elasticsearch", "qdrant"}
+        or name.endswith("+rerank")
+        for name in args.searchers
+    )
+    encoder = None
+    if needs_colbert_encoder:
+        print(f"Connecting to encoder service: {args.encoder_url}", flush=True)
+        encoder = EncoderClient(args.encoder_url)
+        health = encoder.health()
+        print(f"  encoder ready: {health.get('model')} on {health.get('device')}", flush=True)
+    else:
+        print("No ColBERT-backed searchers selected; skipping encoder service", flush=True)
 
     gt = load_ground_truth()
     queries = load_sample_queries(args.queries)
@@ -228,6 +242,9 @@ def main():
     parser.add_argument("--es-index", default="colbert_mv")
     parser.add_argument("--qdrant-url", default="http://localhost:6333")
     parser.add_argument("--qdrant-collection", default="colbert_mv")
+    parser.add_argument("--qwen3-encoder-url", default="http://127.0.0.1:8003",
+                        help="Qwen3-Embedding HTTP service (separate process from --encoder-url)")
+    parser.add_argument("--qwen3-index-dir", default="data/qwen3-embed")
     parser.add_argument("--passage-index", default=str(VENDOR_ROOT / "data" / "tantivy-passages"))
 
     parser.add_argument("--brute-force-passages", type=int, default=None,
