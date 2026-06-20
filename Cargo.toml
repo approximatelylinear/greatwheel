@@ -9,6 +9,7 @@ members = [
     "crates/gw-trace",
     "crates/gw-server",
     "crates/gw-bench",
+    "crates/gw-bench-ui",
     "crates/gw-loop",
     "crates/gw-kb",
     "crates/gw-ui",
@@ -27,6 +28,7 @@ gw-server = { path = "crates/gw-server" }
 gw-loop = { path = "crates/gw-loop" }
 gw-kb = { path = "crates/gw-kb" }
 gw-ui = { path = "crates/gw-ui" }
+gw-bench-ui = { path = "crates/gw-bench-ui" }
 
 # External dependencies
 arrow-array = "57"

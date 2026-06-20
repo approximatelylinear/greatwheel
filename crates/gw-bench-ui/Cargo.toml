@@ -1,0 +1,39 @@
+[package]
+name = "gw-bench-ui"
+version = "0.1.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+gw-core = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+axum = { workspace = true }
+dotenvy = "0.15"
+gw-engine = { workspace = true }
+gw-llm = { workspace = true }
+gw-loop = { workspace = true }
+gw-runtime = { workspace = true }
+gw-ui = { workspace = true }
+ouros = { workspace = true }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[[example]]
+name = "smoke"
+path = "examples/smoke.rs"
+
+[[example]]
+name = "bench_dashboard"
+path = "examples/bench_dashboard.rs"

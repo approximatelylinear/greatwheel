@@ -1,0 +1,30 @@
+{
+  "metadata": {
+    "model": "qwen3.5:9b",
+    "llm_backend": "ollama",
+    "llm_url": "http://localhost:11434",
+    "searcher": "rlm-ouros",
+    "max_turns": 12,
+    "k": 10
+  },
+  "query_id": "1002",
+  "tool_call_counts": {"search": 3},
+  "usage": {"input_tokens": 7000, "output_tokens": 800, "total_tokens": 7800},
+  "timing": {
+    "total_ms": 120000,
+    "bm25_ms": 20,
+    "embed_ms": 0,
+    "vector_ms": 0,
+    "llm_query_ms": 0,
+    "get_doc_ms": 0,
+    "root_llm_ms": 119000,
+    "other_ms": 980
+  },
+  "status": "completed",
+  "termination_reason": "final_called",
+  "iterations_used": 6,
+  "retrieved_docids": ["30"],
+  "result": [
+    {"type": "output_text", "tool_name": null, "arguments": null, "output": "Exact Answer: Mozart"}
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "notes": [
+    {"ts": "2026-04-30T15:00:00Z", "text": "Baseline before passage RRF lands"}
+  ],
+  "tags": ["baseline", "qwen3.5:9b"]
+}
