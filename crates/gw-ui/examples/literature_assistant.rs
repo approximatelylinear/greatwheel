@@ -2726,6 +2726,19 @@ fn spawn_session_loop(
         conv_loop = conv_loop.with_spine_extractor(extractor);
     }
 
+    // Register the loop's cancellation cell with the adapter so
+    // `POST /sessions/{id}/cancel` can abort the in-flight turn.
+    // The cell is an `Arc<Mutex<CancellationToken>>`; the loop swaps
+    // a fresh token into it after each cancel, and the adapter
+    // dereferences at click time so subsequent cancels keep working.
+    let adapter_for_cancel = adapter.clone();
+    let cancel_handle = conv_loop.cancel_handle();
+    tokio::spawn(async move {
+        adapter_for_cancel
+            .register_cancel(session_id, cancel_handle)
+            .await;
+    });
+
     std::thread::Builder::new()
         .name(format!("gw-loop-{}", session_id.0))
         .spawn(move || {

@@ -85,6 +85,19 @@ pub struct AgUiState {
     sessions: Mutex<HashMap<SessionId, broadcast::Sender<AgUiEvent>>>,
     /// Per-session inbound sinks.
     inbound: Mutex<HashMap<SessionId, InboundSender>>,
+    /// Per-session cancellation cells. Populated by `register_cancel`
+    /// from the conversation loop's `cancel_handle()`; resolved by the
+    /// `POST /sessions/{id}/cancel` handler at click time, which locks
+    /// the inner mutex, clones the *current* token, and calls
+    /// `.cancel()`. Indirecting through an `Arc<Mutex<_>>` (rather
+    /// than storing the token directly) is what makes multiple
+    /// cancels in the same session work: after each cancel the loop
+    /// swaps a fresh token into the cell, and the adapter reads it
+    /// here. Sessions without a registered cell simply 404 on
+    /// `/cancel` — useful for examples that don't wire it.
+    cancel: Mutex<
+        HashMap<SessionId, Arc<std::sync::Mutex<tokio_util::sync::CancellationToken>>>,
+    >,
     /// Per-session focused-scope map (what the user has navigated to,
     /// keyed by scope kind). Updated when a widget event carries
     /// `data.scope = {kind, key}` (or, for back-compat,
@@ -155,6 +168,7 @@ impl AgUiAdapter {
             store: store.clone(),
             sessions: Mutex::new(HashMap::new()),
             inbound: Mutex::new(HashMap::new()),
+            cancel: Mutex::new(HashMap::new()),
             focused_scope: Mutex::new(HashMap::new()),
             branding: std::sync::Mutex::new(None),
             spine_widgets: Mutex::new(HashMap::new()),
@@ -208,6 +222,22 @@ impl AgUiAdapter {
         sessions
             .entry(session_id)
             .or_insert_with(|| broadcast::channel::<AgUiEvent>(256).0);
+    }
+
+    /// Register a cancellation cell for this session — the
+    /// conversation loop's `cancel_handle()`. The `POST /cancel`
+    /// handler locks the cell, clones the current token, and calls
+    /// `.cancel()` on it to abort the in-flight turn. Sharing the
+    /// `Arc<Mutex<_>>` (rather than a single token clone) lets the
+    /// loop swap in a fresh token after each cancel without needing
+    /// the adapter to re-register. Optional: sessions without a
+    /// registered cell return 404 from `/cancel`.
+    pub async fn register_cancel(
+        &self,
+        session_id: SessionId,
+        cell: Arc<std::sync::Mutex<tokio_util::sync::CancellationToken>>,
+    ) {
+        self.state.cancel.lock().await.insert(session_id, cell);
     }
 
     /// Set the app-wide branding (title + subtitle) that appears in
@@ -274,6 +304,7 @@ impl AgUiAdapter {
         self.state.inbound.lock().await.remove(&session_id);
         self.state.sessions.lock().await.remove(&session_id);
         self.state.focused_scope.lock().await.remove(&session_id);
+        self.state.cancel.lock().await.remove(&session_id);
     }
 
     /// Dispatch a `LoopEvent` to a specific session's SSE stream. Called
@@ -388,6 +419,7 @@ impl AgUiAdapter {
                 post(post_widget_event),
             )
             .route("/sessions/{session_id}/surface", get(get_surface))
+            .route("/sessions/{session_id}/cancel", post(post_cancel))
             .with_state(self.state.clone())
     }
 }
@@ -482,6 +514,40 @@ async fn post_message(
             "session inbound channel closed".to_string(),
         )
     })?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Cancel the in-flight turn for this session. The conversation
+/// loop's `run_turn_cancellable` races each turn future against this
+/// token, emits a `TurnError` ("Cancelled by user") on signal, and
+/// proceeds to the next queued message. No-op if no turn is running —
+/// the token is consumed once and reset between turns.
+async fn post_cancel(
+    Path(session_id): Path<String>,
+    State(state): State<Arc<AgUiState>>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let sid = parse_sid(&session_id)?;
+    // Two-step lookup: take the outer (tokio) lock to read the Arc,
+    // clone it out, drop the outer lock, then take the inner (std)
+    // lock to read the *current* token. Reading the current token
+    // each time (instead of a clone captured at register time) is
+    // the whole point of the indirection — the loop swaps a fresh
+    // token in after every cancel, and we want to see it.
+    let cell = {
+        let cancel = state.cancel.lock().await;
+        cancel
+            .get(&sid)
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    "session not registered with ag-ui adapter (no cancel cell)"
+                        .to_string(),
+                )
+            })?
+    };
+    let token = cell.lock().expect("cancel cell poisoned").clone();
+    token.cancel();
     Ok(StatusCode::ACCEPTED)
 }
 

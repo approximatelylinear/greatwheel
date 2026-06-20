@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use gw_core::{
     EntryId, EntryType, LlmMessage, LoopEvent, ReplSnapshotData, SessionId, SpineEntityLink,
@@ -177,6 +177,15 @@ pub struct ConversationLoop {
     /// write `session_entry_entities` + `session_entry_relations`
     /// rows. Off the chat path; per-entry failures are logged.
     spine_extractor: Option<Arc<crate::spine::SpineExtractor>>,
+    /// Per-session cancellation cell. The HTTP `/cancel` handler in
+    /// the AG-UI adapter dereferences this at click-time, clones the
+    /// current token, and calls `.cancel()`; `run_turn_cancellable`
+    /// races each turn future against the cloned token and bails with
+    /// a `TurnError` on signal. After a cancel fires we swap the cell
+    /// to a fresh token so the next turn isn't pre-cancelled — the
+    /// adapter shares the same `Arc<Mutex<_>>` so it sees the new
+    /// token on the next click without re-registration.
+    cancel: Arc<Mutex<tokio_util::sync::CancellationToken>>,
 }
 
 impl ConversationLoop {
@@ -199,6 +208,7 @@ impl ConversationLoop {
             turns_since_snapshot: 0,
             turn_number: 0,
             spine_extractor: None,
+            cancel: Arc::new(Mutex::new(tokio_util::sync::CancellationToken::new())),
         }
     }
 
@@ -225,7 +235,21 @@ impl ConversationLoop {
             turns_since_snapshot: 0,
             turn_number,
             spine_extractor: None,
+            cancel: Arc::new(Mutex::new(tokio_util::sync::CancellationToken::new())),
         }
+    }
+
+    /// Hand out a clone of the cancellation cell. The AG-UI adapter
+    /// stores this `Arc` keyed by session id; its `POST /cancel`
+    /// handler locks the mutex, clones the *current* token, drops
+    /// the lock, then calls `.cancel()`. Sharing the cell (rather
+    /// than a single token clone) is what makes multiple cancels in
+    /// the same session work — after each cancel we swap a fresh
+    /// token in, and the adapter's next click sees it.
+    pub fn cancel_handle(
+        &self,
+    ) -> Arc<Mutex<tokio_util::sync::CancellationToken>> {
+        Arc::clone(&self.cancel)
     }
 
     /// Attach a semantic-spine extractor. With this set, every call
@@ -270,7 +294,7 @@ impl ConversationLoop {
 
             match event {
                 LoopEvent::UserMessage(content) => {
-                    self.run_input_turn(&content).await?;
+                    self.run_turn_cancellable(&content).await?;
                 }
 
                 LoopEvent::WidgetInteraction(event) => {
@@ -291,7 +315,7 @@ impl ConversationLoop {
                             event.to_user_message()
                         }
                     };
-                    self.run_input_turn(&prompt).await?;
+                    self.run_turn_cancellable(&prompt).await?;
                 }
 
                 LoopEvent::FollowUp(content) => {
@@ -330,6 +354,43 @@ impl ConversationLoop {
                 | LoopEvent::UserMessageAnchor { .. } => {}
             }
         }
+    }
+
+    /// Wrap `run_input_turn` in a select! against the cancellation
+    /// token. On cancel we drop the turn future (aborting all in-flight
+    /// `.await`s including host-fn calls), emit `TurnError`, and reset
+    /// the token so the next turn starts fresh. Cancellation is not
+    /// an error from the event loop's perspective — the user asked
+    /// for it — so we swallow it and return Ok.
+    async fn run_turn_cancellable(&mut self, prompt: &str) -> Result<(), LoopError> {
+        // Snapshot the current token before borrowing self mutably for
+        // the turn — `select!` needs disjoint borrows. Locks are held
+        // for microseconds; std `Mutex` is fine. `cancelled()` resolves
+        // immediately if the token was already cancelled, e.g. by a
+        // pre-emptive POST /cancel that arrived between turns.
+        let token = {
+            let cell = self.cancel.lock().expect("cancel cell poisoned");
+            cell.clone()
+        };
+        tokio::select! {
+            biased;
+            result = self.run_input_turn(prompt) => {
+                result?;
+            }
+            _ = token.cancelled() => {
+                warn!(session = %self.session_id.0, "turn cancelled by user");
+                let _ = self.event_tx.send(LoopEvent::TurnError {
+                    message: "Cancelled by user".to_string(),
+                });
+                // Swap the cell's token to a fresh one so the next turn
+                // isn't pre-cancelled. The adapter holds a clone of the
+                // same `Arc<Mutex<_>>`, so its next /cancel click reads
+                // this new token rather than the now-cancelled old one.
+                let mut cell = self.cancel.lock().expect("cancel cell poisoned");
+                *cell = tokio_util::sync::CancellationToken::new();
+            }
+        }
+        Ok(())
     }
 
     /// Run a single user-side input (text message or projected widget
@@ -416,6 +477,12 @@ impl ConversationLoop {
     }
 
     async fn run_input_turn(&mut self, initial: &str) -> Result<(), LoopError> {
+        info!(
+            session = %self.session_id.0,
+            kind = "user",
+            prompt_preview = %initial.chars().take(80).collect::<String>(),
+            "turn started"
+        );
         let _ = self.event_tx.send(LoopEvent::TurnStarted);
         let result = match self.handle_turn(initial).await {
             Ok(r) => r,
@@ -427,11 +494,27 @@ impl ConversationLoop {
             }
         };
         let _ = self.event_tx.send(LoopEvent::TurnComplete);
+        info!(
+            session = %self.session_id.0,
+            kind = "user",
+            had_response = result.response.is_some(),
+            pending_follow_ups = self.pending_follow_ups.len(),
+            "turn completed"
+        );
         if let Some(response) = result.response {
             emit_text_message(&self.event_tx, response, result.assistant_entry_id);
         }
 
+        let mut drain_idx = 0u32;
         while let Some(follow_up) = self.pending_follow_ups.pop() {
+            info!(
+                session = %self.session_id.0,
+                kind = "follow_up",
+                drain_idx,
+                remaining = self.pending_follow_ups.len(),
+                prompt_preview = %follow_up.chars().take(80).collect::<String>(),
+                "turn started (drained follow-up)"
+            );
             let _ = self.event_tx.send(LoopEvent::TurnStarted);
             let result = match self.handle_turn(&follow_up).await {
                 Ok(r) => r,
@@ -443,9 +526,17 @@ impl ConversationLoop {
                 }
             };
             let _ = self.event_tx.send(LoopEvent::TurnComplete);
+            info!(
+                session = %self.session_id.0,
+                kind = "follow_up",
+                drain_idx,
+                had_response = result.response.is_some(),
+                "turn completed"
+            );
             if let Some(response) = result.response {
                 emit_text_message(&self.event_tx, response, result.assistant_entry_id);
             }
+            drain_idx += 1;
         }
 
         self.check_auto_compact().await;
