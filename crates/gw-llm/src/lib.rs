@@ -217,10 +217,17 @@ impl OllamaClient {
                     body["think"] = serde_json::Value::Bool(think_val);
                 }
                 LlmBackend::Sglang => {
-                    // SGLang uses chat_template_kwargs for Qwen3.5 thinking mode
-                    body["chat_template_kwargs"] = serde_json::json!({
-                        "enable_thinking": think_val,
-                    });
+                    // SGLang uses chat_template_kwargs for Qwen3.5 thinking mode.
+                    // vLLM's mistral tokenizer rejects any chat_template args, so
+                    // skip injection for Mistral-family models (their reasoning
+                    // is parser-driven, not template-toggled).
+                    let lower = model.to_ascii_lowercase();
+                    let is_mistral = lower.contains("mistral") || lower.contains("ministral");
+                    if !is_mistral {
+                        body["chat_template_kwargs"] = serde_json::json!({
+                            "enable_thinking": think_val,
+                        });
+                    }
                 }
                 LlmBackend::OpenAi => {
                     // OpenAI models don't have a think toggle; ignore.
@@ -228,18 +235,54 @@ impl OllamaClient {
             }
         }
 
-        let mut req = self.client.post(self.chat_url()).json(&body);
-        if let Some(key) = &self.api_key {
-            req = req.bearer_auth(key);
-        }
-        let resp = req.send().await?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            let backend = self.backend;
-            return Err(format!("{backend} returned {status}: {body}").into());
-        }
+        // Retry transient failures (429 rate-limit, 5xx) with exponential
+        // backoff. The OpenAI API returns 429 under sustained load — without
+        // retry the harness silently drops queries (we observed 60/100 lost
+        // on a single sample100 run).
+        let max_retries: u32 = 6;
+        let backend_clone = self.backend;
+        let chat_url = self.chat_url();
+        let mut attempt: u32 = 0;
+        let resp = loop {
+            let mut req = self.client.post(&chat_url).json(&body);
+            if let Some(key) = &self.api_key {
+                req = req.bearer_auth(key);
+            }
+            let r = req.send().await?;
+            let status = r.status();
+            if status.is_success() {
+                break r;
+            }
+            // Retry-eligible: 429 (rate limit) or 5xx (server error)
+            let retryable = status.as_u16() == 429 || status.as_u16() >= 500;
+            if !retryable || attempt >= max_retries {
+                let body_text = r.text().await.unwrap_or_default();
+                return Err(format!("{backend_clone} returned {status}: {body_text}").into());
+            }
+            // Honor Retry-After header if present, else exponential backoff.
+            let retry_after_secs: u64 = r
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            let backoff_secs: u64 = if retry_after_secs > 0 {
+                retry_after_secs.min(60)
+            } else {
+                // 2^attempt seconds, capped at 30s — plus a small jitter
+                let base = 2u64.saturating_pow(attempt).min(30);
+                let jitter = (attempt as u64 % 3) + 1;
+                base + jitter
+            };
+            tracing::warn!(
+                attempt,
+                status = status.as_u16(),
+                backoff_secs,
+                "LLM call retryable failure; backing off"
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            attempt += 1;
+        };
 
         let json: serde_json::Value = resp.json().await?;
 
@@ -286,7 +329,8 @@ impl OllamaClient {
 
     /// Generate embeddings for a batch of texts via Ollama's /api/embed endpoint.
     /// Batches in groups of 32, truncates texts to 8192 chars.
-    /// On batch failure, retries individually (truncated to 4096), zero-vector fallback.
+    /// On batch failure, retries individually (truncated to 4096); a failing
+    /// retry surfaces the upstream status and body as an error.
     #[tracing::instrument(
         name = "gen_ai.embeddings",
         skip(self, texts),
@@ -348,8 +392,14 @@ impl OllamaClient {
                     all_embeddings.push(vec);
                 }
             } else {
-                // Batch failed — retry individually.
-                tracing::warn!(status = %status, "Batch embed failed, retrying individually");
+                // Batch failed — capture body, then retry individually
+                // in case one specific input was the problem.
+                let body_text = resp.text().await.unwrap_or_default();
+                tracing::warn!(
+                    status = %status,
+                    body = %body_text,
+                    "Batch embed failed, retrying individually"
+                );
                 for text in batch {
                     let t = if text.len() > RETRY_MAX_CHARS {
                         &text[..RETRY_MAX_CHARS]
@@ -389,11 +439,7 @@ impl OllamaClient {
                     if embedding_dim.is_none() {
                         embedding_dim = Some(vec.len());
                     }
-                    if vec.is_empty() {
-                        all_embeddings.push(vec![0.0; embedding_dim.unwrap_or(768)]);
-                    } else {
-                        all_embeddings.push(vec);
-                    }
+                    all_embeddings.push(vec);
                 }
             }
         }
