@@ -3,6 +3,10 @@ FROM rust:1.85-bookworm AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
 COPY crates/ crates/
+# `bench/conv-loop` is a workspace member referenced from the root Cargo.toml,
+# so its manifest must exist for cargo to load the workspace — even though the
+# `greatwheel` binary doesn't depend on it.
+COPY bench/conv-loop bench/conv-loop
 
 RUN cargo build --release --bin greatwheel
 
