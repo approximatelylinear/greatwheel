@@ -56,8 +56,12 @@ struct KbConfig {
     embedding_model: String,
     #[serde(default = "default_kb_embedding_dim")]
     embedding_dim: i32,
-    #[serde(default = "default_kb_ollama_url")]
-    ollama_url: String,
+    /// Embedder backend: "local" (embedded Python sentence-transformers,
+    /// requires Python + the model in the runtime image) or "remote"
+    /// (delegates to the shared [llm] client's /v1/embeddings endpoint).
+    /// Default "local" preserves dev behavior.
+    #[serde(default)]
+    embed_backend: Option<String>,
 }
 
 impl Default for KbConfig {
@@ -68,7 +72,7 @@ impl Default for KbConfig {
             tantivy_path: default_kb_tantivy_path(),
             embedding_model: default_kb_embedding_model(),
             embedding_dim: default_kb_embedding_dim(),
-            ollama_url: default_kb_ollama_url(),
+            embed_backend: None,
         }
     }
 }
@@ -84,9 +88,6 @@ fn default_kb_embedding_model() -> String {
 }
 fn default_kb_embedding_dim() -> i32 {
     768
-}
-fn default_kb_ollama_url() -> String {
-    "http://localhost:11434".into()
 }
 
 #[derive(Debug, Deserialize)]
@@ -246,9 +247,8 @@ async fn chat(
 async fn build_kb_plugin(
     cfg: &KbConfig,
     pool: Option<sqlx::PgPool>,
+    shared_llm: Arc<OllamaClient>,
 ) -> Result<gw_kb::plugin::KbPlugin, String> {
-    use std::sync::Arc;
-
     let pool = pool.ok_or_else(|| {
         "kb.enabled requires a Postgres pool (database.url must be set)".to_string()
     })?;
@@ -262,17 +262,19 @@ async fn build_kb_plugin(
         gw_kb::index::KbTantivyStore::open(std::path::Path::new(&cfg.tantivy_path))
             .map_err(|e| format!("open kb tantivy store: {e}"))?,
     );
-    let embedder = Arc::new(gw_kb::embed::Embedder::new(cfg.embedding_model.clone()));
+    let embedder = Arc::new(match cfg.embed_backend.as_deref().unwrap_or("local") {
+        "remote" => gw_kb::embed::Embedder::remote(Arc::clone(&shared_llm)),
+        "local" => gw_kb::embed::Embedder::new(cfg.embedding_model.clone()),
+        other => {
+            return Err(format!(
+                "unknown kb.embed_backend: {other} (expected: local, remote)"
+            ))
+        }
+    });
 
-    // Throwaway chat client. Organize/classify/synthesize use it but
-    // the read-only host functions we expose do not. Construction is
-    // cheap (no network calls).
-    let llm = Arc::new(gw_llm::OllamaClient::new(
-        cfg.ollama_url.clone(),
-        cfg.ollama_url.clone(),
-        "qwen3.5:9b".into(),
-        "unused".into(),
-    ));
+    // Reuse the shared LLM client for chat (organize/classify/synthesize).
+    // The read-only runtime host functions don't touch it.
+    let llm = shared_llm;
 
     let stores = gw_kb::ingest::KbStores {
         pg: pool,
@@ -380,7 +382,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // declared in config. Gated by `kb.enabled` so servers without the
     // KB stack can still boot.
     let kb_plugin = if config.kb.enabled {
-        match build_kb_plugin(&config.kb, session_pool.clone()).await {
+        match build_kb_plugin(&config.kb, session_pool.clone(), Arc::clone(&llm)).await {
             Ok(p) => {
                 tracing::info!("KB plugin enabled");
                 Some(p)

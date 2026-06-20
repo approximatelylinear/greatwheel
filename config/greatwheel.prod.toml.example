@@ -43,22 +43,25 @@ hot_reload = false
 [memory]
 lance_db_path = "data/lancedb"
 tantivy_index_path = "data/tantivy"
-# Must match the dimension of `llm.embedding_model`. Qwen3-Embedding-0.6B is
-# 1024-dim. Switching embedding models means re-indexing existing vectors.
+# Must match the dimension of `llm.embedding_model` (what the embed endpoint
+# actually returns). Qwen3-Embedding-0.6B → 1024. Changing the embed model
+# requires re-indexing any existing vectors at this path.
 embedding_dim = 1024
 
 [kb]
-# The KB plugin uses a SEPARATE embedder (gw_kb::embed::Embedder) that still
-# targets Ollama via the ollama_url below — it is NOT covered by the sglang/
-# Modal routing above. If the arxiv explorer relies on KB-side embeddings at
-# runtime, this needs the same Modal treatment (follow-up). Otherwise set
-# enabled = false for the initial launch.
-enabled = false
+enabled = true
 lance_path = "data/kb-lancedb"
 tantivy_path = "data/kb-tantivy"
-embedding_model = "nomic-ai/nomic-embed-text-v1.5"
-embedding_dim = 768
-ollama_url = "http://localhost:11434"
+# In remote mode the embedder delegates to the shared [llm] client, so the
+# actual model is whatever your embed endpoint serves. This field is kept
+# for parity with local mode but is informational only here.
+embedding_model = "Qwen/Qwen3-Embedding-0.6B"
+# MUST match what the remote endpoint returns (1024 for Qwen3-Embedding-0.6B).
+embedding_dim = 1024
+# "remote" → HTTP /v1/embeddings via the shared [llm] client (production).
+# "local"  → in-process Python sentence-transformers (needs Python + the
+#            model in the image; default for dev).
+embed_backend = "remote"
 
 [tracing]
 exporter = "console"

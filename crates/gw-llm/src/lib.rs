@@ -447,7 +447,13 @@ impl OllamaClient {
                     let json: serde_json::Value = r.json().await?;
                     let vec = self
                         .extract_embeddings(&json)
-                        .and_then(|mut v| if v.is_empty() { None } else { Some(v.remove(0)) })
+                        .and_then(|mut v| {
+                            if v.is_empty() {
+                                None
+                            } else {
+                                Some(v.remove(0))
+                            }
+                        })
                         .unwrap_or_default();
                     if vec.is_empty() {
                         return Err(format!(
