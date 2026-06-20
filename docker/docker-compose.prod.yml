@@ -36,8 +36,10 @@ services:
     restart: unless-stopped
     command: ["--config", "/etc/greatwheel/greatwheel.prod.toml"]
     environment:
-      # LLM bearer token (Modal embed endpoint, and chat if same key).
+      # LLM bearer tokens. Leave GW_LLM_EMBED_API_KEY unset if chat and
+      # embeddings share one key — embeddings reuse GW_LLM_API_KEY.
       GW_LLM_API_KEY: ${GW_LLM_API_KEY}
+      GW_LLM_EMBED_API_KEY: ${GW_LLM_EMBED_API_KEY:-}
     expose:
       - "8090"
     volumes:

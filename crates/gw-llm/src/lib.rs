@@ -68,6 +68,10 @@ pub struct OllamaClient {
     /// requests. Only used when set; Ollama and local SGLang/vLLM
     /// servers typically leave this `None`.
     api_key: Option<String>,
+    /// Optional separate Bearer token for embedding requests. Used when
+    /// chat and embeddings live behind different providers (e.g. hosted
+    /// chat API + Modal embed). Falls back to `api_key` when `None`.
+    embed_api_key: Option<String>,
     client: reqwest::Client,
 }
 
@@ -106,6 +110,7 @@ impl OllamaClient {
             embedding_model,
             backend,
             api_key: None,
+            embed_api_key: None,
             client,
         }
     }
@@ -130,6 +135,21 @@ impl OllamaClient {
     pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
         self.api_key = Some(api_key.into());
         self
+    }
+
+    /// Attach a separate Bearer API key for embedding requests. Use when
+    /// chat and embeddings are protected by different tokens (e.g. hosted
+    /// chat provider + Modal embed). Without this, embeddings reuse the
+    /// chat `api_key`.
+    pub fn with_embed_api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.embed_api_key = Some(api_key.into());
+        self
+    }
+
+    /// Bearer token to attach to embedding requests: prefer the dedicated
+    /// embed key, fall back to the chat key.
+    fn embed_bearer(&self) -> Option<&str> {
+        self.embed_api_key.as_deref().or(self.api_key.as_deref())
     }
 
     /// Returns the chat endpoint URL based on the active backend.
@@ -371,7 +391,7 @@ impl OllamaClient {
             });
 
             let mut req = self.client.post(&url).json(&body);
-            if let Some(key) = &self.api_key {
+            if let Some(key) = self.embed_bearer() {
                 req = req.bearer_auth(key);
             }
             let resp = req.send().await?;
@@ -411,7 +431,7 @@ impl OllamaClient {
                         "input": [t],
                     });
                     let mut rreq = self.client.post(&url).json(&body);
-                    if let Some(key) = &self.api_key {
+                    if let Some(key) = self.embed_bearer() {
                         rreq = rreq.bearer_auth(key);
                     }
                     let r = rreq.send().await?;

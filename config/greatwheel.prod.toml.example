@@ -30,9 +30,11 @@ proxy_url = "https://YOUR-CHAT-PROVIDER.example.com"
 ollama_url = "https://YOUR-WORKSPACE--gw-embed-embedder-web.modal.run"
 default_model = "Qwen/Qwen3.5-9B"
 embedding_model = "Qwen/Qwen3-Embedding-0.6B"
-# NOTE: chat and embeddings share one bearer token (GW_LLM_API_KEY). If your
-# chat provider and Modal need *different* keys, that needs a small follow-up
-# (separate embed key) — see the handoff notes.
+# Bearer tokens:
+#   - GW_LLM_API_KEY        — sent on chat requests (proxy_url).
+#   - GW_LLM_EMBED_API_KEY  — sent on embedding requests (ollama_url). Optional;
+#                             when unset, embeddings reuse GW_LLM_API_KEY.
+# Set both when chat (hosted provider) and embeddings (Modal) use different tokens.
 
 [agents]
 directory = "agents"

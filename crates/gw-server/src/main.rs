@@ -128,6 +128,12 @@ struct LlmConfig {
     /// stays out of the config file; the env var overrides this field.
     #[serde(default)]
     api_key: Option<String>,
+    /// Optional separate Bearer token for embedding requests. Set when chat
+    /// and embeddings live behind different providers (hosted chat API +
+    /// Modal embed). Prefer the GW_LLM_EMBED_API_KEY env var; the env var
+    /// overrides this field. Unset → embeddings reuse `api_key`.
+    #[serde(default)]
+    embed_api_key: Option<String>,
 }
 
 #[derive(Clone)]
@@ -331,6 +337,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| config.llm.api_key.clone())
     {
         llm = llm.with_api_key(key);
+    }
+    if let Some(key) = std::env::var("GW_LLM_EMBED_API_KEY")
+        .ok()
+        .or_else(|| config.llm.embed_api_key.clone())
+    {
+        llm = llm.with_embed_api_key(key);
     }
 
     let llm = Arc::new(llm);
