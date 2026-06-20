@@ -302,6 +302,27 @@ enum Command {
     /// for already-tracked versions are left alone.
     MigrateBaseline,
 
+    /// Re-extract entity mentions for sources whose chunks still
+    /// carry legacy span-less mentions (migrated from the old
+    /// `kb_chunk_entity_links` table in migration 017). Each
+    /// re-extracted chunk drops its prior mentions and writes fresh
+    /// ones with character spans for inline wiki highlighting.
+    ///
+    /// Without `--all`, scans `kb_entity_mentions` for any row whose
+    /// `norm_start IS NULL` and processes only the owning sources.
+    /// `--all` re-runs over every source — useful when prompt or
+    /// extractor logic changed.
+    BackfillMentions {
+        /// Re-extract every source, not just those with NULL-span
+        /// mentions. LLM-cost intensive on large corpora.
+        #[arg(long, default_value_t = false)]
+        all: bool,
+        /// Canonicalisation cosine threshold; passed through to the
+        /// extractor's `CanonicalizeOpts`.
+        #[arg(long, default_value_t = 0.9)]
+        merge_threshold: f32,
+    },
+
     /// Rebuild the entity link graph (kb_entity_links) and the
     /// topic↔entity bridge (kb_topic_entity_links) from current state.
     /// Run after a batch of `extract-entities` calls.
@@ -1103,6 +1124,74 @@ async fn main() -> Result<(), KbError> {
                     "rebuilt links: entity-entity={} topic-entity={}",
                     er.edges_written, tr.edges_written
                 );
+            }
+        }
+        Command::BackfillMentions {
+            all,
+            merge_threshold,
+        } => {
+            let stores = stores.as_ref().expect("stores built above");
+            // Pick the source set to re-extract. The legacy-only path
+            // identifies sources whose chunks still have NULL-span
+            // mentions (migrated from kb_chunk_entity_links by
+            // migration 017). `--all` skips the predicate and hits
+            // every source.
+            let source_ids: Vec<uuid::Uuid> = if all {
+                sqlx::query_scalar("SELECT source_id FROM kb_sources ORDER BY ingested_at")
+                    .fetch_all(&stores.pg)
+                    .await?
+            } else {
+                sqlx::query_scalar(
+                    r#"
+                    SELECT DISTINCT c.source_id
+                    FROM kb_entity_mentions m
+                    JOIN kb_chunks c ON c.chunk_id = m.chunk_id
+                    WHERE m.norm_start IS NULL
+                    ORDER BY c.source_id
+                    "#,
+                )
+                .fetch_all(&stores.pg)
+                .await?
+            };
+            if source_ids.is_empty() {
+                if all {
+                    println!("backfill-mentions: no sources in the KB");
+                } else {
+                    println!(
+                        "backfill-mentions: nothing to do — every mention already has spans"
+                    );
+                }
+            } else {
+                let opts = gw_kb::entities::CanonicalizeOpts {
+                    merge_threshold,
+                    ..Default::default()
+                };
+                let total = source_ids.len();
+                println!("backfill-mentions: {total} source(s) to re-extract");
+                let mut totals = gw_kb::entities::EntityIngestReport::default();
+                for (idx, sid) in source_ids.iter().enumerate() {
+                    let report = gw_kb::entities::extract_and_persist_entities_for_source(
+                        stores, *sid, &opts,
+                    )
+                    .await?;
+                    println!(
+                        "  [{i}/{total}] {sid}: mentions_in={mi} new_entities={ec} updated={eu} writes={lc}",
+                        i = idx + 1,
+                        mi = report.mentions_in,
+                        ec = report.entities_created,
+                        eu = report.entities_updated,
+                        lc = report.links_created,
+                    );
+                    totals.mentions_in += report.mentions_in;
+                    totals.entities_created += report.entities_created;
+                    totals.entities_updated += report.entities_updated;
+                    totals.links_created += report.links_created;
+                }
+                println!("backfill-mentions totals:");
+                println!("  mentions_in        = {}", totals.mentions_in);
+                println!("  entities_created   = {}", totals.entities_created);
+                println!("  entities_updated   = {}", totals.entities_updated);
+                println!("  mention_rows_written = {}", totals.links_created);
             }
         }
         Command::LinkEntities {

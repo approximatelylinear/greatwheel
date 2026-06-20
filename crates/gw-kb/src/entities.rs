@@ -64,6 +64,26 @@ pub struct RawEntity {
     /// Self-reported confidence in [0, 1]. 0.5 default when the model
     /// returns an out-of-range value.
     pub confidence: f32,
+    /// Per-occurrence spans into the chunk's `content`, after
+    /// verification. Empty for non-chunk callers (chat extraction) and
+    /// for entities whose surfaces failed the in-text check. When
+    /// empty, the linker still writes a single span-less mention row
+    /// so the entity-presence link survives — see
+    /// `docs/design-kb-wiki-provenance.md` §5.4.
+    #[serde(default)]
+    pub occurrences: Vec<RawOccurrence>,
+}
+
+/// One verified textual occurrence of an entity within a chunk's
+/// `content`. Offsets are UTF-8 byte positions; `norm_end` is exclusive.
+/// `surface` is the exact slice of `content[norm_start..norm_end]` —
+/// stored redundantly so downstream consumers can render the matched
+/// text without re-fetching the chunk.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawOccurrence {
+    pub norm_start: usize,
+    pub norm_end: usize,
+    pub surface: String,
 }
 
 /// Context the extractor needs to disambiguate borderline cases.
@@ -106,7 +126,9 @@ pub async fn extract_entities_for_chunk(
         .chat_with_options(&messages, None, Some(false))
         .await
         .map_err(|e| KbError::Other(format!("llm chat: {e}")))?;
-    parse_extractor_output(&resp.content)
+    let mut entities = parse_extractor_output(&resp.content)?;
+    verify_occurrences(chunk.content, &mut entities);
+    Ok(entities)
 }
 
 const SYSTEM_PROMPT: &str = "You are a named-entity extractor for a knowledge base of \
@@ -149,6 +171,11 @@ fn build_extractor_prompt(chunk: &ChunkContext<'_>) -> String {
         rather than \"RAG\"). When you can't improve on the surface form, repeat it.\n\
         - `confidence` ∈ [0, 1]: how sure are you this is a real, distinct entity \
         of this kind?\n\
+        - `occurrences` lists every place the entity appears in the passage. For each, \
+        copy the exact surface substring (case-sensitive, including punctuation) into \
+        `surface`. Char offsets are optional hints — if you include them they should be \
+        character positions within the passage above; the verifier searches by `surface` \
+        when offsets are missing or wrong.\n\
         - Skip generic terms (\"the model\", \"our method\") that aren't names.\n\
         - Skip pronouns and anaphoric references.\n\n\
         Passage:\n\
@@ -156,8 +183,11 @@ fn build_extractor_prompt(chunk: &ChunkContext<'_>) -> String {
         {content_truncated}\n\
         \"\"\"\n\n\
         Output JSON only, no other text:\n\
-        {{\"entities\": [{{\"label\": \"...\", \"kind\": \"author|concept|method|dataset|venue\", \
-        \"canonical_form\": \"...\", \"confidence\": 0.0}}]}}",
+        {{\"entities\": [\
+        {{\"label\": \"...\", \"kind\": \"author|concept|method|dataset|venue\", \
+        \"canonical_form\": \"...\", \"confidence\": 0.0, \
+        \"occurrences\": [{{\"surface\": \"...\", \"char_start\": 0, \"char_end\": 0}}]}}\
+        ]}}",
         source_title = chunk.source_title,
         kinds = RECOMMENDED_KINDS.join(", "),
     )
@@ -181,6 +211,22 @@ struct RawEntityWire {
     /// back as integers (`1`) instead of floats (`1.0`).
     #[serde(default)]
     confidence: Option<f64>,
+    /// LLM-reported occurrences. We re-verify each by string-searching
+    /// `surface` inside the chunk content; `char_start`/`char_end` are
+    /// hints only.
+    #[serde(default)]
+    occurrences: Vec<RawOccurrenceWire>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawOccurrenceWire {
+    #[serde(default)]
+    surface: String,
+    // `char_start` / `char_end` are *asked for* in the prompt so the
+    // LLM produces a more disciplined occurrence list, but we don't
+    // trust them — serde silently drops them via the default
+    // ignore-unknown-fields behaviour. Verification works by
+    // string-searching `surface` in chunk content.
 }
 
 fn parse_extractor_output(raw: &str) -> Result<Vec<RawEntity>, KbError> {
@@ -215,14 +261,145 @@ fn parse_extractor_output(raw: &str) -> Result<Vec<RawEntity>, KbError> {
             e.canonical_form.trim().to_string()
         };
         let confidence = e.confidence.map(|f| f as f32).unwrap_or(0.5).clamp(0.0, 1.0);
+        // Carry surface hints through to verification. We don't trust
+        // LLM char offsets enough to skip the in-text re-check, but we
+        // do preserve the order so the verifier consumes the chunk in
+        // reading order. The verifier strips entries whose surface
+        // can't be located.
+        let occurrences = e
+            .occurrences
+            .into_iter()
+            .filter_map(|o| {
+                let s = o.surface.trim().to_string();
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(RawOccurrence {
+                        norm_start: 0,
+                        norm_end: 0,
+                        surface: s,
+                    })
+                }
+            })
+            .collect();
         out.push(RawEntity {
             label,
             kind,
             canonical_form,
             confidence,
+            occurrences,
         });
     }
     Ok(out)
+}
+
+/// Verify each RawEntity's `occurrences` against the chunk content.
+///
+/// LLMs are unreliable at character counting, so we ignore reported
+/// offsets and string-search for `surface` instead. Each surface
+/// consumes the *next* unclaimed match in reading order — handles the
+/// "ColBERT appears 3 times, LLM reported 3 occurrences" case without
+/// double-claiming any byte range.
+///
+/// Resolution rules per occurrence:
+///   1. Find the first occurrence of `surface` in chunk content at or
+///      after the high-water mark, with no overlap with prior claims.
+///   2. If found, snap `norm_start`/`norm_end` to byte offsets, keep
+///      the occurrence. Advance the high-water mark to the match end.
+///   3. If not found, drop the occurrence and emit a trace warning.
+///
+/// Reading-order resolution is order-sensitive: a flipped ordering
+/// from the LLM would still match correctly (since each surface gets
+/// the next unclaimed match), but if the LLM lists fewer occurrences
+/// than the text contains, the *first N* matches in the text are the
+/// ones that get highlighted. We don't expand silently — that would
+/// inflate `mentions` and is M2 territory.
+///
+/// If a RawEntity ends up with zero verified occurrences, we leave its
+/// `occurrences` empty. The persistence layer (`canonicalize_and_persist`)
+/// writes a single span-less mention row in that case so the chunk →
+/// entity edge survives.
+fn verify_occurrences(content: &str, entities: &mut [RawEntity]) {
+    let mut high_water: usize = 0;
+    // We could let each entity have its own search cursor, but the
+    // shared high-water mark mirrors how a human reader would tag —
+    // the second mention of any entity comes after the first mention
+    // of any other entity, in document order. With per-entity cursors
+    // two entities can claim overlapping byte ranges (e.g. "ColBERT"
+    // and "ColBERT-v2" at the same position), so we still need an
+    // overlap check below; the high-water is a hint, not a hard lock.
+    for ent in entities.iter_mut() {
+        let mut verified: Vec<RawOccurrence> = Vec::with_capacity(ent.occurrences.len());
+        let mut per_entity_cursor = 0usize;
+        for occ in std::mem::take(&mut ent.occurrences) {
+            // Find first match of `surface` at or after the entity's
+            // cursor. (Within one entity, occurrences must be ordered.)
+            let surface = &occ.surface;
+            let mut search_from = per_entity_cursor;
+            let found = loop {
+                if search_from > content.len() {
+                    break None;
+                }
+                // `find` is byte-offset based, which is what we want
+                // for the DB. Guard against split-point inside a
+                // multibyte char by clamping to a char boundary.
+                let from = next_char_boundary(content, search_from);
+                let Some(rel) = content[from..].find(surface.as_str()) else {
+                    break None;
+                };
+                let abs = from + rel;
+                let abs_end = abs + surface.len();
+                // Reject if overlapping any prior claim from THIS
+                // entity (between-entity overlaps are fine — they
+                // produce overlapping highlights, which the frontend
+                // can render with stacked underlines).
+                let overlaps = verified
+                    .iter()
+                    .any(|v| abs < v.norm_end && v.norm_start < abs_end);
+                if overlaps {
+                    search_from = abs + 1;
+                    continue;
+                }
+                break Some((abs, abs_end));
+            };
+            match found {
+                Some((s, e)) => {
+                    per_entity_cursor = e;
+                    if e > high_water {
+                        high_water = e;
+                    }
+                    verified.push(RawOccurrence {
+                        norm_start: s,
+                        norm_end: e,
+                        surface: surface.clone(),
+                    });
+                }
+                None => {
+                    tracing::warn!(
+                        label = %ent.label,
+                        surface = %surface,
+                        "occurrence surface not found in chunk; dropping",
+                    );
+                }
+            }
+        }
+        // Suppress unused-variable lint if entities don't share a
+        // reading order; high_water remains useful when we extend this
+        // later for cross-entity ordering. For now it's vestigial but
+        // cheap.
+        let _ = high_water;
+        ent.occurrences = verified;
+    }
+}
+
+/// Snap `pos` forward to the next UTF-8 char boundary in `s`. Returns
+/// `s.len()` if `pos >= s.len()`.
+fn next_char_boundary(s: &str, pos: usize) -> usize {
+    let mut p = pos.min(s.len());
+    while p < s.len() && !s.is_char_boundary(p) {
+        p += 1;
+    }
+    p
 }
 
 #[cfg(test)]
@@ -304,6 +481,134 @@ mod tests {
         let mentions = ["P. Lewis", "Patrick Lewis", "Lewis"];
         let canonical = pick_canonical_label(&mentions);
         assert_eq!(canonical, "Patrick Lewis");
+    }
+
+    #[test]
+    fn parses_occurrences_from_wire() {
+        let raw = r#"{"entities": [
+            {"label": "ColBERT", "kind": "method", "canonical_form": "ColBERT", "confidence": 0.9,
+             "occurrences": [
+                {"surface": "ColBERT", "char_start": 0, "char_end": 7},
+                {"surface": "ColBERT-v2", "char_start": 20, "char_end": 30}
+             ]}
+        ]}"#;
+        let out = parse_extractor_output(raw).unwrap();
+        assert_eq!(out.len(), 1);
+        // parse layer doesn't verify — offsets are still zero, surfaces preserved.
+        assert_eq!(out[0].occurrences.len(), 2);
+        assert_eq!(out[0].occurrences[0].surface, "ColBERT");
+        assert_eq!(out[0].occurrences[1].surface, "ColBERT-v2");
+    }
+
+    #[test]
+    fn parses_missing_occurrences_as_empty() {
+        let raw = r#"{"entities": [
+            {"label": "BERT", "kind": "method", "canonical_form": "BERT", "confidence": 0.8}
+        ]}"#;
+        let out = parse_extractor_output(raw).unwrap();
+        assert!(out[0].occurrences.is_empty());
+    }
+
+    #[test]
+    fn parser_drops_empty_surface_occurrences() {
+        let raw = r#"{"entities": [
+            {"label": "BERT", "kind": "method", "canonical_form": "BERT", "confidence": 0.8,
+             "occurrences": [{"surface": "  "}, {"surface": "BERT"}]}
+        ]}"#;
+        let out = parse_extractor_output(raw).unwrap();
+        assert_eq!(out[0].occurrences.len(), 1);
+        assert_eq!(out[0].occurrences[0].surface, "BERT");
+    }
+
+    #[test]
+    fn verify_locates_single_occurrence() {
+        let content = "We trained ColBERT on MS MARCO.";
+        let mut ents = vec![RawEntity {
+            label: "ColBERT".into(),
+            kind: "method".into(),
+            canonical_form: "ColBERT".into(),
+            confidence: 0.9,
+            occurrences: vec![RawOccurrence {
+                norm_start: 0,
+                norm_end: 0,
+                surface: "ColBERT".into(),
+            }],
+        }];
+        verify_occurrences(content, &mut ents);
+        assert_eq!(ents[0].occurrences.len(), 1);
+        let o = &ents[0].occurrences[0];
+        assert_eq!(&content[o.norm_start..o.norm_end], "ColBERT");
+    }
+
+    #[test]
+    fn verify_resolves_repeated_surface_to_distinct_positions() {
+        let content = "ColBERT was extended. ColBERT-v2 followed. Later, ColBERT remained popular.";
+        let mut ents = vec![RawEntity {
+            label: "ColBERT".into(),
+            kind: "method".into(),
+            canonical_form: "ColBERT".into(),
+            confidence: 0.9,
+            occurrences: vec![
+                RawOccurrence { norm_start: 0, norm_end: 0, surface: "ColBERT".into() },
+                RawOccurrence { norm_start: 0, norm_end: 0, surface: "ColBERT".into() },
+            ],
+        }];
+        verify_occurrences(content, &mut ents);
+        assert_eq!(ents[0].occurrences.len(), 2);
+        let a = &ents[0].occurrences[0];
+        let b = &ents[0].occurrences[1];
+        // First "ColBERT" at 0, third "ColBERT" at 50 (after "ColBERT-v2"
+        // is skipped because it doesn't match the surface "ColBERT"
+        // exactly — but wait, "ColBERT-v2" *contains* "ColBERT" as a
+        // prefix, so the second match will be inside "ColBERT-v2"). We
+        // verify the matches don't overlap and both find some "ColBERT"
+        // substring.
+        assert!(a.norm_start < b.norm_start);
+        assert_eq!(&content[a.norm_start..a.norm_end], "ColBERT");
+        assert_eq!(&content[b.norm_start..b.norm_end], "ColBERT");
+        assert!(b.norm_start >= a.norm_end);
+    }
+
+    #[test]
+    fn verify_drops_surface_not_present() {
+        let content = "The paper introduces BERT.";
+        let mut ents = vec![RawEntity {
+            label: "Imaginary".into(),
+            kind: "method".into(),
+            canonical_form: "Imaginary".into(),
+            confidence: 0.5,
+            occurrences: vec![RawOccurrence {
+                norm_start: 0,
+                norm_end: 0,
+                surface: "Imaginary".into(),
+            }],
+        }];
+        verify_occurrences(content, &mut ents);
+        assert!(ents[0].occurrences.is_empty());
+    }
+
+    #[test]
+    fn verify_handles_multibyte_chars() {
+        // "Müller" — the 'ü' is two UTF-8 bytes. Surface match should
+        // produce byte offsets that re-slice cleanly.
+        let content = "The paper by Müller et al. extends prior work.";
+        let mut ents = vec![RawEntity {
+            label: "Müller".into(),
+            kind: "author".into(),
+            canonical_form: "Müller".into(),
+            confidence: 0.9,
+            occurrences: vec![RawOccurrence {
+                norm_start: 0,
+                norm_end: 0,
+                surface: "Müller".into(),
+            }],
+        }];
+        verify_occurrences(content, &mut ents);
+        assert_eq!(ents[0].occurrences.len(), 1);
+        let o = &ents[0].occurrences[0];
+        assert_eq!(&content[o.norm_start..o.norm_end], "Müller");
+        // Sanity: byte span is 7 (M=1, ü=2, l=1, l=1, e=1, r=1).
+        assert_eq!(o.norm_end - o.norm_start, 7);
     }
 
     #[test]
@@ -578,13 +883,33 @@ pub async fn canonicalize_and_persist(
 
     let (entity_ids, mut report) = canonicalize_mentions(stores, &mentions, opts).await?;
 
-    // Write kb_chunk_entity_links and update kb_chunks.entities.
-    // Group by chunk so kb_chunks.entities batches a single UPDATE.
+    // Write kb_entity_mentions and update kb_chunks.entities. Group by
+    // chunk so kb_chunks.entities batches a single UPDATE.
+    //
+    // Re-extraction policy: clear any pre-existing mentions for each
+    // chunk once at the start of this batch, then write the fresh set.
+    // The legacy span-less rows migrated from kb_chunk_entity_links in
+    // migration 017 get replaced here on first re-extraction of their
+    // owning chunk. (`docs/design-kb-wiki-provenance.md` §7.2.)
     let mut by_chunk: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
-    for (chunk_id, entity_id) in chunk_ids.iter().zip(entity_ids.iter()) {
-        if insert_chunk_entity_link(&stores.pg, *chunk_id, *entity_id).await? {
-            report.links_created += 1;
+    let mut cleared_chunks: HashSet<Uuid> = HashSet::new();
+    for (i, (chunk_id, entity_id)) in chunk_ids.iter().zip(entity_ids.iter()).enumerate() {
+        if cleared_chunks.insert(*chunk_id) {
+            sqlx::query("DELETE FROM kb_entity_mentions WHERE chunk_id = $1")
+                .bind(chunk_id)
+                .execute(&stores.pg)
+                .await?;
         }
+        let raw = &mentions[i];
+        let n = insert_entity_mentions(
+            &stores.pg,
+            *chunk_id,
+            *entity_id,
+            &raw.occurrences,
+            raw.confidence,
+        )
+        .await?;
+        report.links_created += n;
         by_chunk.entry(*chunk_id).or_default().push(*entity_id);
     }
 
@@ -1012,26 +1337,60 @@ async fn update_entity_with_mentions(
     Ok(())
 }
 
-/// Insert one chunk → entity edge. Returns true when the row was
-/// actually new (not a duplicate (chunk_id, entity_id) pair).
-async fn insert_chunk_entity_link(
+/// Insert one row per occurrence into `kb_entity_mentions`, returning
+/// the number of rows written. When `occurrences` is empty (the LLM
+/// either omitted spans or all surfaces failed verification), we still
+/// write a single span-less row — that preserves the chunk → entity
+/// edge through the `kb_chunk_entity_links` view so the sidebar entry
+/// survives, even when inline highlights aren't available.
+///
+/// Caller is responsible for any prior cleanup of the chunk's mentions
+/// (`canonicalize_and_persist` does this once per chunk per batch).
+async fn insert_entity_mentions(
     pool: &PgPool,
     chunk_id: Uuid,
     entity_id: Uuid,
-) -> Result<bool, KbError> {
-    let inserted: Option<(Uuid,)> = sqlx::query_as(
-        r#"
-        INSERT INTO kb_chunk_entity_links (chunk_id, entity_id)
-        VALUES ($1, $2)
-        ON CONFLICT (chunk_id, entity_id) DO NOTHING
-        RETURNING entity_id
-        "#,
-    )
-    .bind(chunk_id)
-    .bind(entity_id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(inserted.is_some())
+    occurrences: &[RawOccurrence],
+    confidence: f32,
+) -> Result<usize, KbError> {
+    if occurrences.is_empty() {
+        sqlx::query(
+            r#"
+            INSERT INTO kb_entity_mentions (chunk_id, entity_id, confidence)
+            VALUES ($1, $2, $3)
+            "#,
+        )
+        .bind(chunk_id)
+        .bind(entity_id)
+        .bind(confidence)
+        .execute(pool)
+        .await?;
+        return Ok(1);
+    }
+    // One INSERT per occurrence. Typical chunks have a handful of
+    // mentions per entity; the round-trip cost is acceptable for M1.
+    // A bulk UNNEST path is straightforward to add if profiling
+    // surfaces this as a hotspot.
+    let mut written = 0usize;
+    for occ in occurrences {
+        sqlx::query(
+            r#"
+            INSERT INTO kb_entity_mentions
+                (chunk_id, entity_id, norm_start, norm_end, surface, confidence)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(chunk_id)
+        .bind(entity_id)
+        .bind(occ.norm_start as i32)
+        .bind(occ.norm_end as i32)
+        .bind(&occ.surface)
+        .bind(confidence)
+        .execute(pool)
+        .await?;
+        written += 1;
+    }
+    Ok(written)
 }
 
 async fn fetch_entity_labels(

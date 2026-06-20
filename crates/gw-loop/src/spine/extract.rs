@@ -114,6 +114,10 @@ impl SpineExtractor {
                 kind: e.kind.clone(),
                 canonical_form: e.canonical_form.clone(),
                 confidence: e.confidence,
+                // Chat-turn extraction doesn't carry chunk-relative
+                // spans (no chunks involved); persistence falls back
+                // to writing a single span-less mention row per entity.
+                occurrences: Vec::new(),
             })
             .collect();
         let canon_opts = CanonicalizeOpts::default();
