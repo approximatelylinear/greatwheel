@@ -12,6 +12,8 @@ import { DragSplitter } from './components/DragSplitter';
 import { SpinePane, type SpineSegment } from './components/SpinePane';
 import { SpineSidebar } from './components/SpineSidebar';
 import { WorkspaceDrawer } from './components/WorkspaceDrawer';
+import { WidgetHistoryDrawer } from './components/WidgetHistoryDrawer';
+import { WikiPane } from './components/WikiPane';
 import type { EntityCard, SegmentDetail } from './api/client';
 import { registry } from './jr/registry';
 import type { Widget } from './types';
@@ -162,6 +164,7 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
   // in sync from outside.
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [workspaceReloadKey, setWorkspaceReloadKey] = useState(0);
+  const [historyOpen, setHistoryOpen] = useState(false);
   // Issue #6: focused segment's loaded detail, captured from the
   // SpineSidebar so ChatPane can highlight the segment's entities
   // in the corresponding chat rows. Cleared on focus dismiss.
@@ -243,6 +246,7 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
   // a point click would have fired.
   const widgets = useStateValue<Record<string, Widget>>('/widgets') ?? {};
   const canvasSlot = useStateValue<string | null>('/canvasSlot') ?? null;
+  const wikiSlot = useStateValue<string | null>('/wikiSlot') ?? null;
 
   // Find the SemanticSpine widget the AG-UI adapter emits/supersedes
   // on each SpineSegmentsUpdated. Only one is live per session at a
@@ -476,6 +480,20 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
     [onSegmentFocus],
   );
 
+  const onWikiClose = useCallback(() => {
+    if (!wikiSlot) return;
+    const w = widgets[wikiSlot];
+    if (!w) return;
+    void postWidgetEvent(sessionId, {
+      widget_id: w.id,
+      surface_id: w.surface_id,
+      action: 'close_wiki',
+      data: {},
+    }).catch(() => {
+      /* surfaced via stream-error path on next event */
+    });
+  }, [sessionId, widgets, wikiSlot]);
+
   const onWorkspaceJump = useCallback(
     (entryFirst: string, entryLast: string) => {
       setWorkspaceOpen(false);
@@ -506,6 +524,15 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
         >
           <span aria-hidden>★</span>
           <span>Workspace</span>
+        </button>
+        <button
+          type="button"
+          className="app-history-btn"
+          onClick={() => setHistoryOpen(true)}
+          title="Widget history — restore a previously emitted widget"
+        >
+          <span aria-hidden>↺</span>
+          <span>History</span>
         </button>
         <span className="app-mark" title={`session ${sessionId}`}>greatwheel</span>
       </header>
@@ -545,7 +572,7 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
               selectedEntityId={selectedEntity?.entity_id ?? null}
             />
           )}
-          <CanvasPane />
+          <CanvasPane sessionId={sessionId} />
         </div>
       </main>
       {debug && (
@@ -566,6 +593,12 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
         onOpen={onWorkspaceOpenSegment}
         onJump={onWorkspaceJump}
       />
+      <WidgetHistoryDrawer
+        sessionId={sessionId}
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+      />
+      <WikiPane sessionId={sessionId} onClose={onWikiClose} />
     </div>
   );
 }

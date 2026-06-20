@@ -1059,6 +1059,8 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
   /* Edge border removed — DragSplitter draws the dividing line. */
   background: var(--bg-soft);
   padding: 24px 18px; overflow-y: auto;
+  /* SlotNav for the canvas slot anchors here. */
+  position: relative;
 }
 .canvas-header { display: none; }
 .canvas-empty {
@@ -1094,6 +1096,8 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
   margin-top: 18px; padding-top: 18px;
   border-top: 1px dashed var(--border);
   animation: rise-in 280ms cubic-bezier(0.2, 0.8, 0.25, 1) both;
+  /* Aux slot's SlotNav anchors here. */
+  position: relative;
 }
 .canvas-aux .a2ui-widget {
   background: transparent; border: none; padding: 0;
@@ -1795,4 +1799,602 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
   color: var(--fg);
   border-color: var(--fg-dim);
   background: var(--surface);
+}
+
+/* ═══ Salvaged: KB wiki + slot-nav + widget-history UI ═══ */
+
+/* Header button that opens the widget history drawer. Sits beside
+   the Workspace button; same visual treatment, no `margin-left:auto`
+   so it stacks immediately after Workspace on the right. */
+.app-history-btn {
+  display: flex; align-items: center; gap: 6px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  font: 11.5px/1 var(--font-ui);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background-color 120ms ease;
+}
+.app-history-btn:hover {
+  color: var(--fg);
+  border-color: var(--fg-dim);
+  background: var(--surface);
+}
+
+/* ─── KbDocWiki drawer ──────────────────────────────────────────── */
+
+.kb-wiki-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 7, 12, 0.55);
+  backdrop-filter: blur(2px);
+  z-index: 40;
+  animation: kb-wiki-fade-in 140ms ease-out;
+}
+
+@keyframes kb-wiki-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.kb-wiki-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(80vw, 1280px);
+  background: var(--bg);
+  border-left: 1px solid var(--border-hi);
+  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.5);
+  z-index: 41;
+  display: flex;
+  flex-direction: column;
+  animation: kb-wiki-slide-in 180ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+@keyframes kb-wiki-slide-in {
+  from { transform: translateX(24px); opacity: 0; }
+  to   { transform: translateX(0); opacity: 1; }
+}
+
+/* The drawer's child is a WidgetRenderer-wrapped `.a2ui-widget`, which
+   is normally a block with padding/border/background — none of which
+   make sense for a widget that owns the entire drawer. Strip the
+   chrome and make it participate in the drawer's flex column so
+   `.kb-wiki { height: 100% }` resolves against a real height. Without
+   this, the drawer grows to fit the doc and `.kb-wiki-content`'s
+   `overflow-y: auto` never triggers. */
+.kb-wiki-drawer > .a2ui-widget {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-radius: 0;
+}
+
+.kb-wiki {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.kb-wiki-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 22px 32px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-soft);
+}
+
+.kb-wiki-eyebrow {
+  font: 11px/1.2 var(--font-ui);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  margin-bottom: 6px;
+}
+
+.kb-wiki-title {
+  font-family: var(--font-serif);
+  font-size: 26px;
+  line-height: 1.2;
+  margin: 0;
+  color: var(--fg);
+}
+
+.kb-wiki-byline {
+  margin-top: 4px;
+  font: 13px var(--font-ui);
+  color: var(--fg-dim);
+}
+
+.kb-wiki-close {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  font-size: 20px;
+  line-height: 1;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.kb-wiki-close:hover {
+  background: var(--surface);
+  color: var(--fg);
+  border-color: var(--border-hi);
+}
+
+.kb-wiki-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 220px 1fr 280px;
+  overflow: hidden;
+}
+
+.kb-wiki-toc {
+  border-right: 1px solid var(--border);
+  padding: 20px 16px 32px;
+  overflow-y: auto;
+  min-height: 0;
+  font: 13px/1.45 var(--font-ui);
+}
+
+.kb-wiki-rail-label {
+  font: 11px/1.2 var(--font-ui);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  margin-bottom: 10px;
+}
+
+.kb-wiki-toc ol {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.kb-wiki-toc-item {
+  margin: 2px 0;
+}
+.kb-wiki-toc-item.depth-1 { padding-left: 12px; }
+.kb-wiki-toc-item.depth-2 { padding-left: 24px; }
+.kb-wiki-toc-item.depth-3 { padding-left: 36px; }
+.kb-wiki-toc-item a {
+  color: var(--fg-dim);
+  text-decoration: none;
+  display: block;
+  padding: 3px 6px;
+  border-radius: 4px;
+}
+.kb-wiki-toc-item a:hover {
+  color: var(--fg);
+  background: var(--surface);
+}
+
+.kb-wiki-content {
+  overflow-y: auto;
+  min-height: 0;
+  padding: 28px 40px 64px;
+  font: 15px/1.65 var(--font-serif);
+  color: var(--fg);
+  max-width: 760px;
+}
+
+.kb-wiki-content h2 {
+  font-family: var(--font-serif);
+  font-size: 22px;
+  margin: 32px 0 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.kb-wiki-content h3 {
+  font-family: var(--font-serif);
+  font-size: 18px;
+  margin: 24px 0 8px;
+}
+.kb-wiki-content h4 {
+  font: 600 14px/1.3 var(--font-ui);
+  margin: 18px 0 6px;
+  color: var(--fg-dim);
+}
+
+.kb-wiki-content p { margin: 0 0 12px; }
+.kb-wiki-content ul, .kb-wiki-content ol { margin: 0 0 12px 20px; }
+.kb-wiki-content code {
+  font: 0.92em var(--font-mono);
+  background: var(--surface);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.kb-wiki-content pre {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 14px;
+  overflow-x: auto;
+  font: 12.5px/1.5 var(--font-mono);
+}
+.kb-wiki-content pre code { background: transparent; padding: 0; }
+.kb-wiki-content a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.kb-wiki-content a:hover { text-decoration: underline; }
+
+.kb-wiki-section { scroll-margin-top: 16px; }
+
+/* Inline entity highlights inside section markdown. Subtle by default
+   so prose stays readable; clicking opens the entity card. The kind-*
+   classes let downstream theming tint by entity type (author/method/
+   concept/dataset/venue) without changing the highlight component. */
+.kb-wiki-mention {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 2px;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 1px;
+  transition: background 80ms ease-out, border-color 80ms ease-out;
+}
+.kb-wiki-mention:hover {
+  background: color-mix(in srgb, var(--accent) 32%, transparent);
+  border-bottom-color: var(--accent);
+}
+.kb-wiki-mention:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.kb-wiki-aside {
+  border-left: 1px solid var(--border);
+  padding: 20px 16px 32px;
+  overflow-y: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  font: 13px/1.5 var(--font-ui);
+}
+
+.kb-wiki-infobox dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 10px;
+  font-size: 12.5px;
+}
+.kb-wiki-infobox dt {
+  color: var(--fg-dim);
+  font: 11px/1.4 var(--font-ui);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  align-self: center;
+}
+.kb-wiki-infobox dd {
+  margin: 0;
+  color: var(--fg);
+  word-break: break-word;
+}
+.kb-wiki-infobox dd.mono { font-family: var(--font-mono); font-size: 12px; }
+.kb-wiki-infobox a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.kb-wiki-infobox a:hover { text-decoration: underline; }
+
+.kb-wiki-entity-group { margin-bottom: 12px; }
+.kb-wiki-entity-kind {
+  font: 11px/1.2 var(--font-ui);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  margin: 6px 0 4px;
+}
+.kb-wiki-entities ul,
+.kb-wiki-topics ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.kb-wiki-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font: 12px var(--font-ui);
+  cursor: pointer;
+}
+.kb-wiki-chip:hover {
+  background: var(--surface-hi);
+  border-color: var(--border-hi);
+}
+.kb-wiki-chip-count {
+  font: 11px var(--font-mono);
+  color: var(--fg-dim);
+}
+
+.kb-wiki-empty {
+  color: var(--fg-dim);
+  font-style: italic;
+  font-size: 13px;
+}
+
+/* ─── KbClusterWiki — digest of N sources ─────────────────── */
+
+.kb-cluster-summary {
+  margin: 4px 0 0;
+  font: 14px/1.5 var(--font-serif);
+  color: var(--fg-dim);
+  max-width: 60ch;
+}
+.kb-cluster-content {
+  display: flex; flex-direction: column; gap: 18px;
+}
+.kb-cluster-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px 12px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.kb-cluster-card-header {
+  display: flex; align-items: flex-start; gap: 12px;
+}
+.kb-cluster-card-header h2 {
+  margin: 0;
+  font: 600 16px/1.3 var(--font-ui);
+  color: var(--fg);
+  flex: 1;
+}
+.kb-cluster-open {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  font: 11.5px/1 var(--font-ui);
+  padding: 5px 9px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 120ms ease, border-color 120ms ease, background-color 120ms ease;
+}
+.kb-cluster-open:hover {
+  color: var(--accent);
+  border-color: var(--accent-ring);
+  background: var(--accent-soft);
+}
+.kb-cluster-meta {
+  display: flex; flex-wrap: wrap; gap: 10px;
+  font: 11.5px/1.4 var(--font-ui);
+  color: var(--muted);
+}
+.kb-cluster-meta .mono { font-family: var(--font-mono); font-size: 11px; }
+.kb-cluster-meta a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.kb-cluster-meta a:hover { text-decoration: underline; }
+.kb-cluster-intro {
+  font: 13px/1.55 var(--font-serif);
+  color: var(--fg-dim);
+}
+.kb-cluster-intro p { margin: 0; }
+.kb-cluster-chips {
+  display: flex; flex-wrap: wrap; gap: 4px;
+}
+.kb-wiki-chip-topic {
+  font-style: italic;
+}
+
+@media (max-width: 1100px) {
+  .kb-wiki-body {
+    grid-template-columns: 180px 1fr 240px;
+  }
+  .kb-wiki-content { padding: 24px 28px 64px; }
+}
+
+@media (max-width: 860px) {
+  .kb-wiki-drawer { width: 100vw; }
+  .kb-wiki-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr auto;
+  }
+  .kb-wiki-toc {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    max-height: 30vh;
+  }
+  .kb-wiki-aside {
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+}
+
+/* Widget history drawer — restore a previously emitted widget into
+   its appropriate slot. See `docs/design-widget-history.md`. Mirrors
+   the workspace drawer's structure (backdrop + slide-in right panel)
+   but tighter (360px) and grouped by Canvas / Wiki / Aux. */
+.widget-history-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 50;
+  display: flex;
+  justify-content: flex-end;
+  animation: fade-in 160ms ease both;
+}
+.widget-history-drawer {
+  width: min(360px, 90vw);
+  height: 100%;
+  background: var(--bg-soft);
+  border-left: 1px solid var(--border);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  animation: slide-in-right 220ms cubic-bezier(0.2, 0.8, 0.25, 1) both;
+}
+.widget-history-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.widget-history-title {
+  font: 14px/1 var(--font-ui);
+  font-weight: 500;
+  color: var(--fg);
+  letter-spacing: -0.005em;
+}
+.widget-history-count {
+  font: 11px/1 var(--font-ui);
+  color: var(--muted);
+}
+.widget-history-close {
+  margin-left: auto;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  transition: color 120ms ease, background-color 120ms ease;
+}
+.widget-history-close:hover {
+  color: var(--fg);
+  background: var(--surface);
+}
+.widget-history-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 12px 16px 16px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.widget-history-empty {
+  font: 12.5px/1.5 var(--font-ui);
+  color: var(--muted);
+  font-style: italic;
+  padding: 18px 4px;
+  text-align: center;
+}
+.widget-history-group { display: flex; flex-direction: column; gap: 6px; }
+.widget-history-group-title {
+  margin: 0;
+  font: 10.5px/1 var(--font-ui);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  padding: 4px 2px;
+}
+.widget-history-list {
+  list-style: none;
+  margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.widget-history-row { display: flex; }
+.widget-history-row-btn {
+  flex: 1;
+  display: flex; flex-direction: column; gap: 4px;
+  text-align: left;
+  background: var(--surface-hi);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+.widget-history-row-btn:hover:not(:disabled) {
+  border-color: var(--fg-dim);
+  background: var(--surface);
+}
+.widget-history-row-btn:disabled {
+  cursor: default;
+  opacity: 0.85;
+}
+.widget-history-row.active .widget-history-row-btn {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface-hi));
+}
+.widget-history-row-label {
+  font: 12.5px/1.3 var(--font-ui);
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.widget-history-row-meta {
+  display: flex; align-items: center; gap: 6px;
+  font: 10.5px/1 var(--font-ui);
+  color: var(--muted);
+}
+.widget-history-row-active {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 2px 5px;
+}
+
+/* Per-slot back/forward chevrons (see docs/design-slot-nav.md).
+   Positioned absolute in the slot's top-right; hosts (CanvasPane,
+   WikiPane) set `position: relative` on the parent so this anchors
+   correctly. Hidden via the component's own early-return when both
+   directions are disabled — no rule needed here for that. */
+.slot-nav {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 2px;
+  z-index: 4;
+}
+.slot-nav-wiki-overlay {
+  /* Wiki drawer overlays the page; nudge inward so chevrons sit
+     inside the drawer's own border, not flush to the screen edge. */
+  top: 12px;
+  right: 14px;
+  z-index: 42;
+}
+.slot-nav-btn {
+  width: 22px; height: 22px;
+  display: inline-flex;
+  align-items: center; justify-content: center;
+  background: var(--surface-hi);
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  font: 16px/1 var(--font-ui);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background-color 120ms ease;
+}
+.slot-nav-btn:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--fg-dim);
+  background: var(--surface);
+}
+.slot-nav-btn:disabled {
+  cursor: default;
+  opacity: 0.35;
 }

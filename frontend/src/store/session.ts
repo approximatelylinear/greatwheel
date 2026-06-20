@@ -219,12 +219,27 @@ function reducer(state: SessionState, action: Action): SessionState {
       // We only track follow-up anchoring here, since that's a
       // chat-side concern (widget → message linkage).
       const w = action.widget;
-      if (!w.follow_up) return state;
+      // Terminal/drawer widgets (KbDocWiki, KbClusterWiki) signal
+      // "user, look at this dedicated surface." Once one of those
+      // lands, the visible turn is over from the user's perspective,
+      // even if gw-loop hasn't sent RUN_FINISHED yet (the agent may
+      // still be in a follow-up iteration or a stuck loop). Hide the
+      // typing indicator and re-enable input. RUN_FINISHED, when it
+      // arrives, is a no-op since `running` is already false.
+      const terminalKinds = new Set(['KbDocWiki', 'KbClusterWiki']);
+      const isTerminal =
+        w.kind === 'A2ui'
+        && 'Inline' in w.payload
+        && terminalKinds.has(
+          ((w.payload as { Inline: { type?: string } }).Inline?.type ?? ''),
+        );
+      const baseState = isTerminal ? { ...state, running: false } : state;
+      if (!w.follow_up) return baseState;
       if (state.running) {
         // Buffer — no assistant message has arrived for this turn yet,
         // attaching to the prior turn's message would misplace it.
         return {
-          ...state,
+          ...baseState,
           pendingFollowUps: [...state.pendingFollowUps, w.id],
         };
       }
@@ -234,7 +249,7 @@ function reducer(state: SessionState, action: Action): SessionState {
       if (lastAssistant) {
         const prev = state.messageFollowUps[lastAssistant.id] ?? [];
         return {
-          ...state,
+          ...baseState,
           messageFollowUps: {
             ...state.messageFollowUps,
             [lastAssistant.id]: [...prev, w.id],
@@ -242,7 +257,7 @@ function reducer(state: SessionState, action: Action): SessionState {
         };
       }
       return {
-        ...state,
+        ...baseState,
         pendingFollowUps: [...state.pendingFollowUps, w.id],
       };
     }

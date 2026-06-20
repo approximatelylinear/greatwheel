@@ -13,6 +13,13 @@ export const INITIAL_CANONICAL_STATE: Record<string, unknown> = {
   widgetOrder: [],
   canvasSlot: null,
   canvasAuxSlot: null,
+  wikiSlot: null,
+  // Per-slot back/forward enabled-state (see docs/design-slot-nav.md).
+  // Server emits these as `replace /<slot>Nav` patches alongside the
+  // matching slot-pointer patch on every pin/unpin/nav.
+  canvasNav: { can_back: false, can_forward: false },
+  canvasAuxNav: { can_back: false, can_forward: false },
+  wikiNav: { can_back: false, can_forward: false },
   pinnedIds: {},
   pressed: {},
   focusedScope: {},

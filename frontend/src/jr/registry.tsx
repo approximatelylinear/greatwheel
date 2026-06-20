@@ -2,6 +2,11 @@ import { defineRegistry } from '@json-render/react';
 import { spikeCatalog } from './catalog';
 import { EntityCloudWidget } from '../widgets/EntityCloudWidget';
 import { SpinePane } from '../components/SpinePane';
+import { KbDocWikiWidget, type WikiDoc } from '../widgets/KbDocWiki';
+import {
+  KbClusterWikiWidget,
+  type WikiCluster,
+} from '../widgets/KbClusterWiki';
 
 function formatCell(v: unknown): string {
   if (v == null) return '—';
@@ -116,6 +121,23 @@ const built = defineRegistry(spikeCatalog, {
         segments={props.segments}
         focusedSegmentId={null}
         onSegmentFocus={() => {}}
+      />
+    ),
+    KbDocWiki: ({ props, emit }) => (
+      <KbDocWikiWidget
+        doc={props.doc as unknown as WikiDoc}
+        onEntityClick={(id) => emit(`entity:${id}`)}
+        onTopicClick={(id) => emit(`topic:${id}`)}
+        onClose={() => emit('close')}
+      />
+    ),
+    KbClusterWiki: ({ props, emit }) => (
+      <KbClusterWikiWidget
+        cluster={props.cluster as unknown as WikiCluster}
+        onEntityClick={(id) => emit(`entity:${id}`)}
+        onTopicClick={(id) => emit(`topic:${id}`)}
+        onSourceOpen={(ref) => emit(`source:${ref}`)}
+        onClose={() => emit('close')}
       />
     ),
     EntityCloud: ({ props, emit }) => (

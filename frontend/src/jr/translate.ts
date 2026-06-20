@@ -205,6 +205,162 @@ export function toJrSpec(widget: Widget): Spec | null {
         } as UIElement;
         return key;
       }
+      case 'KbDocWiki': {
+        // The server emits the WikiDoc payload nested under `doc`. We
+        // pass it through unchanged (the React widget knows the shape)
+        // and synthesise per-entity / per-topic / per-section click
+        // bindings so clicks route through `interact`.
+        const doc = (node.doc ?? {}) as Record<string, unknown>;
+        const entities = Array.isArray(doc.entities)
+          ? (doc.entities as Array<Record<string, unknown>>)
+          : [];
+        const topics = Array.isArray(doc.topics)
+          ? (doc.topics as Array<Record<string, unknown>>)
+          : [];
+        const on: Record<string, unknown> = {};
+        for (const e of entities) {
+          const id = String(e.entity_id ?? '');
+          const slug = String(e.slug ?? '');
+          on[`entity:${id}`] = {
+            action: 'interact',
+            params: {
+              widgetId,
+              surfaceId,
+              buttonId: `entity:${id}`,
+              action: 'open_kb_entity',
+              data: { entity_id: id, slug },
+            },
+          };
+        }
+        for (const t of topics) {
+          const id = String(t.topic_id ?? '');
+          const slug = String(t.slug ?? '');
+          on[`topic:${id}`] = {
+            action: 'interact',
+            params: {
+              widgetId,
+              surfaceId,
+              buttonId: `topic:${id}`,
+              action: 'open_kb_topic',
+              data: { topic_id: id, slug },
+            },
+          };
+        }
+        // Generic close button — fires `close` so the server can
+        // unpin the wiki slot.
+        on['close'] = {
+          action: 'interact',
+          params: {
+            widgetId,
+            surfaceId,
+            buttonId: 'close',
+            action: 'close_wiki',
+            data: {},
+          },
+        };
+        elements[key] = {
+          type: 'KbDocWiki',
+          props: { doc },
+          on,
+        } as UIElement;
+        return key;
+      }
+      case 'KbClusterWiki': {
+        // Cluster digest payload: per-source cards + shared entity /
+        // topic rails. Bindings include:
+        //   - shared/per-source entity chip → `open_kb_entity`
+        //   - shared/per-source topic chip → `open_kb_topic`
+        //   - per-source "Open as wiki" button → `open_source_wiki`
+        //     with data carrying the arxiv_id (or source_id as a
+        //     fallback) so the agent can re-run the per-doc flow.
+        const cluster = (node.cluster ?? {}) as Record<string, unknown>;
+        const sources = Array.isArray(cluster.sources)
+          ? (cluster.sources as Array<Record<string, unknown>>)
+          : [];
+        const sharedEntities = Array.isArray(cluster.shared_entities)
+          ? (cluster.shared_entities as Array<Record<string, unknown>>)
+          : [];
+        const sharedTopics = Array.isArray(cluster.shared_topics)
+          ? (cluster.shared_topics as Array<Record<string, unknown>>)
+          : [];
+        const on: Record<string, unknown> = {};
+
+        const bindEntity = (id: string, slug: string) => {
+          if (!id || on[`entity:${id}`]) return;
+          on[`entity:${id}`] = {
+            action: 'interact',
+            params: {
+              widgetId,
+              surfaceId,
+              buttonId: `entity:${id}`,
+              action: 'open_kb_entity',
+              data: { entity_id: id, slug },
+            },
+          };
+        };
+        const bindTopic = (id: string, slug: string) => {
+          if (!id || on[`topic:${id}`]) return;
+          on[`topic:${id}`] = {
+            action: 'interact',
+            params: {
+              widgetId,
+              surfaceId,
+              buttonId: `topic:${id}`,
+              action: 'open_kb_topic',
+              data: { topic_id: id, slug },
+            },
+          };
+        };
+        for (const e of sharedEntities) {
+          bindEntity(String(e.entity_id ?? ''), String(e.slug ?? ''));
+        }
+        for (const t of sharedTopics) {
+          bindTopic(String(t.topic_id ?? ''), String(t.slug ?? ''));
+        }
+        for (const src of sources) {
+          const entries = Array.isArray(src.top_entities)
+            ? (src.top_entities as Array<Record<string, unknown>>)
+            : [];
+          for (const e of entries) {
+            bindEntity(String(e.entity_id ?? ''), String(e.slug ?? ''));
+          }
+          const topicEntries = Array.isArray(src.top_topics)
+            ? (src.top_topics as Array<Record<string, unknown>>)
+            : [];
+          for (const t of topicEntries) {
+            bindTopic(String(t.topic_id ?? ''), String(t.slug ?? ''));
+          }
+          const ref = String(src.arxiv_id ?? src.source_id ?? '');
+          if (ref) {
+            on[`source:${ref}`] = {
+              action: 'interact',
+              params: {
+                widgetId,
+                surfaceId,
+                buttonId: `source:${ref}`,
+                action: 'open_source_wiki',
+                data: { source_ref: ref },
+              },
+            };
+          }
+        }
+        on['close'] = {
+          action: 'interact',
+          params: {
+            widgetId,
+            surfaceId,
+            buttonId: 'close',
+            action: 'close_wiki',
+            data: {},
+          },
+        };
+        elements[key] = {
+          type: 'KbClusterWiki',
+          props: { cluster },
+          on,
+        } as UIElement;
+        return key;
+      }
       case 'EntityCloud': {
         const rawPoints = Array.isArray(node.points)
           ? (node.points as Array<Record<string, unknown>>)

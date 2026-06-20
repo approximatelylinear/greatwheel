@@ -1,13 +1,19 @@
 import { useStateValue } from '@json-render/react';
 import type { Widget } from '../types';
 import { WidgetRenderer } from './WidgetRenderer';
+import { SlotNav } from './SlotNav';
 
 /**
  * Canvas reads directly from json-render state — `canvasSlot` and
  * `canvasAuxSlot` are JSON-Pointer bindings populated by server
- * STATE_DELTA patches (pin / pin_aux). No props needed.
+ * STATE_DELTA patches (pin / pin_aux). `sessionId` is the only
+ * required prop, needed by the SlotNav chevrons to post nav events.
  */
-export function CanvasPane() {
+interface Props {
+  sessionId: string;
+}
+
+export function CanvasPane({ sessionId }: Props) {
   const widgets = useStateValue<Record<string, Widget>>('/widgets') ?? {};
   const primaryId = useStateValue<string | null>('/canvasSlot') ?? null;
   const auxId = useStateValue<string | null>('/canvasAuxSlot') ?? null;
@@ -16,6 +22,11 @@ export function CanvasPane() {
   return (
     <aside className="canvas-pane">
       <div className="canvas-header">Canvas</div>
+      <SlotNav
+        slot="canvas"
+        sessionId={sessionId}
+        surfaceId={primary?.surface_id ?? null}
+      />
       {primary ? (
         <WidgetRenderer widget={primary} />
       ) : (
@@ -23,6 +34,11 @@ export function CanvasPane() {
       )}
       {aux && (
         <div className="canvas-aux">
+          <SlotNav
+            slot="aux"
+            sessionId={sessionId}
+            surfaceId={aux.surface_id ?? null}
+          />
           <WidgetRenderer widget={aux} />
         </div>
       )}

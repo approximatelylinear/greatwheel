@@ -88,6 +88,115 @@ export const spikeCatalog = defineCatalog(schema, {
       description:
         'Vertical rail showing the conversation\'s segments — contiguous runs of session entries that share entities. Each segment carries a label, kind (comparison / decision / deep_dive / construction / other), and the entry-id range it spans so the rail can sync with chat scroll. Emitted by the backend when SpineSegmentsUpdated fires.',
     },
+    KbDocWiki: {
+      props: z.object({
+        doc: z.object({
+          source: z.object({
+            source_id: z.string(),
+            title: z.string(),
+            author: z.string().nullable().optional(),
+            url: z.string().nullable().optional(),
+            file_path: z.string().nullable().optional(),
+            source_format: z.string(),
+            published_at: z.string().nullable().optional(),
+            ingested_at: z.string(),
+            metadata: z.unknown(),
+          }),
+          toc: z.array(
+            z.object({
+              anchor: z.string(),
+              label: z.string(),
+              depth: z.number().int(),
+            }),
+          ),
+          sections: z.array(
+            z.object({
+              anchor: z.string(),
+              heading_path: z.array(z.string()),
+              markdown: z.string(),
+            }),
+          ),
+          entities: z.array(
+            z.object({
+              entity_id: z.string(),
+              label: z.string(),
+              slug: z.string(),
+              kind: z.string(),
+              mentions_in_doc: z.number().int(),
+            }),
+          ),
+          topics: z.array(
+            z.object({
+              topic_id: z.string(),
+              label: z.string(),
+              slug: z.string(),
+              chunks_in_doc: z.number().int(),
+            }),
+          ),
+        }),
+      }),
+      description:
+        'Wikipedia-style view of one KB source — infobox, TOC, sections (chunks grouped by heading_path), mentioned entities, referenced topics. Built by the kb_get_wiki host fn. Renders in the wiki_slot drawer; entity/topic clicks fire interact with action="open_kb_entity" / "open_kb_topic".',
+    },
+    KbClusterWiki: {
+      props: z.object({
+        cluster: z.object({
+          title: z.string(),
+          summary: z.string().nullable().optional(),
+          sources: z.array(
+            z.object({
+              source_id: z.string(),
+              title: z.string(),
+              author: z.string().nullable().optional(),
+              url: z.string().nullable().optional(),
+              arxiv_id: z.string().nullable().optional(),
+              source_format: z.string(),
+              published_at: z.string().nullable().optional(),
+              ingested_at: z.string(),
+              intro: z.string().nullable().optional(),
+              top_entities: z.array(
+                z.object({
+                  entity_id: z.string(),
+                  label: z.string(),
+                  slug: z.string(),
+                  kind: z.string(),
+                  mentions_in_doc: z.number().int(),
+                }),
+              ),
+              top_topics: z.array(
+                z.object({
+                  topic_id: z.string(),
+                  label: z.string(),
+                  slug: z.string(),
+                  chunks_in_doc: z.number().int(),
+                }),
+              ),
+            }),
+          ),
+          shared_entities: z.array(
+            z.object({
+              entity_id: z.string(),
+              label: z.string(),
+              slug: z.string(),
+              kind: z.string(),
+              total_mentions: z.number().int(),
+              source_count: z.number().int(),
+            }),
+          ),
+          shared_topics: z.array(
+            z.object({
+              topic_id: z.string(),
+              label: z.string(),
+              slug: z.string(),
+              total_chunks: z.number().int(),
+              source_count: z.number().int(),
+            }),
+          ),
+        }),
+      }),
+      description:
+        'Cluster-style wiki digest of N KB sources — per-source card (title, author, intro, top entities/topics) plus shared-entities and shared-topics rails. Built by the kb_get_cluster_wiki host fn. Renders in the wiki_slot drawer alongside KbDocWiki; entity/topic chip clicks fire interact with action="open_kb_entity" / "open_kb_topic"; per-source "Open as wiki" buttons fire action="open_source_wiki" with data={source_ref}.',
+    },
     EntityCloud: {
       props: z.object({
         points: z.array(
