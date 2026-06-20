@@ -386,11 +386,58 @@ div:has(> .message-log) + div:has(> .message-log) {
 .message-assistant .message-content ul,
 .message-assistant .message-content ol { margin: 8px 0 8px 22px; padding: 0; }
 .message-assistant .message-content li { margin: 3px 0; }
+.message-assistant .message-content li::marker { color: var(--accent); }
+.message-assistant .message-content li > p { margin: 2px 0; }
 .message-assistant .message-content blockquote {
   margin: 10px 0; padding: 6px 14px;
   border-left: 3px solid var(--warm); color: var(--fg-dim);
   background: var(--warm-soft);
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+/* Horizontal rule — quiet divider for section breaks in long answers. */
+.message-assistant .message-content hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 18px 0;
+}
+
+/* GFM tables — used by the literature_assistant for comparison answers.
+   Wrapped in `.md-table-wrap` (see `rehypeTableWrap` in ChatPane) so the
+   chat column can stay narrow without clipping a wide table. */
+.message-assistant .message-content .md-table-wrap {
+  margin: 12px 0;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.message-assistant .message-content table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+.message-assistant .message-content thead th {
+  position: sticky; top: 0;
+  background: var(--surface-hi);
+  color: var(--fg);
+  font-weight: 600;
+  text-align: left;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.message-assistant .message-content tbody td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg);
+  vertical-align: top;
+}
+.message-assistant .message-content tbody tr:nth-child(even) td {
+  background: var(--bg-soft);
+}
+.message-assistant .message-content tbody tr:last-child td {
+  border-bottom: 0;
 }
 
 /* Pull-quote: inline quotations from source material. */
@@ -1181,6 +1228,15 @@ q.pull-quote::after { color: var(--warm); opacity: 0.7; }
 .message-input button:disabled {
   background: var(--surface-hi); color: var(--muted);
   border-color: var(--border); cursor: not-allowed;
+}
+.message-input button.message-input-stop {
+  background: transparent;
+  color: var(--fg);
+  border-color: var(--border-hi);
+}
+.message-input button.message-input-stop:hover:not(:disabled) {
+  background: var(--surface-hi);
+  border-color: var(--fg-dim);
 }
 
 /* ─── Empty state (pre-interaction welcome) ──────────────────── */

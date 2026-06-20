@@ -31,6 +31,17 @@ export type SpineDebugEvent =
       segments: DebugSpineSegment[];
     };
 
+/** One inbound AG-UI event as captured for the DebugPane's "sse" tab.
+ *  Held as a thin summary (event type + one-line description) so the
+ *  pane stays readable across a few hundred events. Full payloads
+ *  live in the StateStore / reducer; this is just an ordering aid. */
+export interface SseDebugEvent {
+  id: string;
+  at: number;
+  type: string;
+  summary: string;
+}
+
 export interface Message {
   id: string;
   role: 'user' | 'assistant';
@@ -83,6 +94,11 @@ export interface SessionState {
    *  pane's "spine" tab so the user can see extraction + re-segment
    *  passes as they fire. Capped to keep memory bounded. */
   spineEvents: SpineDebugEvent[];
+  /** Insertion-ordered AG-UI SSE events with one-line summaries.
+   *  Surfaced in the debug pane's "sse" tab — meant for tracing
+   *  ordering bugs (e.g. unexpected RUN_STARTED after RUN_FINISHED).
+   *  Capped at MAX_SSE_EVENTS. */
+  sseEvents: SseDebugEvent[];
   /** Buffer mapping `message_id → entry_id` populated by
    *  `TEXT_MESSAGE_START`. Drained on the matching `assistant-chunk`
    *  to stamp `Message.entryId` so the spine can anchor segments to
@@ -111,11 +127,13 @@ type Action =
       error?: string;
       at: number;
     }
-  | { type: 'spine-event'; event: SpineDebugEvent };
+  | { type: 'spine-event'; event: SpineDebugEvent }
+  | { type: 'sse-event'; event: SseDebugEvent };
 
 const MAX_TRACES = 50;
 const MAX_TOOL_CALLS = 50;
 const MAX_SPINE_EVENTS = 100;
+const MAX_SSE_EVENTS = 200;
 
 const initial: SessionState = {
   messages: [],
@@ -125,6 +143,7 @@ const initial: SessionState = {
   messageFollowUps: {},
   pendingFollowUps: [],
   spineEvents: [],
+  sseEvents: [],
   pendingAssistantEntryIds: {},
 };
 
@@ -342,11 +361,36 @@ function reducer(state: SessionState, action: Action): SessionState {
       }
       return { ...state, spineEvents: next };
     }
+    case 'sse-event': {
+      const next = [...state.sseEvents, action.event];
+      if (next.length > MAX_SSE_EVENTS) {
+        next.splice(0, next.length - MAX_SSE_EVENTS);
+      }
+      return { ...state, sseEvents: next };
+    }
   }
 }
 
+/** Dev-only wrapper that logs every action that changes the
+ *  `running` flag. Helps trace stuck-typing-indicator bugs: each line
+ *  is `[running] false → true (action: mark-running)`, which surfaces
+ *  the exact event that flipped state. No-op in production builds. */
+function reducerWithRunningTrace(
+  state: SessionState,
+  action: Action,
+): SessionState {
+  const next = reducer(state, action);
+  if (import.meta.env.DEV && next.running !== state.running) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[running] ${state.running} → ${next.running} (action: ${action.type})`,
+    );
+  }
+  return next;
+}
+
 export function useSessionStore() {
-  const [state, dispatch] = useReducer(reducer, initial);
+  const [state, dispatch] = useReducer(reducerWithRunningTrace, initial);
   return {
     state,
     appendUser: (content: string) => dispatch({ type: 'append-user', content }),
@@ -366,10 +410,78 @@ export function useSessionStore() {
     widgetAdded: (widget: Widget) =>
       dispatch({ type: 'widget-emitted', widget }),
     ingest: (ev: AgUiEvent) => {
+      // Log every inbound SSE event into the debug feed, regardless
+      // of whether it produces a reducer action. STATE_SNAPSHOT /
+      // STATE_DELTA are consumed by the StateStore bridge (not the
+      // reducer) but still belong in the ordering trace.
+      dispatch({
+        type: 'sse-event',
+        event: {
+          id: crypto.randomUUID(),
+          at: Date.now(),
+          type: ev.type,
+          summary: summariseSseEvent(ev),
+        },
+      });
       const action = agUiToAction(ev);
       if (action) dispatch(action);
     },
   };
+}
+
+/** Build a one-line summary for the SSE debug feed. The goal is to
+ *  surface the bits most useful for ordering bugs (which message_id,
+ *  which JSON-Patch path was touched, what error fired) without
+ *  flooding the pane with full payloads. */
+function summariseSseEvent(ev: AgUiEvent): string {
+  switch (ev.type) {
+    case 'RUN_STARTED':
+      return 'turn started';
+    case 'RUN_FINISHED':
+      return 'turn complete';
+    case 'RUN_ERROR':
+      return `error: ${ev.message}`;
+    case 'TEXT_MESSAGE_START':
+      return `message=${ev.message_id.slice(0, 8)} entry=${
+        ev.entry_id?.slice(0, 8) ?? '∅'
+      }`;
+    case 'TEXT_MESSAGE_CONTENT':
+      return `message=${ev.message_id.slice(0, 8)} +${ev.delta.length} chars`;
+    case 'TEXT_MESSAGE_END':
+      return `message=${ev.message_id.slice(0, 8)}`;
+    case 'USER_MESSAGE_ANCHOR':
+      return `entry=${ev.entry_id.slice(0, 8)}`;
+    case 'STATE_SNAPSHOT':
+      return 'full state replace';
+    case 'STATE_DELTA': {
+      const paths = ev.patches
+        .slice(0, 4)
+        .map((p) => {
+          const patch = p as { op?: string; path?: string };
+          return `${patch.op ?? '?'} ${patch.path ?? '?'}`;
+        })
+        .join(', ');
+      const more =
+        ev.patches.length > 4 ? ` (+${ev.patches.length - 4} more)` : '';
+      return `${ev.patches.length} ops: ${paths}${more}`;
+    }
+    case 'TOOL_CALL_START':
+      return `${ev.tool_name} (${ev.tool_call_id.slice(0, 8)})`;
+    case 'TOOL_CALL_ARGS':
+      return `args ${ev.tool_call_id.slice(0, 8)}`;
+    case 'TOOL_CALL_END':
+      return `end ${ev.tool_call_id.slice(0, 8)}${ev.error ? ` (error)` : ''}`;
+    case 'INPUT_REQUEST':
+      return ev.prompt.slice(0, 80);
+    case 'DEBUG_CODE_EXEC':
+      return `${ev.is_final ? 'FINAL ' : ''}${ev.code.length} chars${
+        ev.error ? ' (error)' : ''
+      }`;
+    case 'DEBUG_SPINE_ENTRY_EXTRACTED':
+      return `entry=${ev.entry_id.slice(0, 8)} ${ev.entity_count}e ${ev.relation_count}r`;
+    case 'DEBUG_SPINE_SEGMENTS_UPDATED':
+      return `${ev.segments.length} segment(s)`;
+  }
 }
 
 function agUiToAction(ev: AgUiEvent): Action | null {

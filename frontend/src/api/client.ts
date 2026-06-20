@@ -11,6 +11,18 @@ export async function postMessage(sessionId: string, content: string): Promise<v
   if (!r.ok) throw new Error(`postMessage failed: ${r.status} ${await r.text()}`);
 }
 
+/** Abort the in-flight turn for this session. The backend's
+ *  `run_turn_cancellable` races the turn future against the
+ *  cancellation token; on signal it emits a `TurnError`
+ *  ("Cancelled by user") and proceeds to the next queued message.
+ *  Idempotent — a second cancel during the same turn is a no-op. */
+export async function cancelTurn(sessionId: string): Promise<void> {
+  const r = await fetch(`${BASE}/sessions/${sessionId}/cancel`, {
+    method: 'POST',
+  });
+  if (!r.ok) throw new Error(`cancelTurn failed: ${r.status} ${await r.text()}`);
+}
+
 export async function postWidgetEvent(sessionId: string, event: WidgetEvent): Promise<void> {
   const r = await fetch(`${BASE}/sessions/${sessionId}/widget-events`, {
     method: 'POST',

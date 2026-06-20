@@ -1,14 +1,15 @@
 import { useState } from 'react';
 import type { CodeTrace, ToolCall } from '../types';
-import type { SpineDebugEvent } from '../store/session';
+import type { SpineDebugEvent, SseDebugEvent } from '../store/session';
 
 interface Props {
   traces: CodeTrace[];
   toolCalls: ToolCall[];
   spineEvents: SpineDebugEvent[];
+  sseEvents: SseDebugEvent[];
 }
 
-type Tab = 'tools' | 'code' | 'spine';
+type Tab = 'tools' | 'code' | 'spine' | 'sse';
 
 /**
  * Collapsible strip that surfaces every agent-side observation:
@@ -16,7 +17,12 @@ type Tab = 'tools' | 'code' | 'spine';
  * executed, and the spine pipeline's per-turn extractions and
  * re-segments. Enable via `?debug=1`.
  */
-export function DebugPane({ traces, toolCalls, spineEvents }: Props) {
+export function DebugPane({
+  traces,
+  toolCalls,
+  spineEvents,
+  sseEvents,
+}: Props) {
   const [collapsed, setCollapsed] = useState(false);
   const [tab, setTab] = useState<Tab>('tools');
   return (
@@ -52,13 +58,54 @@ export function DebugPane({ traces, toolCalls, spineEvents }: Props) {
             >
               spine ({spineEvents.length})
             </button>
+            <button
+              type="button"
+              className={`debug-tab ${tab === 'sse' ? 'active' : ''}`}
+              onClick={() => setTab('sse')}
+            >
+              sse ({sseEvents.length})
+            </button>
           </div>
         )}
       </div>
       {!collapsed && tab === 'tools' && <ToolCallList calls={toolCalls} />}
       {!collapsed && tab === 'code' && <CodeTraceList traces={traces} />}
       {!collapsed && tab === 'spine' && <SpineEventList events={spineEvents} />}
+      {!collapsed && tab === 'sse' && <SseEventList events={sseEvents} />}
     </aside>
+  );
+}
+
+function SseEventList({ events }: { events: SseDebugEvent[] }) {
+  if (events.length === 0) {
+    return (
+      <div className="debug-list">
+        <div className="debug-empty">
+          Nothing yet. Every inbound AG-UI SSE event (RUN_STARTED,
+          STATE_DELTA, TEXT_MESSAGE_CONTENT, …) appears here with a
+          one-line summary — useful for tracing ordering bugs like a
+          stuck typing indicator after a wiki closes.
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="debug-list">
+      {events
+        .slice()
+        .reverse()
+        .map((e) => (
+          <article key={e.id} className="debug-trace debug-sse-event">
+            <header className="debug-trace-head">
+              <span className="debug-trace-time">
+                {new Date(e.at).toLocaleTimeString()}
+              </span>
+              <span className="debug-toolcall-name">{e.type}</span>
+            </header>
+            {e.summary && <pre className="debug-stdout">{e.summary}</pre>}
+          </article>
+        ))}
+    </div>
   );
 }
 

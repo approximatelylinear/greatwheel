@@ -59,6 +59,7 @@ export function ChatPane({
   const widgets = useStateValue<Record<string, Widget>>('/widgets') ?? {};
   const widgetOrder = useStateValue<string[]>('/widgetOrder') ?? [];
   const pinnedIds = useStateValue<Record<string, true>>('/pinnedIds') ?? {};
+  const wikiSlot = useStateValue<string | null>('/wikiSlot') ?? null;
 
   // Widgets anchored to a message should NOT also appear in the
   // scroll tail; collect their ids and exclude. SemanticSpine
@@ -67,18 +68,30 @@ export function ChatPane({
   const anchored = new Set<string>(
     Object.values(messageFollowUps).flat(),
   );
-  const isSpineWidget = (id: string): boolean => {
+  // Widgets that belong in a dedicated surface (right-side wiki
+  // drawer, dedicated spine pane) should never fall back to inline
+  // rendering in the chat scroll — the chat column is too narrow,
+  // and the dedicated surface is the only meaningful place to read
+  // them. Treat them the same way SemanticSpine is handled below.
+  const drawerOnlyTypes = new Set(['SemanticSpine', 'KbDocWiki', 'KbClusterWiki']);
+  const isDrawerOnlyWidget = (id: string): boolean => {
     const w = widgets[id];
     if (!w || w.kind !== 'A2ui' || !('Inline' in w.payload)) return false;
     const inline = (w.payload as { Inline: unknown }).Inline as
       | { type?: unknown }
       | null;
-    return !!inline && (inline as { type?: unknown }).type === 'SemanticSpine';
+    const t = inline && (inline as { type?: unknown }).type;
+    return typeof t === 'string' && drawerOnlyTypes.has(t);
   };
   const inlineIds = widgetOrder.filter(
-    (id) => !pinnedIds[id] && !anchored.has(id) && !isSpineWidget(id),
+    (id) => !pinnedIds[id] && !anchored.has(id) && !isDrawerOnlyWidget(id),
   );
-  const showTyping = running;
+  // Hide the typing indicator once the wiki drawer is open: the visible
+  // result has landed on the dedicated surface, and the chat-side
+  // ellipsis just looks stuck while gw-loop finishes the turn behind
+  // the drawer. `running` itself stays true until RUN_FINISHED — this
+  // only suppresses the bubble in the chat scroll.
+  const showTyping = running && wikiSlot === null;
   // Empty state: pre-interaction landing. Hides as soon as anything
   // (message, typing indicator, inline widget) appears.
   const isEmpty =
@@ -117,14 +130,18 @@ export function ChatPane({
 
   // Memoise the rehype plugin so ReactMarkdown doesn't see a new
   // function identity on every render (would force a full re-parse).
+  // `rehypeTableWrap` wraps every GFM `<table>` in `<div class="md-table-wrap">`
+  // so the CSS in styles.css can give it `overflow-x: auto` without
+  // affecting siblings — keeps wide comparison tables from clipping
+  // the narrow chat column.
   const rehypePluginsActive = useMemo(
     () =>
       highlightRegex
-        ? [rehypeRaw, rehypeHighlightTerms(highlightRegex)]
-        : [rehypeRaw],
+        ? [rehypeRaw, rehypeTableWrap, rehypeHighlightTerms(highlightRegex)]
+        : [rehypeRaw, rehypeTableWrap],
     [highlightRegex],
   );
-  const rehypePluginsInert = useMemo(() => [rehypeRaw], []);
+  const rehypePluginsInert = useMemo(() => [rehypeRaw, rehypeTableWrap], []);
   return (
     <div className="chat-pane">
       {isEmpty && <EmptyState welcome={welcome} onSuggest={onSuggest} />}
@@ -276,8 +293,20 @@ function isShortPlainText(text: string): boolean {
  * before the opening quote and whitespace / punctuation / end after
  * the closing quote, so possessives and contractions (Victor's,
  * don't) don't accidentally match.
+ *
+ * Skips text inside fenced ``` blocks and inline `…` backticks — the
+ * agent's code blocks frequently contain straight-quoted strings
+ * (e.g. `kb_search('topic')`) that we don't want rewritten as pull
+ * quotes before ReactMarkdown sees them.
  */
 function pullQuote(text: string): string {
+  const segments = splitOnCodeRegions(text);
+  return segments
+    .map((seg) => (seg.code ? seg.text : pullQuoteSegment(seg.text)))
+    .join('');
+}
+
+function pullQuoteSegment(text: string): string {
   const pre = `(^|[\\s(\\[—–-])`;
   const post = `(?=[\\s.,!?;:)\\]—–-]|$)`;
   const patterns: RegExp[] = [
@@ -291,6 +320,38 @@ function pullQuote(text: string): string {
     out = out.replace(re, '$1<q class="pull-quote">$2</q>');
   }
   return out;
+}
+
+/** Split a markdown source into alternating prose / code segments.
+ *  Fenced ```…``` blocks (any indent, optional language tag) and
+ *  inline `…` backticks are flagged `code: true` and passed through
+ *  pullQuote unchanged. Unterminated fences/backticks at end of
+ *  string are treated as code regions running to the end — same
+ *  behavior as a real markdown parser handling a partial stream. */
+interface MdSegment {
+  text: string;
+  code: boolean;
+}
+function splitOnCodeRegions(text: string): MdSegment[] {
+  // Match either a fenced block ```...``` (greedy across lines) OR a
+  // single-line `inline` span. Fenced takes precedence by appearing
+  // first in the alternation.
+  const re = /(```[\s\S]*?```|```[\s\S]*$|`[^`\n]*`|`[^`\n]*$)/g;
+  const out: MdSegment[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) {
+      out.push({ text: text.slice(last, m.index), code: false });
+    }
+    out.push({ text: m[0], code: true });
+    last = m.index + m[0].length;
+    if (m[0].length === 0) re.lastIndex++;
+  }
+  if (last < text.length) {
+    out.push({ text: text.slice(last), code: false });
+  }
+  return out.length > 0 ? out : [{ text, code: false }];
 }
 
 function EmptyState({
@@ -430,6 +491,45 @@ type HastNode = {
   children?: HastNode[];
   properties?: Record<string, unknown>;
 };
+
+/** Wrap every `<table>` in `<div class="md-table-wrap">` so the CSS
+ *  can scope `overflow-x: auto` to just the table — letting wide
+ *  comparison tables scroll horizontally inside the narrow chat
+ *  column instead of clipping. GFM doesn't emit a wrapper by
+ *  default, so this is a tiny rehype pass that runs before the
+ *  highlight plugin. */
+function rehypeTableWrap() {
+  return (tree: HastNode) => {
+    walk(tree);
+    function walk(node: HastNode) {
+      if (!node.children) return;
+      const out: HastNode[] = [];
+      for (const child of node.children) {
+        if (
+          child.type === 'element' &&
+          child.tagName === 'table' &&
+          !(node.type === 'element' &&
+            node.tagName === 'div' &&
+            Array.isArray((node.properties?.className ?? []) as unknown[]) &&
+            ((node.properties?.className ?? []) as string[]).includes(
+              'md-table-wrap',
+            ))
+        ) {
+          out.push({
+            type: 'element',
+            tagName: 'div',
+            properties: { className: ['md-table-wrap'] },
+            children: [child],
+          });
+          continue;
+        }
+        if (child.children) walk(child);
+        out.push(child);
+      }
+      node.children = out;
+    }
+  };
+}
 
 function rehypeHighlightTerms(regex: RegExp) {
   const SKIP_TAGS = new Set(['code', 'pre', 'mark', 'script', 'style']);

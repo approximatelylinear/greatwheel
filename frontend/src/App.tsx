@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createStateStore, type StateStore } from '@json-render/core';
 import { JSONUIProvider, useStateValue } from '@json-render/react';
-import { fetchTranscript, postMessage, postWidgetEvent } from './api/client';
+import { cancelTurn, fetchTranscript, postMessage, postWidgetEvent } from './api/client';
 import { useSessionRouting } from './api/users';
 import { openStream } from './api/sse';
 import { useSessionStore, type Message } from './store/session';
@@ -75,7 +75,7 @@ export function App() {
     const close = openStream(
       sessionId,
       (ev) => ingest(ev),
-      (err) => setStreamError(err),
+      (msg) => setStreamError(msg),
     );
     return close;
     // sessionIngest is stable (useReducer dispatch).
@@ -171,6 +171,14 @@ export function App() {
     }
   };
 
+  const onCancel = async () => {
+    try {
+      await cancelTurn(sessionId);
+    } catch (e) {
+      setStreamError(String(e));
+    }
+  };
+
   // Single interact handler for every widget. The catalog translator
   // bakes widget_id / surface_id into each `on.press` ActionBinding,
   // so this handler routes to the right backend session. Local
@@ -208,6 +216,7 @@ export function App() {
         streamError={streamError}
         state={state}
         onSend={onSend}
+        onCancel={onCancel}
       />
     </JSONUIProvider>
   );
@@ -223,6 +232,7 @@ interface AppShellProps {
   streamError: string | null;
   state: ReturnType<typeof useSessionStore>['state'];
   onSend: (content: string) => void;
+  onCancel: () => void;
 }
 
 /**
@@ -242,6 +252,7 @@ function AppShell({
   streamError,
   state,
   onSend,
+  onCancel,
 }: AppShellProps) {
   const branding = useStateValue<{ layout?: string | null }>('/branding');
   const layout = branding?.layout ?? 'chat-primary';
@@ -674,10 +685,19 @@ function AppShell({
           traces={state.codeTraces}
           toolCalls={state.toolCalls}
           spineEvents={state.spineEvents}
+          sseEvents={state.sseEvents}
         />
       )}
       <footer className="app-footer">
-        <MessageInput onSend={onSend} disabled={state.running} />
+        {/* Input stays active during a running turn — the user can
+            pre-type the next message and it queues server-side. The
+            Stop button (rendered when `running`) is still the escape
+            hatch if they want to abort the current turn first. */}
+        <MessageInput
+          onSend={onSend}
+          running={state.running}
+          onCancel={onCancel}
+        />
       </footer>
       <WorkspaceDrawer
         sessionId={sessionId}
@@ -695,6 +715,33 @@ function AppShell({
       <WikiPane sessionId={sessionId} onClose={onWikiClose} />
     </div>
   );
+}
+
+/**
+ * Find the EntityCloud widget in the canonical state so we can replay
+ * its point-click events from elsewhere in the UI (e.g. a "re-pin"
+ * log-line click in the chat rail). Prefers the widget pinned to the
+ * primary canvas slot — the literature_assistant pins the cloud there
+ * with `multi_use=True` precisely so its action surface stays
+ * available across drill-downs.
+ */
+function findEntityCloud(
+  widgets: Record<string, Widget>,
+  canvasSlot: string | null,
+): Widget | null {
+  const isCloud = (w?: Widget): boolean => {
+    if (!w || w.kind !== 'A2ui') return false;
+    if (!('Inline' in w.payload)) return false;
+    const inner = (w.payload as { Inline: unknown }).Inline as
+      | { type?: unknown }
+      | null;
+    return !!inner && (inner as { type?: unknown }).type === 'EntityCloud';
+  };
+  if (canvasSlot && isCloud(widgets[canvasSlot])) return widgets[canvasSlot]!;
+  for (const w of Object.values(widgets)) {
+    if (isCloud(w)) return w;
+  }
+  return null;
 }
 
 /**
@@ -741,33 +788,6 @@ function rebuildMessageFollowUps(
     (result[anchor.id] ??= []).push(widgetId);
   }
   return result;
-}
-
-/**
- * Find the EntityCloud widget in the canonical state so we can replay
- * its point-click events from elsewhere in the UI (e.g. a "re-pin"
- * log-line click in the chat rail). Prefers the widget pinned to the
- * primary canvas slot — the literature_assistant pins the cloud there
- * with `multi_use=True` precisely so its action surface stays
- * available across drill-downs.
- */
-function findEntityCloud(
-  widgets: Record<string, Widget>,
-  canvasSlot: string | null,
-): Widget | null {
-  const isCloud = (w?: Widget): boolean => {
-    if (!w || w.kind !== 'A2ui') return false;
-    if (!('Inline' in w.payload)) return false;
-    const inner = (w.payload as { Inline: unknown }).Inline as
-      | { type?: unknown }
-      | null;
-    return !!inner && (inner as { type?: unknown }).type === 'EntityCloud';
-  };
-  if (canvasSlot && isCloud(widgets[canvasSlot])) return widgets[canvasSlot]!;
-  for (const w of Object.values(widgets)) {
-    if (isCloud(w)) return w;
-  }
-  return null;
 }
 
 /**
