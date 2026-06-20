@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createStateStore, type StateStore } from '@json-render/core';
 import { JSONUIProvider, useStateValue } from '@json-render/react';
-import { postMessage, postWidgetEvent } from './api/client';
+import { fetchTranscript, postMessage, postWidgetEvent } from './api/client';
+import { useSessionRouting } from './api/users';
 import { openStream } from './api/sse';
-import { useSessionStore } from './store/session';
+import { useSessionStore, type Message } from './store/session';
 import { ChatPane } from './components/ChatPane';
 import { CanvasPane } from './components/CanvasPane';
 import { DebugPane } from './components/DebugPane';
@@ -13,6 +14,7 @@ import { SpinePane, type SpineSegment } from './components/SpinePane';
 import { SpineSidebar } from './components/SpineSidebar';
 import { WorkspaceDrawer } from './components/WorkspaceDrawer';
 import { WidgetHistoryDrawer } from './components/WidgetHistoryDrawer';
+import { SessionSidebar } from './components/SessionSidebar';
 import { WikiPane } from './components/WikiPane';
 import type { EntityCard, SegmentDetail } from './api/client';
 import { registry } from './jr/registry';
@@ -22,30 +24,31 @@ import {
   applyAgUiEventToStore,
 } from './jr/stateBridge';
 
-/**
- * Session ID source: ?session=<uuid> in the URL, else VITE_SESSION_ID,
- * else "". If empty, we render a placeholder asking the user to set
- * one. The echo_server example prints its session UUID on startup.
- */
-function resolveSessionId(): string {
-  const url = new URL(window.location.href);
-  const fromUrl = url.searchParams.get('session');
-  if (fromUrl) return fromUrl;
-  const fromEnv = (import.meta.env.VITE_SESSION_ID as string | undefined) ?? '';
-  return fromEnv;
-}
-
 function debugEnabled(): boolean {
   const url = new URL(window.location.href);
   return url.searchParams.get('debug') === '1';
 }
 
 export function App() {
-  const [sessionId] = useState(resolveSessionId);
+  const {
+    userId,
+    sessionId,
+    displayName,
+    ready: userReady,
+    setDisplayName,
+    switchSession,
+  } = useSessionRouting();
   const [debug] = useState(debugEnabled);
   const [streamError, setStreamError] = useState<string | null>(null);
-  const { state, appendUser, markRunning, widgetAdded, ingest: sessionIngest } =
-    useSessionStore();
+  const {
+    state,
+    appendUser,
+    hydrateTranscript,
+    rehydrateFollowUps,
+    markRunning,
+    widgetAdded,
+    ingest: sessionIngest,
+  } = useSessionStore();
 
   // Single json-render StateStore for the whole app. Populated by
   // STATE_SNAPSHOT + STATE_DELTA events via the stateBridge helper;
@@ -79,16 +82,82 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
+  // Backfill chat transcript on session (re)load. The SSE stream above
+  // hydrates widgets via STATE_SNAPSHOT but doesn't replay prior chat
+  // messages — those live in `session_entries` (PG) and need an
+  // explicit fetch. Runs in parallel with the stream open; on a fresh
+  // session the endpoint returns [] and this is a cheap no-op.
+  useEffect(() => {
+    if (!sessionId) return;
+    const ac = new AbortController();
+    fetchTranscript(sessionId, ac.signal)
+      .then((rows) => {
+        if (ac.signal.aborted) return;
+        hydrateTranscript(
+          rows.map((r) => ({
+            id: r.entry_id,
+            role: r.role,
+            content: r.content,
+            entryId: r.entry_id,
+            createdAt: r.created_at,
+          })),
+        );
+      })
+      .catch((e: unknown) => {
+        // 404 on backends without the endpoint mounted is fine — log
+        // for debug-level diagnosis rather than surfacing as a stream
+        // error (which would block the chat UI).
+        if (ac.signal.aborted) return;
+        // eslint-disable-next-line no-console
+        console.debug('transcript backfill skipped:', e);
+      });
+    return () => ac.abort();
+    // hydrateTranscript is stable (useReducer dispatch).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  // Rebuild `messageFollowUps` after refresh. The live-built map is
+  // reducer-only state — on session reload it's empty, so follow_up
+  // widgets fall through to inline rendering at the bottom of the
+  // chat, and their pin-ack messages (which used to render as full
+  // bubbles with the widget anchored beneath) get demoted to the
+  // `.message-log` thin-line styling. Effect: chat looks fine live,
+  // looks broken on refresh.
+  //
+  // We rebuild from timestamps. Both the transcript (assistant
+  // messages, with `createdAt`) and the StateStore (widgets, with
+  // `created_at`) carry them, so we can recover the live anchoring:
+  // each follow_up widget anchors to the next assistant message that
+  // arrived *after* it on the wire. Subscribe to the StateStore so
+  // newly-arriving widgets re-run the rebuild — the live
+  // `widget-emitted` reducer path also adds to the map, but the two
+  // converge to the same result so the redundancy is a no-op.
+  useEffect(() => {
+    if (!sessionId) return;
+    const compute = () => {
+      const widgetsObj = (store.get('/widgets') ?? {}) as Record<
+        string,
+        Widget
+      >;
+      const widgetOrder = (store.get('/widgetOrder') ?? []) as string[];
+      const map = rebuildMessageFollowUps(
+        state.messages,
+        widgetsObj,
+        widgetOrder,
+      );
+      rehydrateFollowUps(map);
+    };
+    compute();
+    return store.subscribe(compute);
+    // rehydrateFollowUps is stable; store identity is stable across renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, state.messages]);
+
   if (!sessionId) {
     return (
       <div className="no-session">
         <h1>greatwheel</h1>
-        <p>
-          No session ID configured. Start the echo server
-          (<code>cargo run -p gw-ui --example echo_server</code>) and append
-          <code>?session=&lt;uuid&gt;</code> to this URL, or set
-          <code>VITE_SESSION_ID</code> and restart Vite.
-        </p>
+        <p>{userReady ? 'Opening your session…' : 'Signing you in…'}</p>
       </div>
     );
   }
@@ -130,7 +199,11 @@ export function App() {
   return (
     <JSONUIProvider registry={registry} store={store} handlers={handlers}>
       <AppShell
+        userId={userId}
         sessionId={sessionId}
+        displayName={displayName}
+        setDisplayName={setDisplayName}
+        switchSession={switchSession}
         debug={debug}
         streamError={streamError}
         state={state}
@@ -141,7 +214,11 @@ export function App() {
 }
 
 interface AppShellProps {
+  userId: string;
   sessionId: string;
+  displayName: string | null;
+  setDisplayName: (name: string) => Promise<void>;
+  switchSession: (id: string) => void;
   debug: boolean;
   streamError: string | null;
   state: ReturnType<typeof useSessionStore>['state'];
@@ -155,7 +232,17 @@ interface AppShellProps {
  * narrow-right-rail layout; canvas-primary widens the canvas for
  * data demos.
  */
-function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProps) {
+function AppShell({
+  userId,
+  sessionId,
+  displayName,
+  setDisplayName,
+  switchSession,
+  debug,
+  streamError,
+  state,
+  onSend,
+}: AppShellProps) {
   const branding = useStateValue<{ layout?: string | null }>('/branding');
   const layout = branding?.layout ?? 'chat-primary';
   // Workspace drawer state (Issue #5). `reloadKey` bumps every time
@@ -513,6 +600,13 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
 
   return (
     <div className={`app app-${layout}`}>
+      <SessionSidebar
+        userId={userId}
+        currentSessionId={sessionId}
+        displayName={displayName}
+        onSetDisplayName={setDisplayName}
+        onSwitchSession={switchSession}
+      />
       <header className="app-header">
         <BrandedTitle />
         {streamError && <span className="app-error">{streamError}</span>}
@@ -601,6 +695,52 @@ function AppShell({ sessionId, debug, streamError, state, onSend }: AppShellProp
       <WikiPane sessionId={sessionId} onClose={onWikiClose} />
     </div>
   );
+}
+
+/**
+ * Recover the live-built `messageFollowUps` anchoring map from
+ * timestamps. Called on session refresh once the transcript +
+ * STATE_SNAPSHOT have landed, and again on each StateStore change
+ * during the live session (the live `widget-emitted` reducer path
+ * also maintains the map; rebuilding converges to the same result,
+ * so the duplication is a no-op).
+ *
+ * Anchoring rule: each follow_up widget anchors to the *next*
+ * assistant message that arrived after the widget on the wire. This
+ * matches the live path's `pendingFollowUps → drain on next
+ * assistant-chunk` sequence: gw-loop emits the widget during the
+ * Python iteration (early in the turn), then the FINAL prose lands
+ * as an `AssistantNarration` row after the iteration returns, so the
+ * narration's timestamp is always greater than the widget's.
+ *
+ * Skips widgets without `created_at` and messages without
+ * `createdAt` — both fields are absent on locally-appended
+ * placeholders that pre-date a server roundtrip, and there's nothing
+ * meaningful to anchor in those cases.
+ */
+function rebuildMessageFollowUps(
+  messages: Message[],
+  widgets: Record<string, Widget>,
+  widgetOrder: string[],
+): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  const assistantAt = messages
+    .filter((m) => m.role === 'assistant' && m.createdAt)
+    .map((m) => ({ id: m.id, t: Date.parse(m.createdAt!) }))
+    .filter((m) => !Number.isNaN(m.t))
+    .sort((a, b) => a.t - b.t);
+  if (assistantAt.length === 0) return result;
+  for (const widgetId of widgetOrder) {
+    const w = widgets[widgetId];
+    if (!w?.follow_up) continue;
+    if (!w.created_at) continue;
+    const wt = Date.parse(w.created_at);
+    if (Number.isNaN(wt)) continue;
+    const anchor = assistantAt.find((m) => m.t >= wt);
+    if (!anchor) continue;
+    (result[anchor.id] ??= []).push(widgetId);
+  }
+  return result;
 }
 
 /**

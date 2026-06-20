@@ -42,6 +42,13 @@ export interface Message {
    *  message). The spine rail uses this to anchor segments to chat
    *  rows via `data-entry-id`. */
   entryId?: string;
+  /** RFC 3339 timestamp of the underlying `session_entries` row.
+   *  Populated by `hydrate-transcript`; absent for messages appended
+   *  locally during the live session (those are positioned by
+   *  array-append order, not by timestamp). Used to rebuild
+   *  `messageFollowUps` after refresh, since the reducer-only
+   *  anchoring map is otherwise lost on reload. */
+  createdAt?: string;
 }
 
 /**
@@ -86,6 +93,8 @@ export interface SessionState {
 
 type Action =
   | { type: 'append-user'; content: string }
+  | { type: 'hydrate-transcript'; messages: Message[] }
+  | { type: 'rehydrate-follow-ups'; map: Record<string, string[]> }
   | { type: 'mark-running' }
   | { type: 'text-message-start'; message_id: string; entry_id?: string }
   | { type: 'user-message-anchor'; entry_id: string }
@@ -130,6 +139,28 @@ function reducer(state: SessionState, action: Action): SessionState {
         ],
         running: true,
       };
+    case 'hydrate-transcript': {
+      // Replace the message list wholesale with the server-shipped
+      // transcript. Called once on session (re)load before any new
+      // events stream in. If the user has already typed a message
+      // locally (unlikely but possible during the brief async
+      // window) it would get clobbered — we keep the rule simple
+      // and let the server-side persisted log win.
+      return { ...state, messages: action.messages };
+    }
+    case 'rehydrate-follow-ups': {
+      // After a refresh, the live-built `messageFollowUps` map is
+      // empty (it's reducer-only state, never persisted). Without
+      // this rebuild, every follow-up widget falls through to inline
+      // rendering at the bottom of the chat, and the pin-ack
+      // messages they should sit beneath get demoted to `.message-log`
+      // styling (since `followUps.length === 0` is part of the
+      // log-line test). The caller computes the map from the
+      // hydrated messages + the widgets in the StateStore using
+      // timestamps; we just install it. Safe to call repeatedly —
+      // it's a wholesale replace, idempotent for stable inputs.
+      return { ...state, messageFollowUps: action.map };
+    }
     case 'mark-running':
       return { ...state, running: true };
     case 'user-message-anchor': {
@@ -319,6 +350,16 @@ export function useSessionStore() {
   return {
     state,
     appendUser: (content: string) => dispatch({ type: 'append-user', content }),
+    /** Replace the message list with a server-shipped transcript.
+     *  App.tsx fires this once on session load via `fetchTranscript`. */
+    hydrateTranscript: (messages: Message[]) =>
+      dispatch({ type: 'hydrate-transcript', messages }),
+    /** Replace the live-built follow-up anchoring map. App.tsx fires
+     *  this after both transcript and STATE_SNAPSHOT have landed, so
+     *  follow_up widgets re-anchor to their assistant message instead
+     *  of piling up in the inline tail. */
+    rehydrateFollowUps: (map: Record<string, string[]>) =>
+      dispatch({ type: 'rehydrate-follow-ups', map }),
     markRunning: () => dispatch({ type: 'mark-running' }),
     /** Called by the state bridge when a new widget lands in
      *  `/widgets/<id>`. Drives the follow-up anchoring heuristic. */
