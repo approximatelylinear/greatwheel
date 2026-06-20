@@ -70,7 +70,7 @@ export function App() {
     const close = openStream(
       sessionId,
       (ev) => ingest(ev),
-      (e) => setStreamError(String(e)),
+      (err) => setStreamError(err),
     );
     return close;
     // sessionIngest is stable (useReducer dispatch).
