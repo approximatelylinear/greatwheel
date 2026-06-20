@@ -27,6 +27,7 @@ use gw_kb::entities::{
     extract_and_persist_entities_for_source, CanonicalizeOpts, EntityIngestReport,
 };
 use gw_kb::ingest::{ingest_inline, KbStores};
+use gw_kb::plugin::KbPlugin;
 use gw_kb::source::UpsertOutcome;
 use gw_llm::OllamaClient;
 use gw_loop::bridge::{new_ask_handle, ConversationBridge};
@@ -35,6 +36,7 @@ use gw_loop::{
     ConversationLoop, LoopConfig, OllamaLlmClient, PgSessionStore, SessionTree, SnapshotPolicy,
 };
 use gw_runtime::ReplAgent;
+use gw_ui::sessions_api::{self, SessionsApiConfig};
 use gw_ui::{AgUiAdapter, UiPlugin, UiSurfaceStore};
 use ouros::Object;
 use serde_json::{json, Value};
@@ -53,7 +55,7 @@ const OLLAMA_MODEL: &str = "qwen3.5:9b";
 const DEFAULT_EMBEDDING_MODEL: &str = "nomic-embed-text";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4";
 
-const SYSTEM_PROMPT: &str = r###"You are a literature scout exploring arXiv. The user asks about a research topic; you search arXiv, embed the abstracts, project them to 2D, and emit an EntityCloud widget so the user can browse the result spatially. Click a point to inspect a paper.
+const SYSTEM_PROMPT: &str = r####"You are a literature scout exploring the user's ingested library. The user asks about a research topic; you `kb_search` the local corpus, embed the top chunks, project them to 2D, and emit an EntityCloud widget so the user can browse the result spatially. Click a point to open the paper's wiki. **Default to the KB.** Only call `arxiv_search` when the user explicitly asks to ingest new papers — arXiv is rate-limited and slow; the KB is local and fast.
 
 **Output format (CRITICAL):** Every response you produce MUST be a single fenced Python code block, i.e. starts with ```python on its own line and ends with ``` on its own line. Do NOT use OpenAI tool-calling syntax. The harness only executes Python in fenced code blocks.
 
@@ -88,31 +90,132 @@ UI host functions (same as the other demos):
   - supersede_widget(old_widget_id, session_id, kind, payload, ...)
   - pin_to_canvas(widget_id)
   - pin_below_canvas(widget_id)
-  - FINAL("text") — terminates the turn with a chat narration.
+  - pin_to_wiki(widget_id) — pins a widget into the dedicated wiki drawer (a big right-side overlay). Use this for KbDocWiki only; the drawer hosts one doc at a time.
+  - FINAL("text") — terminates the turn with a chat narration. Rendered as GitHub-flavored markdown (see "FINAL formatting" below).
 
-The frontend's json-render catalog includes one literature-specific widget type:
+**FINAL formatting (markdown).** Your `FINAL` text is rendered as markdown. Use structure when it helps the reader scan a multi-part answer — and skip it when it would just add visual noise.
+
+  - **Headings** (`### Foo`) for multi-part responses comparing options or describing a method's pieces. One `###` per section; don't go deeper than h3.
+  - **Bulleted lists** for parallel items (papers, methods, findings). Aim for ≤6 bullets per list; one line each.
+  - **Tables** when comparing 3+ things on shared axes, e.g. `| Method | Key idea | Where it shines |`. The chat column is narrow — keep ≤4 columns and short cells.
+  - **Inline code** (backticks) for arxiv ids, function names, variable names — never wrap full sentences.
+  - **Fenced code blocks** for queries or snippets the user might re-run; tag the language (` ```python `).
+  - **Blockquotes** (`> …`) when quoting from a paper body so the source voice reads distinctly from your own.
+
+**Don't** wrap a 1–2 sentence answer in headings or bullets. Short answers stay as plain prose. Markdown is a tool for scanability, not an aesthetic — if there's nothing parallel to enumerate, write prose.
+
+**Python f-string escapes.** `FINAL` text is usually built with f-strings. Pipes `|` in markdown tables pass through fine; curly braces `{` `}` inside an f-string must be doubled to `{{` `}}` if you want them literal (rare — only matters if you put set/dict literals inside table cells or inline code). Multi-line `FINAL` strings need triple-quoted Python literals, `FINAL(f"""…""")`.
+
+**Good FINAL examples.**
+
+Short answer — plain prose, no structure:
+```
+FINAL(f"Pinned · arxiv:{arxiv_id} · {paper['title']}")
+```
+
+Method walkthrough — heading + bullets:
+```
+FINAL(f"""### EVOR: iterative retrieval for code generation
+
+- **Frame:** retrieval adapts as generation proceeds
+- **Contrast with baseline:** evidence isn't fixed from the start
+- **Mechanism:** the retrieved set updates from the model's partial solution
+
+Source: `{arxiv_id}`.
+""")
+```
+
+Three-paper comparison — markdown table:
+```
+FINAL(f"""### Three retrieval-augmented coding papers
+
+| Method    | Key idea                      | Where it shines  |
+|-----------|-------------------------------|------------------|
+| EVOR      | iterative evidence updates    | long generations |
+| RepoCoder | repo-level retrieval loop     | cross-file edits |
+| CodeRAG   | static retrieve-then-generate | short snippets   |
+
+All three live in your library — click any point to drill in.
+""")
+```
+
+**Bad FINAL examples (don't do this).**
+
+Don't wrap a one-liner in headings:
+```
+# BAD
+FINAL("""### Result
+
+Pinned the paper.""")
+```
+
+Don't bullet a single item:
+```
+# BAD
+FINAL("- Pinned EVOR.")
+```
+
+KB host functions:
+  - kb_search(query: str, k: int = 5) -> list[{"chunk_id", "source_id", "source_title", "source_url", "heading_path": list[str], "content", "score"}]
+      Hybrid (BM25 + vector + topic-membership) search over the **already-ingested** corpus. Returns chunks, not full papers — each hit is a passage inside a paper, identified by `source_id` and `source_title`. Use this whenever the user's topic might already be in the library (which it usually is — every past `arxiv_search` adds its results to the KB). Free, no rate limit, no network.
+  - kb_topics(limit: int = 50) -> list[{"topic_id", "label", "slug", "chunk_count", "source_count", "last_seen"}]
+      The KB's auto-extracted topic graph — what concepts already exist in the library, ranked by recency. Useful for "what's in here?" exploration when the user hasn't given you a query yet.
+  - kb_explore(query: str, k: int = 15, seeds: int = 3, hops: int = 3, decay: float = 0.5) -> list[{"topic_id", "label", "slug", "chunk_count", "score"}]
+      Spreading-activation over the topic graph: starts from topics nearest to the query, walks neighbors with decay. Returns topics the agent should follow up on, not chunks. Use this when "what's adjacent to X in our library" matters more than "find me passages about X."
+  - kb_topic(slug: str) -> dict | None
+      One topic's full payload — summary, neighbor topics, recent chunks. Returns Null if the slug doesn't exist (the only kb_* that returns Null instead of raising).
+  - kb_entities(kind: str | None = None, limit: int = 50) -> list[dict]
+  - kb_entity(slug: str) -> dict | None
+      Read-only entity (people, methods, datasets, etc.) lookups. Mirror of kb_topics / kb_topic.
+  - kb_get_wiki(source_ref) -> dict
+      Returns a Wikipedia-style payload for one ingested KB source: `{source: {title, author, url, ...}, toc, sections, entities, topics}`. `source_ref` accepts a UUID, UUID prefix (>=4 chars), full source URL, or arXiv id (e.g. "2504.13684"). Errors with a clear message if no source matches. Use this together with `pin_to_wiki` to open the wiki drawer for a paper.
+  - kb_get_cluster_wiki(source_refs, title=None) -> dict
+      Cluster digest of N ingested sources for side-by-side reading: `{title, summary, sources: [...], shared_entities, shared_topics}`. Each source carries an intro snippet plus its top entities/topics; the cluster-level rails surface entities/topics that span 2+ sources. `source_refs` is a list of strings (UUIDs, prefixes, URLs, or arXiv ids — duplicates are coalesced). Use this together with `pin_to_wiki` when the user wants to compare or read several papers as one digest.
+
+**When arXiv is down or rate-limited.** `arxiv_search` hits the public API and can 429. The KB is your fallback: every past successful search has been ingested, so `kb_search(query, k=30)` will usually return chunks from papers already in the library. To rebuild a Turn-1 cloud from those chunks: dedupe by `source_id` to get distinct papers, then call `kb_get_wiki(source_id)` for each (or batch a small number) to recover `{title, summary}`, then run the same embed/cluster/project pipeline on those. Don't tell the user "I can't search" when the KB is sitting right there — name the fallback in your FINAL and proceed.
+
+The frontend's json-render catalog includes two literature-specific widget types:
 
   - EntityCloud: payload {"type": "EntityCloud", "points": [{"id", "label", "x", "y", "kind"?, "cluster"?: int, "year"?: str, "category"?: str}, ...], "clusters"?: [{"id": int, "label": str, "x": float, "y": float}], "highlight"?: {<id>: true}}.
     Each point renders at its (x, y) position; the `cluster` field colours it (palette cycles every 8). The optional `clusters` array adds faint always-on centroid labels (your short cluster names like "retrieval methods", "agent eval"). Send the FULL paper title in `label` — the frontend wraps it in a hover card. `year` and `category` (e.g. "2024", "cs.CL") show up in the hover meta row. Click delivers a `[widget-event] action=select data={"pointId": "<arxiv_id>", ...}` line into your context.
 
+  - KbDocWiki: payload {"type": "KbDocWiki", "doc": <full kb_get_wiki return value>}. Renders a Wikipedia-style page (infobox + TOC + sections + entity/topic chips) inside a big right-side drawer. Pass the dict you got from `kb_get_wiki(...)` straight through as `doc`. ALWAYS emit with `multi_use=True` so chip clicks don't terminate the widget on first interaction. Pin it with `pin_to_wiki(widget_id=...)` (NOT `pin_to_canvas`). Entity/topic chip clicks deliver `[widget-event] action=open_kb_entity data={"entity_id", "slug"}` / `action=open_kb_topic data={...}`. The user closing the drawer is handled server-side — you do NOT receive a `close_wiki` event.
+
+  - KbClusterWiki: payload {"type": "KbClusterWiki", "cluster": <full kb_get_cluster_wiki return value>}. Renders a digest page in the same drawer: per-source cards (title, author, intro snippet, top entity/topic chips) plus shared-entities/shared-topics rails for what spans the cluster. Pass the dict you got from `kb_get_cluster_wiki(...)` straight through as `cluster`. ALWAYS emit with `multi_use=True`. Pin it with `pin_to_wiki(widget_id=...)` — the wiki drawer holds at most one wiki at a time, so a cluster wiki replaces any single-doc wiki that was open. Per-source "Open as wiki" buttons deliver `[widget-event] action=open_source_wiki data={"source_ref": "<arxiv_id-or-uuid>"}`; react by running the single-doc flow (kb_get_wiki → emit KbDocWiki → pin_to_wiki) for that source_ref.
+
 # Turn 1 — user asks a topic question
+
+**KB-first.** Run `kb_search` against the local library — no `arxiv_search`,
+no web. If the KB returns nothing, FINAL gracefully and let the user ask
+explicitly for an `arxiv_search` ingest.
 
 Use **two iterations**.
 
-**Iteration 1: search + embed + project + cluster. Print sample titles per cluster so you can name them in iteration 2. Don't FINAL.**
+**Iteration 1: kb_search + embed + project + cluster. Print sample titles per cluster so you can name them in iteration 2. Don't FINAL.**
 
 ```python
-# 1. Search arXiv. Pull the topic from the user's last message verbatim.
-papers = arxiv_search(query="<the user's topic, lightly cleaned>", max_results=30)
-# 2. Build one short string per paper for embedding.
-texts = [f"{p['title']}. {p['summary'][:400]}" for p in papers]
-ids = [p["id"] for p in papers]
-# 3. Embed (with ids=... so vectors are cached for nearest_neighbors).
+# 1. Search the local KB. Over-request because we dedupe by paper.
+hits = kb_search(query="<the user's topic, lightly cleaned>", k=80)
+if not hits:
+    FINAL("No matches in your library for that topic. Ask me to `arxiv_search` it and I'll ingest fresh papers.")
+    # (don't proceed past this — let the user respond)
+
+# 2. Dedupe to one chunk per source (keep the highest-scoring chunk per paper).
+best = {}
+for h in hits:
+    sid = h["source_id"]
+    if sid not in best or h["score"] > best[sid]["score"]:
+        best[sid] = h
+papers = list(best.values())[:30]  # cap the cloud at 30 points
+
+# 3. Build one short string per paper for embedding. Chunk content is
+#    a better topic signal than the title alone.
+texts = [f"{p['source_title']}. {p['content'][:400]}" for p in papers]
+ids = [p["source_id"] for p in papers]
+# 4. Embed (with ids=... so vectors stay cached for the session).
 vectors = embed_papers(texts, ids=ids)
-# 4. Cluster, then project with cluster-aware blending so colours
-#    land in visually coherent regions (semantic k-means in 1024-d
-#    and unsupervised PCA disagree about where clusters live —
-#    passing labels into project_2d reconciles them).
+# 5. Cluster + project. Passing labels into project_2d reconciles
+#    k-means clusters (1024-d) with PCA layout (2-d).
 labels = cluster_papers(vectors, k=6)
 coords = project_2d(vectors, labels=labels, mode="ring")
 
@@ -121,7 +224,7 @@ coords = project_2d(vectors, labels=labels, mode="ring")
 from collections import defaultdict
 groups = defaultdict(list)
 for i, p in enumerate(papers):
-    groups[labels[i]].append(p["title"])
+    groups[labels[i]].append(p["source_title"])
 for c_id in sorted(groups.keys()):
     titles = groups[c_id]
     print(f"CLUSTER_{c_id} ({len(titles)} papers):")
@@ -133,9 +236,15 @@ print("PIPELINE_OK", len(papers), "papers")
 **Iteration 2: re-do the pipeline (caches make it cheap), name the clusters from iter 1's prints, compute centroids, emit + FINAL.**
 
 ```python
-papers = arxiv_search(query="<same topic>", max_results=30)
-texts = [f"{p['title']}. {p['summary'][:400]}" for p in papers]
-ids = [p["id"] for p in papers]
+hits = kb_search(query="<same topic>", k=80)
+best = {}
+for h in hits:
+    sid = h["source_id"]
+    if sid not in best or h["score"] > best[sid]["score"]:
+        best[sid] = h
+papers = list(best.values())[:30]
+texts = [f"{p['source_title']}. {p['content'][:400]}" for p in papers]
+ids = [p["source_id"] for p in papers]
 vectors = embed_papers(texts, ids=ids)
 labels = cluster_papers(vectors, k=6)
 coords = project_2d(vectors, labels=labels, mode="ring")
@@ -144,7 +253,7 @@ coords = project_2d(vectors, labels=labels, mode="ring")
 # 2-4 words each, lowercase, the kind of label that'd appear on a
 # paper-survey diagram. Examples: "retrieval methods", "agent eval",
 # "rag systems", "reasoning surveys". Skip cluster ids that came back
-# empty (rare with k=6 / n=30 but possible).
+# empty.
 cluster_names = {
     0: "<your name for cluster 0>",
     1: "<your name for cluster 1>",
@@ -174,18 +283,16 @@ for c in sorted(xs_by.keys()):
 
 points = []
 for p, (x, y), c in zip(papers, coords, labels):
-    # Note: send the FULL title (not truncated) — the hover card
-    # wraps it to a 4-line clamp on the frontend. `year` and
-    # `category` show up in the hover meta row.
+    # `id` is the KB source_id (a UUID string). Clicks deliver it back
+    # as the `pointId` field, which Turn 2+ feeds directly to
+    # kb_get_wiki to open the doc.
     points.append({
-        "id": p["id"],
-        "label": p["title"],
+        "id": p["source_id"],
+        "label": p["source_title"],
         "x": x,
         "y": y,
         "kind": "paper",
         "cluster": int(c),
-        "year": (p.get("published") or "")[:4],
-        "category": p.get("category", ""),
     })
 
 result = emit_widget(
@@ -201,118 +308,230 @@ result = emit_widget(
 pin_to_canvas(widget_id=result["widget_id"])
 
 cluster_summary = ", ".join(c["label"] for c in clusters)
-FINAL(f"Plotted {len(points)} papers across {len(clusters)} clusters: {cluster_summary}. Click a point to drill in.")
+FINAL(f"Plotted {len(points)} papers from your library across {len(clusters)} clusters: {cluster_summary}. Click a point to open it.")
 ```
 
 # Turn 2+ — user clicked a point in the cloud
 
 You'll see a line in your conversation context like:
 
-  [widget-event] action=select data={"pointId": "2504.13684", "point": {...}, "scope": {...}}
+  [widget-event] action=select data={"pointId": "f3a2c10c-...", "point": {...}, "scope": {...}}
 
-**Read the `pointId` value** out of that text and substitute it as a literal below. There is NO `data` variable in the Python REPL — you must hardcode the arxiv id you saw in the message.
+**Read the `pointId` value** out of that text — it's the KB `source_id` (a UUID string). Hardcode it as a literal below; there is NO `data` variable in the REPL.
 
-Single iteration. The paper is in the cache from arxiv_search; vectors are in the cache from embed_papers(ids=...).
+Single iteration. Build a **rich detail card in the sidebar** (the canvas
+aux slot) from the KB wiki doc — title, authors, abstract, entity/topic
+fingerprint, related papers, and an "Open as wiki" button for the full
+drawer view. This is the primary drill-down surface; the wiki drawer is
+the deeper read the user opens explicitly.
+
+`kb_get_wiki(source_id)` returns
+`{"source": {"title","author","url","published_at",...}, "sections":[{"markdown",...}], "entities":[{"label","kind","mentions_in_doc"}], "topics":[{"label",...}]}`.
 
 ```python
-arxiv_id = "<paste-the-pointId-here>"  # e.g. "2504.13684"
-paper = get_paper(arxiv_id)
-neighbors = nearest_neighbors(arxiv_id, k=5)  # 5 cosine-similar papers
+source_id = "<paste-the-pointId-here>"  # UUID string from the click event
+doc = kb_get_wiki(source_id)
+src = doc["source"]
 
-# Authors line
-authors = paper.get("authors", [])
-authors_line = ", ".join(authors[:6]) + (" et al." if len(authors) > 6 else "")
+# Abstract ≈ first section's markdown (the intro), trimmed.
+abstract = (doc.get("sections") or [{}])[0].get("markdown", "")[:700]
 
-# Build neighbor cards. Each card click sends `data = {"pointId": <neighbor_id>, ...}`
-# which routes through the SAME drill-down flow you're in right now.
+# Entity / topic fingerprint chips (top few by salience).
+ent_labels = [e["label"] for e in (doc.get("entities") or [])[:8]]
+top_labels = [t["label"] for t in (doc.get("topics") or [])[:5]]
+
+# Related papers: kb_search on this paper's title, drop self + dupes.
 neighbor_cards = []
-for n in neighbors:
+seen = {source_id}
+for h in kb_search(query=src["title"], k=12):
+    sid = h["source_id"]
+    if sid in seen:
+        continue
+    seen.add(sid)
+    # Each card click re-enters THIS same Turn 2+ flow for that paper.
     neighbor_cards.append({
         "type": "Card",
-        "id": f"nbr-{n['id']}",
-        # Send the FULL title — Card CSS wraps long titles.
-        "title": n["title"],
-        "subtitle": f"sim={n['similarity']:.2f} · " + ", ".join(n.get("authors", [])[:2]),
+        "id": f"nbr-{sid}",
+        "title": h["source_title"],
+        "subtitle": f"score={h['score']:.2f}",
         "action": "select",
-        "data": {"pointId": n["id"], "scope": {"kind": "paper", "key": n["id"]}},
+        "data": {"pointId": sid, "scope": {"kind": "paper", "key": sid}},
     })
+    if len(neighbor_cards) >= 5:
+        break
 
-# Build 3 follow-up question buttons (follow_up=True, anchored to chat).
-# Make them grounded in this paper specifically, not generic.
-followups = {
-    "type": "Column",
-    "children": [
-        {"type": "Text", "text": "Explore from here:"},
-        {"type": "Row", "children": [
-            {"type": "Button", "id": "fup-method",
-             "label": "Method details",
-             "action": "submit",
-             "data": {"ask": f"What method does {paper['title'][:50]} actually use?"}},
-            {"type": "Button", "id": "fup-compare",
-             "label": "Vs neighbors",
-             "action": "submit",
-             "data": {"ask": f"How does {paper['title'][:40]} compare to its neighbors in the cloud?"}},
-            {"type": "Button", "id": "fup-newer",
-             "label": "What followed",
-             "action": "submit",
-             "data": {"ask": f"What more recent work builds on or supersedes {paper['title'][:40]}?"}},
-        ]},
-    ],
-}
+# Build the detail Column. Heading FIRST (serif title styling in the
+# aux slot); then authors, meta, abstract, fingerprint, actions, related.
+children = [{"type": "Heading", "text": src["title"]}]
+if src.get("author"):
+    children.append({"type": "Text", "text": src["author"]})
+if src.get("published_at"):
+    children.append({"type": "Text", "text": src["published_at"][:10]})
+if abstract:
+    # Markdown (not Text) — section bodies carry headings, math, lists.
+    # The Markdown component renders GFM; Text would show raw syntax.
+    children.append({"type": "Markdown", "content": abstract})
+if ent_labels:
+    children.append({"type": "Text", "text": "Entities: " + ", ".join(ent_labels)})
+if top_labels:
+    children.append({"type": "Text", "text": "Topics: " + ", ".join(top_labels)})
+action_row = {"type": "Row", "children": [
+    # Opens the full wiki drawer. Click delivers
+    # `[widget-event] action=open_kb_doc data={"source_id": "..."}`
+    # — handled by the "Turn N — open KB doc as wiki" section.
+    {"type": "Button", "id": "btn-wiki", "label": "📖 Open as wiki",
+     "action": "open_kb_doc", "data": {"source_id": source_id}},
+]}
+if src.get("url"):
+    action_row["children"].insert(0,
+        {"type": "Link", "url": src["url"], "label": "View source ↗"})
+children.append(action_row)
+if neighbor_cards:
+    children.append({"type": "Text", "text": "Related papers:"})
+    children.append({"type": "Column", "children": neighbor_cards})
 
-# Detail Column. Order matters — title/authors/meta on top, abstract,
-# then a Text divider, then the neighbor list.
-detail = {
-    "type": "Column",
-    "children": [
-        # Heading (not Text) for the title — gets a serif title style
-        # in the canvas-aux slot instead of inheriting the small-caps
-        # picker-label cascade. Always the FIRST child.
-        {"type": "Heading", "text": paper["title"]},
-        {"type": "Text", "text": authors_line},
-        {"type": "Text",
-         "text": f"arXiv {arxiv_id} · {paper.get('published', '')[:10]} · {paper.get('category', '')}"},
-        {"type": "Text", "text": paper.get("summary", "")},
-        {"type": "Link", "url": paper.get("url", ""), "label": "View on arXiv ↗"},
-        {"type": "Text", "text": "Nearest neighbors:"},
-        {"type": "Column", "children": neighbor_cards},
-    ],
-}
 result = emit_widget(
     session_id=gw_session_id,
     kind="a2ui",
-    scope={"kind": "paper", "key": arxiv_id},  # auto-hides when user clicks a different paper
-    payload=detail,
+    scope={"kind": "paper", "key": source_id},  # auto-hides when user picks a different paper
+    payload={"type": "Column", "children": children},
 )
 pin_below_canvas(widget_id=result["widget_id"])
+FINAL(f"Examined · {src['title']}")
+```
 
-# Anchor the follow-up question buttons to the chat (not the canvas).
-emit_widget(
+# Turn N — open KB doc as wiki
+
+Triggered by **either**:
+  (a) Natural language — the user asks "show the wiki for X", "open the wiki for 2504.13684", "wiki view of <paper title>", or similar. Pull the arXiv id (or paper title) from the user's message.
+  (b) A click on the "📖 Open as wiki" button in the detail card. The widget event arrives as a literal line in your context:
+      `[widget-event] action=open_kb_doc data={"source_id": "f3a2c10c-..."}`
+      Read the `source_id` (UUID) value out of that text the same way you read `pointId` for drill-downs.
+
+**HARD RULE — explicit arxiv id short-circuit.** If the user's message contains any token matching the arXiv id pattern `\d{4}\.\d{4,5}` (e.g. `2404.15406`, `2310.06825`), treat it as case (a) with that id and go straight to the single-iteration block below. Do NOT run `arxiv_search` first to "verify" the paper exists, do NOT call any other host fn before `kb_get_wiki`. The KB resolver answers the existence question itself — if the paper isn't there, `kb_get_wiki` raises and you handle that one error path. Calling `arxiv_search` first is wrong because (i) the KB is the source of truth for ingested docs and (ii) arXiv is rate-limited.
+
+Either way, single iteration. `ref` is whatever you resolved — a
+`source_id` UUID (case b), an arxiv id, or a paper title (case a):
+
+```python
+ref = "<paste-the-source_id-or-arxiv-id-here>"
+# Best-effort body backfill BEFORE building the wiki, but ONLY when ref
+# is an arxiv id (fetch_paper_text needs one). fetch_paper_text pulls
+# the full paper from ar5iv and persists real sections (intro / methods
+# / results) instead of just the abstract. Skip it for UUID source_ids
+# — those came from a cloud click and the KB already has what it has.
+import re
+if re.fullmatch(r"\d{4}\.\d{4,5}", ref):
+    try:
+        fetch_paper_text(ref)
+    except Exception:
+        pass  # ar5iv miss / network blip — fall through to whatever's in the KB.
+# kb_get_wiki accepts source_id UUIDs, arxiv ids, or URLs directly.
+doc = kb_get_wiki(ref)
+result = emit_widget(
     session_id=gw_session_id,
     kind="a2ui",
-    follow_up=True,
-    payload=followups,
+    multi_use=True,  # REQUIRED — chip clicks must not terminate the widget
+    payload={"type": "KbDocWiki", "doc": doc},
 )
+pin_to_wiki(widget_id=result["widget_id"])
+FINAL(f"Opened wiki · {doc['source']['title']}")
+```
 
-# Frontend parses this prefix to render the log line as a clickable
-# re-pin button. Keep the "arxiv:" tag literal — that's the marker.
-FINAL(f"Pinned · arxiv:{arxiv_id} · {paper['title']}")
+If `kb_get_wiki` raises, FINAL with the actual reason — read the error message and report it verbatim. Examples:
+  - `no kb source matches '<ref>'` → don't FINAL yet — first try `kb_search('<ref or topic phrase>', k=10)` yourself to see if the paper is in the library under a slightly different ref. If you find a hit, retry `kb_get_wiki(hit['source_id'])`. If kb_search also comes back empty, THEN FINAL: `"I couldn't find '<ref>' in your library — closest matches were [...], or use arxiv_search to ingest a new one."`
+  - `kb.get_wiki: <other>` → `FINAL(f"Couldn't open the wiki: {error}")`
+Only invoke the "paper not in KB" message AFTER `kb_get_wiki` has actually raised — never as a preemptive guess. If you didn't call the host fn this turn, you don't know whether the paper is there. Don't fall back to `pin_to_canvas`; the wiki view only makes sense in the wiki drawer.
+
+When the user clicks an entity or topic chip inside the drawer you'll see `[widget-event] action=open_kb_entity data={"entity_id", "slug"}` / `action=open_kb_topic data=...`. For now treat these as informational and FINAL a one-line ack ("That entity has N other mentions in your library — search '<slug>' to see them.") — full entity/topic drill-downs are a future expansion.
+
+# Turn N — open a cluster as a wiki digest
+
+Triggered by **either**:
+  (a) Natural language — "compare these papers as a wiki", "show me a wiki digest of the top cluster", "open these as a wiki" with two or more papers in scope (cluster click, recent search, or named in the message).
+  (b) The user clicks "Open as wiki" inside a cluster digest already on screen — that's a single-source request, see the previous section.
+
+Single iteration:
+
+```python
+refs = ["2504.13684", "2401.12345", "2310.06825"]  # arxiv ids or source_ids
+cluster = kb_get_cluster_wiki(refs, title="Retrieval methods on long docs")
+result = emit_widget(
+    session_id=gw_session_id,
+    kind="a2ui",
+    multi_use=True,  # REQUIRED — chip / "Open as wiki" clicks must not terminate
+    payload={"type": "KbClusterWiki", "cluster": cluster},
+)
+pin_to_wiki(widget_id=result["widget_id"])
+FINAL(f"Opened cluster wiki · {len(cluster['sources'])} papers")
+```
+
+If any source_ref isn't ingested, `kb_get_cluster_wiki` raises with the offending ref in the message. Drop it and retry, or FINAL with which ones are missing and ask the user whether to proceed with the rest.
+
+When the user clicks a per-source "Open as wiki" button in the cluster you'll see `[widget-event] action=open_source_wiki data={"source_ref": "<id>"}`. React by running the **single-doc** flow above (Turn N — open KB doc as wiki) for that source_ref — it'll supersede the cluster wiki in the drawer.
+
+# Turn N — modify / re-cluster the current cloud
+
+When the user asks to change the cloud itself — "re-cluster into 4
+groups", "split that cluster", "highlight the 2024 papers", "drop the
+benchmark ones", "rename the clusters" — you **rebuild and re-pin**.
+The canvas only ever shows the widget currently in its slot, so the
+chart changes *only* when a new EntityCloud lands there.
+
+**The one rule that matters: after building the new payload, call
+`pin_to_canvas(widget_id=...)` on the new widget.** A widget you emit
+but don't pin is invisible. Don't just describe the new clustering in
+prose and claim it's done — emit + pin, then FINAL.
+
+Single iteration (vectors are cheap to recompute; re-run kb_search):
+
+```python
+hits = kb_search(query="<the same topic as the current cloud>", k=80)
+best = {}
+for h in hits:
+    sid = h["source_id"]
+    if sid not in best or h["score"] > best[sid]["score"]:
+        best[sid] = h
+papers = list(best.values())[:30]
+texts = [f"{p['source_title']}. {p['content'][:400]}" for p in papers]
+ids = [p["source_id"] for p in papers]
+vectors = embed_papers(texts, ids=ids)
+
+# Apply the user's requested change here. Examples:
+#   - re-cluster:  labels = cluster_papers(vectors, k=4)
+#   - highlight:   highlight = {p["source_id"]: True for p in papers if "2024" in (p.get("source_title") or "")}
+#   - filter:      keep only papers matching a predicate before projecting
+labels = cluster_papers(vectors, k=4)            # <- user asked for 4
+coords = project_2d(vectors, labels=labels, mode="ring")
+
+# ... name clusters, compute centroids, build points[] exactly like
+# Turn 1 iteration 2 (id = source_id, label = source_title) ...
+
+result = emit_widget(
+    session_id=gw_session_id, kind="a2ui", multi_use=True,
+    payload={"type": "EntityCloud", "points": points, "clusters": clusters,
+             # include "highlight": {...} only if the user asked for it
+             },
+)
+pin_to_canvas(widget_id=result["widget_id"])   # <- REQUIRED. the chart updates here, not before.
+FINAL("Re-clustered into 4 groups: <names>.")
 ```
 
 # Turn N — user types a follow-up text question
 
-If the user types something like "show me the most recent ones" or "what cluster is bottom-left?", run a fresh search or describe the layout — same two-iteration pattern, FINAL with prose.
+If the user types something like "show me the most recent ones" or "what cluster is bottom-left?", run a fresh search or describe the layout — same two-iteration pattern, FINAL with prose. If the request *changes the cloud*, follow the "modify / re-cluster" recipe above (rebuild + `pin_to_canvas`).
 
 # General rules
 
   - The EntityCloud widget always pins to the **primary** canvas (`pin_to_canvas`) with `multi_use=True`. It's the persistent workspace; clicks on points should not terminate it.
   - Per-paper detail widgets pin to the **aux** slot (`pin_below_canvas`) with a `scope={"kind": "paper", "key": <id>}` so they auto-hide when the user navigates away.
+  - The KbDocWiki widget pins to the **wiki** slot (`pin_to_wiki`) with `multi_use=True`. Never `pin_to_canvas` it — the canvas is for navigation, the wiki drawer is for reading. No `scope` either; the drawer holds at most one wiki at a time and the user closes it explicitly.
   - Do NOT scope the EntityCloud itself.
   - Cap max_results at 50; arXiv pagination kicks in past that.
   - If arxiv_search returns 0 papers, FINAL gracefully: "No papers found for that query — try a broader topic."
   - Never write Python that prints large blobs (full abstracts × 30 = a lot of stdout). Print summary lines only.
   - **When to fetch the full paper.** Abstracts are great for "show me the landscape" but lie by omission about methods and results. If the user asks a grounded follow-up — "what method does X use", "what is the result of X", "compare X and Y in detail", any of the click-button follow-ups (Method details / Vs neighbors / What followed) — call `fetch_paper_text(arxiv_id)` first, then write a 2–3 sentence answer that quotes or paraphrases the actual paper body. Don't fetch the full text for landscape questions; it's wasted context.
-"###;
+"####;
 
 // ── Literature plugin ───────────────────────────────────────────────
 
@@ -803,9 +1022,11 @@ impl Plugin for LiteraturePlugin {
 
         let http_t = self.http.clone();
         let text_cache = self.text_cache.clone();
+        let kb_for_persist = self.kb.clone();
         ctx.register_host_fn_async("fetch_paper_text", None, move |args, kwargs| {
             let http = http_t.clone();
             let text_cache = text_cache.clone();
+            let kb_for_persist = kb_for_persist.clone();
             async move {
                 let arxiv_id = args
                     .first()
@@ -863,6 +1084,40 @@ impl Plugin for LiteraturePlugin {
                 if let Ok(mut m) = text_cache.lock() {
                     m.insert(arxiv_id.clone(), plain.clone());
                 }
+
+                // Persist the body to the KB so the wiki view sees
+                // real sections (not just the abstract chunk) and
+                // future sessions inherit the work. Best-effort: a
+                // persistence failure doesn't break the in-memory
+                // text the agent already has.
+                if let Some(kb) = kb_for_persist.as_ref() {
+                    let abs_url = format!("https://arxiv.org/abs/{arxiv_id}");
+                    let document = build_body_ingest_document(
+                        kb.as_ref(),
+                        &abs_url,
+                        &arxiv_id,
+                        &plain,
+                    )
+                    .await;
+                    match ingest_inline(kb.as_ref(), &abs_url, &document, None).await {
+                        Ok(report) => {
+                            tracing::info!(
+                                arxiv_id,
+                                outcome = ?report.source.title,
+                                chunks = report.chunks_written,
+                                "fetch_paper_text: persisted body to KB",
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                arxiv_id,
+                                error = %e,
+                                "fetch_paper_text: KB persistence failed (non-fatal)",
+                            );
+                        }
+                    }
+                }
+
                 let total = plain.chars().count();
                 let truncated = total > max_chars;
                 let text: String = plain.chars().take(max_chars).collect();
@@ -1268,6 +1523,61 @@ fn decode_xml_entities(s: &str) -> String {
 /// agent rarely needs the full bibliography and it's most of the page).
 /// Block-level tags become single newlines so paragraph structure
 /// survives; inline entities are decoded via `decode_xml_entities`.
+/// Build the markdown document handed to `ingest_inline` when
+/// persisting a paper body fetched via `fetch_paper_text`.
+///
+/// `ingest_inline` overwrites `kb_sources.{title, published_at}` from
+/// frontmatter on every upsert, and the body alone has none. So we
+/// look up the existing abstract-only row and synthesise a frontmatter
+/// block from its title + published_at — preserving the curated values
+/// across the re-ingest that swaps abstract chunks for body chunks.
+///
+/// If no existing row matches (e.g. the user called fetch_paper_text
+/// before any arxiv_search persisted the abstract), returns the body
+/// unchanged — `upsert_source` will derive a fallback title from the
+/// URL slug, which is uglier but non-fatal.
+async fn build_body_ingest_document(
+    kb: &KbStores,
+    abs_url: &str,
+    arxiv_id: &str,
+    body: &str,
+) -> String {
+    type Row = (Option<String>, Option<chrono::DateTime<chrono::Utc>>);
+    let existing: Option<Row> = sqlx::query_as(
+        r#"
+        SELECT title, published_at FROM kb_sources
+        WHERE url = $1 OR metadata->>'arxiv_id' = $2
+        ORDER BY (url = $1) DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(abs_url)
+    .bind(arxiv_id)
+    .fetch_optional(&kb.pg)
+    .await
+    .unwrap_or(None);
+
+    let Some((title, published_at)) = existing else {
+        return body.to_string();
+    };
+    if title.is_none() && published_at.is_none() {
+        return body.to_string();
+    }
+    let mut out = String::from("---\n");
+    if let Some(t) = title {
+        // The frontmatter parser strips surrounding quotes; embedded
+        // double-quotes get downgraded so the line stays well-formed.
+        let safe = t.replace('"', "'");
+        out.push_str(&format!("title: \"{safe}\"\n"));
+    }
+    if let Some(d) = published_at {
+        out.push_str(&format!("date: {}\n", d.format("%Y-%m-%d")));
+    }
+    out.push_str("---\n");
+    out.push_str(body);
+    out
+}
+
 /// This is a deliberately simple lexer — ar5iv's output is well-formed
 /// XHTML, so we don't need a full DOM.
 fn html_to_plaintext(html: &str) -> String {
@@ -1607,6 +1917,105 @@ async fn handle_workspace(
     }
 }
 
+/// One row in the chat-transcript backfill served by
+/// `GET /sessions/{sid}/transcript`. Bare shape: only the
+/// chat-visible roles (user / assistant) so the frontend can seed
+/// `useSessionStore.messages` on session resume without dragging in
+/// code blocks, host calls, snapshots, etc. Those still live in
+/// `session_entries` for the loop's own context replay.
+#[derive(serde::Serialize)]
+struct TranscriptEntry {
+    entry_id: uuid::Uuid,
+    role: &'static str,
+    content: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// HTTP handler for the chat-transcript backfill. Returns all
+/// `user_message` and `assistant_narration` entries for the session
+/// in chronological order; everything else is filtered out at the
+/// SQL level. Cheap enough that we don't paginate in v1.
+async fn handle_transcript(
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    axum::extract::State(pool): axum::extract::State<sqlx::PgPool>,
+) -> Result<axum::Json<Vec<TranscriptEntry>>, (axum::http::StatusCode, String)> {
+    let sid = uuid::Uuid::parse_str(&session_id).map_err(|_| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid session id".to_string(),
+        )
+    })?;
+    type Row = (
+        uuid::Uuid,
+        String,
+        serde_json::Value,
+        chrono::DateTime<chrono::Utc>,
+    );
+    // Widget clicks land in session_entries as synthetic
+    // `user_message` rows shaped like `[widget-event] widget=<uuid>
+    // action=<name> data=<json>` (see `WidgetEvent::to_user_message`
+    // in gw-core). They exist so the rLM loop can re-read prior
+    // interactions as input, but they're never shown in the live
+    // chat — `postWidgetEvent` bypasses `appendUser` on the
+    // frontend. Filtering them out here keeps the post-refresh view
+    // consistent with the live one. Real typed user messages never
+    // start with `[widget-event]`.
+    let rows: Vec<Row> = sqlx::query_as(
+        r#"
+        SELECT id, entry_type, content, created_at
+        FROM session_entries
+        WHERE session_id = $1
+          AND entry_type IN ('user_message', 'assistant_narration')
+          AND NOT (
+            entry_type = 'user_message'
+            AND (content->>'UserMessage') LIKE '[widget-event]%'
+          )
+        ORDER BY created_at ASC
+        "#,
+    )
+    .bind(sid)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| {
+        tracing::warn!(error = %e, "transcript listing failed");
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            e.to_string(),
+        )
+    })?;
+
+    // The `content` column holds a full `EntryType` JSON dump:
+    //   { "UserMessage": "<text>" }
+    //   { "AssistantNarration": { "content": "<text>" } }
+    // (Discriminant is the variant name, externally tagged by serde
+    // default.) Skip rows where the shape doesn't match — should not
+    // happen in practice but defensive against stale schemas.
+    let entries: Vec<TranscriptEntry> = rows
+        .into_iter()
+        .filter_map(|(id, tag, content, created_at)| {
+            let (role, text) = match tag.as_str() {
+                "user_message" => ("user", content.get("UserMessage")?.as_str()?.to_string()),
+                "assistant_narration" => (
+                    "assistant",
+                    content
+                        .pointer("/AssistantNarration/content")?
+                        .as_str()?
+                        .to_string(),
+                ),
+                _ => return None,
+            };
+            Some(TranscriptEntry {
+                entry_id: id,
+                role,
+                content: text,
+                created_at,
+            })
+        })
+        .collect();
+
+    Ok(axum::Json(entries))
+}
+
 /// Demo-only fixed UUIDs for the literature_assistant's
 /// org/user/agent_def chain. Stable across runs so re-launching the
 /// binary doesn't pile up rows; ON CONFLICT DO NOTHING makes the
@@ -1618,20 +2027,27 @@ const LIT_USER_ID: uuid::Uuid = uuid::uuid!("02000000-0000-0000-0000-00000000000
 const LIT_AGENT_ID: uuid::Uuid = uuid::uuid!("03000000-0000-0000-0000-000000000001");
 
 /// Plant the FK chain `session_entries(session_id)` requires.
-/// Idempotent: every literature_assistant run calls this with the
-/// fresh session UUID; the org/user/agent_def rows persist across
-/// runs. Errors propagate to the caller — without this seed,
-/// `flush_to_pg` would FK-fail on every entry and the spine would
-/// never see anything.
+/// Idempotent: callable on every spawn — the `ON CONFLICT DO NOTHING`
+/// rows make repeat calls no-ops, so the manager can hit this each
+/// time it lazily ensures a session.
+///
+/// `user_id` selects the owning user. The manager passes the row's
+/// `user_id` when one already exists in PG; for ad-hoc URL-pasted
+/// session_ids that don't have a row yet, callers fall back to
+/// `LIT_USER_ID` so the demo flow keeps working.
 async fn ensure_literature_session(
     pg: &sqlx::PgPool,
     session_id: uuid::Uuid,
+    user_id: uuid::Uuid,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("INSERT INTO orgs (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING")
         .bind(LIT_ORG_ID)
         .bind("literature-demo")
         .execute(pg)
         .await?;
+    // The user row may already exist (created via the sessions API).
+    // Insert the demo user as a fallback so URL-pasted sessions still
+    // FK-resolve. Real user rows take precedence via ON CONFLICT.
     sqlx::query(
         r#"
         INSERT INTO users (id, org_id, name, email)
@@ -1639,7 +2055,7 @@ async fn ensure_literature_session(
         ON CONFLICT (id) DO NOTHING
         "#,
     )
-    .bind(LIT_USER_ID)
+    .bind(user_id)
     .bind(LIT_ORG_ID)
     .bind("literature-demo")
     .bind("demo@literature.local")
@@ -1669,12 +2085,29 @@ async fn ensure_literature_session(
     )
     .bind(session_id)
     .bind(LIT_ORG_ID)
-    .bind(LIT_USER_ID)
+    .bind(user_id)
     .bind(LIT_AGENT_ID)
     .bind(session_id.to_string())
     .execute(pg)
     .await?;
     Ok(())
+}
+
+/// Look up the user owning a session, if its row exists. The manager
+/// uses this so spawns inherit the owner picked at session-creation
+/// time (via `POST /users/{uid}/sessions`); falls through to
+/// `LIT_USER_ID` for unknown ids.
+#[allow(dead_code)] // used by SessionManager once wired
+async fn lookup_session_user(
+    pg: &sqlx::PgPool,
+    session_id: uuid::Uuid,
+) -> Result<Option<uuid::Uuid>, sqlx::Error> {
+    let row: Option<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT user_id FROM sessions WHERE id = $1")
+            .bind(session_id)
+            .fetch_optional(pg)
+            .await?;
+    Ok(row.map(|(u,)| u))
 }
 
 /// Build the gw-kb store bundle from environment, returning Ok(None)
@@ -2065,6 +2498,272 @@ fn rayleigh(m: &[Vec<f32>], v: &[f32]) -> f32 {
     acc
 }
 
+// ── Multi-session manager ───────────────────────────────────────────
+
+/// Process-global handles every session needs. Cloned into each spawn;
+/// every field is cheap to clone (Arc'd or itself a `Clone` type).
+#[derive(Clone)]
+struct SessionDeps {
+    adapter: Arc<AgUiAdapter>,
+    kb_stores: Option<Arc<KbStores>>,
+    /// Cloned per-session and wrapped in a fresh `OllamaLlmClient` so
+    /// each `ConversationLoop` has its own LLM client (matches the
+    /// prior single-session boot which built one inline).
+    chat_client: OllamaClient,
+    plugin_router: Arc<gw_engine::HostFnRouter>,
+    config_template: Arc<LoopConfigTemplate>,
+}
+
+/// Subset of `LoopConfig` that's fixed across sessions. Per-session
+/// fields (`answer_validator`, `iteration_callback`) stay default.
+struct LoopConfigTemplate {
+    system_prompt: String,
+    recency_window: usize,
+    max_iterations: usize,
+    include_code_output: bool,
+    repl_output_max_chars: usize,
+    strip_think_tags: bool,
+}
+
+impl LoopConfigTemplate {
+    fn build(&self) -> LoopConfig {
+        LoopConfig {
+            system_prompt: self.system_prompt.clone(),
+            recency_window: self.recency_window,
+            max_iterations: self.max_iterations,
+            include_code_output: self.include_code_output,
+            repl_output_max_chars: self.repl_output_max_chars,
+            strip_think_tags: self.strip_think_tags,
+            answer_validator: None,
+            iteration_callback: None,
+            snapshot_policy: SnapshotPolicy {
+                every_n_turns: 0,
+                before_compaction: false,
+            },
+            compaction_keep_count: 0,
+            auto_compact_after_turns: None,
+        }
+    }
+}
+
+/// Lazy-spawning multi-session manager. Sessions are created on first
+/// reference (via the axum middleware below) and live for the
+/// process lifetime — no eviction in v1, since the literature
+/// assistant is a single-process demo.
+struct LitSessionManager {
+    sessions: tokio::sync::RwLock<HashMap<SessionId, SessionEntry>>,
+    deps: SessionDeps,
+}
+
+struct SessionEntry {
+    /// Kept solely so the thread doesn't get joined / dropped — the
+    /// loop runs inside it for the rest of the process lifetime.
+    #[allow(dead_code)]
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl LitSessionManager {
+    fn new(deps: SessionDeps) -> Self {
+        Self {
+            sessions: tokio::sync::RwLock::new(HashMap::new()),
+            deps,
+        }
+    }
+
+    /// No-op if `session_id` already has a live loop. Otherwise seed
+    /// the FK chain (idempotent), spawn the loop on a dedicated
+    /// thread, register the session with the AG-UI adapter, and
+    /// stash the handle. Picks the owning user from the existing
+    /// `sessions` row when one exists; falls back to `LIT_USER_ID`.
+    async fn ensure(&self, session_id: SessionId) {
+        if self.sessions.read().await.contains_key(&session_id) {
+            return;
+        }
+        let mut map = self.sessions.write().await;
+        if map.contains_key(&session_id) {
+            return; // raced with another middleware call; lost.
+        }
+        let user_id = match self.deps.kb_stores.as_ref() {
+            Some(kb) => lookup_session_user(&kb.pg, session_id.0)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(LIT_USER_ID),
+            None => LIT_USER_ID,
+        };
+        if let Some(kb) = self.deps.kb_stores.as_ref() {
+            if let Err(e) = ensure_literature_session(&kb.pg, session_id.0, user_id).await {
+                tracing::warn!(
+                    error = %e,
+                    ?session_id,
+                    "failed to seed session row — entries will not persist"
+                );
+            }
+        }
+        let thread = spawn_session_loop(session_id, &self.deps);
+        map.insert(session_id, SessionEntry { thread });
+        tracing::info!(?session_id, ?user_id, "session spawned");
+    }
+}
+
+/// Build all per-session state and run its `ConversationLoop` on a
+/// dedicated thread + tokio runtime. Mirrors the original
+/// single-session boot block from `main`; the only behavioural
+/// change is per-session naming on the spawned thread.
+fn spawn_session_loop(
+    session_id: SessionId,
+    deps: &SessionDeps,
+) -> std::thread::JoinHandle<()> {
+    let adapter = deps.adapter.clone();
+    let kb_stores = deps.kb_stores.clone();
+    let chat_client = deps.chat_client.clone();
+    let plugin_router = deps.plugin_router.clone();
+    let config = deps.config_template.build();
+
+    let (tap_tx, mut tap_rx) = mpsc::unbounded_channel::<LoopEvent>();
+    let (loop_tx, loop_rx) = mpsc::unbounded_channel::<LoopEvent>();
+
+    // Register the session with the adapter so the AG-UI router has
+    // an inbound channel to push WidgetInteractions through.
+    // `register_session` is async; spawn a tiny task rather than
+    // forcing this fn to be async (it's called from inside an
+    // already-async `ensure`, but spawning keeps the order with the
+    // tap forwarder simple).
+    let adapter_for_register = adapter.clone();
+    let tap_tx_for_register = tap_tx.clone();
+    tokio::spawn(async move {
+        adapter_for_register
+            .register_session(session_id, tap_tx_for_register)
+            .await;
+    });
+
+    let adapter_for_tap = adapter.clone();
+    let pg_for_title = kb_stores.as_ref().map(|k| k.pg.clone());
+    tokio::spawn(async move {
+        // Auto-titler: stamp `sessions.title` from the first user
+        // message's first six words. The SQL `WHERE title IS NULL`
+        // guard makes the write idempotent across resumes; the local
+        // `title_set` flag avoids the redundant roundtrip after we've
+        // already done it once in this process.
+        let mut title_set = false;
+        while let Some(ev) = tap_rx.recv().await {
+            adapter_for_tap.dispatch(session_id, &ev).await;
+            if !title_set {
+                if let (LoopEvent::UserMessage(content), Some(pg)) =
+                    (&ev, pg_for_title.as_ref())
+                {
+                    let title: String = content
+                        .split_whitespace()
+                        .take(6)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if !title.is_empty() {
+                        let pg = pg.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = sqlx::query(
+                                "UPDATE sessions SET title = $1 \
+                                 WHERE id = $2 AND title IS NULL",
+                            )
+                            .bind(&title)
+                            .bind(session_id.0)
+                            .execute(&pg)
+                            .await
+                            {
+                                tracing::warn!(
+                                    ?session_id,
+                                    %e,
+                                    "auto-titler update failed",
+                                );
+                            }
+                        });
+                        title_set = true;
+                    }
+                }
+            }
+            if loop_tx.send(ev).is_err() {
+                break;
+            }
+        }
+    });
+
+    let ask_handle = new_ask_handle();
+    let conv_bridge = ConversationBridge::with_plugin_router(
+        tap_tx.clone(),
+        ask_handle,
+        None,
+        Some(plugin_router.clone()),
+    );
+
+    // Derive the ouros sandbox allowlist from the plugin router so it
+    // stays in sync with whatever plugins the engine actually
+    // registered. Hardcoding this list silently breaks new host fns
+    // (e.g. `kb_search`, `kb_explore`) — the engine's host_fn_router
+    // is the single source of truth. FINAL is the only entry the
+    // runtime owns, so we add it explicitly. ask_user / send_message /
+    // compact_session aren't used by the literature demo so they
+    // intentionally don't appear here.
+    let mut external_fns: Vec<String> = vec!["FINAL".into()];
+    for name in plugin_router.function_names() {
+        external_fns.push(name.to_string());
+    }
+    let mut repl = ReplAgent::new(external_fns, Box::new(conv_bridge));
+    repl.set_variable("gw_session_id", Object::String(session_id.0.to_string()))
+        .ok();
+
+    let loop_llm: Box<dyn gw_loop::LlmClient> =
+        Box::new(OllamaLlmClient::new(chat_client).with_think(Some(false)));
+
+    let tree = if let Some(kb) = kb_stores.as_ref() {
+        let pg_store = PgSessionStore::new(kb.pg.clone());
+        SessionTree::with_pg(session_id, pg_store)
+    } else {
+        SessionTree::new(session_id)
+    };
+    let mut conv_loop =
+        ConversationLoop::with_tree(tree, repl, loop_llm, config, tap_tx);
+    if let Some(kb) = kb_stores.as_ref() {
+        let extractor = Arc::new(SpineExtractor::new(kb.clone()));
+        conv_loop = conv_loop.with_spine_extractor(extractor);
+    }
+
+    std::thread::Builder::new()
+        .name(format!("gw-loop-{}", session_id.0))
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2)
+                .build()
+                .expect("failed to build loop runtime");
+            rt.block_on(async move {
+                if let Err(e) = conv_loop.run(loop_rx).await {
+                    tracing::error!(?session_id, error = %e, "conversation loop exited");
+                }
+            });
+        })
+        .expect("failed to spawn loop thread")
+}
+
+/// axum middleware: when a request hits `/sessions/{uuid}/...`,
+/// ensure the matching loop is live before the route handler runs.
+/// Unknown ids spawn lazily; live ones are no-ops. Non-`/sessions/`
+/// paths pass straight through.
+async fn ensure_session_middleware(
+    axum::extract::State(manager): axum::extract::State<Arc<LitSessionManager>>,
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::http::Response<axum::body::Body> {
+    if let Some(session_id) = extract_session_id_from_path(req.uri().path()) {
+        manager.ensure(session_id).await;
+    }
+    next.run(req).await
+}
+
+fn extract_session_id_from_path(path: &str) -> Option<SessionId> {
+    let rest = path.strip_prefix("/sessions/")?;
+    let id_str = rest.split('/').next()?;
+    Uuid::parse_str(id_str).ok().map(SessionId)
+}
+
 // ── Server ──────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -2103,8 +2802,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         (ollama, format!("ollama:{OLLAMA_MODEL}"))
     };
-    let loop_llm: Box<dyn gw_loop::LlmClient> =
-        Box::new(OllamaLlmClient::new(chat_client).with_think(Some(false)));
+    // chat_client stays a `Clone` value (not a Box<dyn LlmClient>);
+    // the SessionDeps below clones it into each spawn so every loop
+    // gets its own OllamaLlmClient.
 
     // Best-effort gw-kb setup. When DATABASE_URL is set we wire up
     // Postgres + LanceDB + tantivy + a sentence-transformers embedder
@@ -2112,16 +2812,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // persists discovered papers to the KB. If anything fails, log
     // and continue stateless — the demo doesn't depend on KB at this
     // phase.
+    // Print a loud startup banner about KB readiness. The agent's
+    // `kb_search` / `kb_get_wiki` host fns are gated on KbStores being
+    // wired (see `KbPlugin` registration below) — and if that misses
+    // here, the symptom is the agent saying "kb_search isn't available
+    // in this REPL" inside a session, hours after launch. Print to
+    // stderr in a framed block so it survives log filters and is
+    // impossible to scroll past.
     let kb_stores: Option<Arc<KbStores>> = match build_kb_stores().await {
         Ok(Some(s)) => {
+            eprintln!("┌─ gw-kb ────────────────────────────────────────────────");
+            eprintln!("│ ✓ stores ready — kb_search / kb_get_wiki / kb_explore");
+            eprintln!("│   etc. registered for agent sessions.");
+            eprintln!("└────────────────────────────────────────────────────────");
             tracing::info!("gw-kb stores ready — arxiv_search will persist results");
             Some(Arc::new(s))
         }
         Ok(None) => {
+            eprintln!("┌─ gw-kb DISABLED ───────────────────────────────────────");
+            eprintln!("│ DATABASE_URL is unset. KbPlugin will NOT be registered;");
+            eprintln!("│ agents will see kb_search / kb_get_wiki / kb_explore as");
+            eprintln!("│ undefined and the literature demo's KB fallback path");
+            eprintln!("│ will not work.");
+            eprintln!("│");
+            eprintln!("│ Fix: export DATABASE_URL=postgres://gw:gw@localhost:5432/greatwheel");
+            eprintln!("│      (or whichever pg URL your `docker compose` exposes)");
+            eprintln!("│      and restart this process.");
+            eprintln!("└────────────────────────────────────────────────────────");
             tracing::info!("gw-kb not configured (DATABASE_URL unset); running stateless");
             None
         }
         Err(e) => {
+            eprintln!("┌─ gw-kb DISABLED ───────────────────────────────────────");
+            eprintln!("│ Setup failed mid-flight (Postgres connect, migrations,");
+            eprintln!("│ LanceDB open, or Tantivy open). KbPlugin will NOT be");
+            eprintln!("│ registered; agents will see kb_search / kb_get_wiki etc.");
+            eprintln!("│ as undefined.");
+            eprintln!("│");
+            eprintln!("│ Underlying error:");
+            eprintln!("│   {e}");
+            eprintln!("│");
+            eprintln!("│ Common causes:");
+            eprintln!("│  - Postgres not reachable at DATABASE_URL (is the");
+            eprintln!("│    container / service up? `pg_isready` against the");
+            eprintln!("│    host:port in DATABASE_URL).");
+            eprintln!("│  - KB_LANCE_PATH / KB_TANTIVY_PATH unwritable or stale");
+            eprintln!("│    schema (delete data/kb-lancedb + data/kb-tantivy to");
+            eprintln!("│    reseed).");
+            eprintln!("│  - Embedding model not pullable from the configured");
+            eprintln!("│    Ollama (KB_OLLAMA_URL, KB_EMBEDDING_MODEL).");
+            eprintln!("└────────────────────────────────────────────────────────");
             tracing::warn!(error = %e, "gw-kb setup failed; running stateless");
             None
         }
@@ -2147,10 +2887,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let engine = GreatWheelEngine::new()
+    let mut engine = GreatWheelEngine::new()
         .add_plugin(UiPlugin)
-        .add_plugin(lit)
-        .init(&HashMap::new())?;
+        .add_plugin(lit);
+    // KbPlugin exposes the kb_* read-only host fns (kb_search,
+    // kb_get_wiki, kb_get_cluster_wiki, etc.). Wired here rather than
+    // at construction time because the binary already has the
+    // KbStores around for ingestion; without this the agent's
+    // `kb_get_wiki(...)` call lands as "unknown host function".
+    if let Some(kb) = kb_stores.as_ref() {
+        engine = engine.add_plugin(KbPlugin::new((**kb).clone()));
+    }
+    let engine = engine.init(&HashMap::new())?;
     let plugin_router = engine.host_fn_router_arc();
     let store: Arc<UiSurfaceStore> = engine
         .registry
@@ -2172,112 +2920,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Mechanistic interpretability of transformers",
         ],
     );
+    // Bundle every process-global handle the per-session machinery
+    // needs into one cheap-to-clone struct. The manager hands the
+    // bundle to `spawn_session_loop` on each ensure().
+    let deps = SessionDeps {
+        adapter: adapter.clone(),
+        kb_stores: kb_stores.clone(),
+        chat_client,
+        plugin_router,
+        config_template: Arc::new(LoopConfigTemplate {
+            system_prompt: SYSTEM_PROMPT.to_string(),
+            recency_window: 30,
+            max_iterations: 4,
+            include_code_output: true,
+            repl_output_max_chars: 4000,
+            strip_think_tags: true,
+        }),
+    };
+    let manager = Arc::new(LitSessionManager::new(deps));
+
+    // Backward-compat seed session: the prior single-session boot
+    // generated a fresh UUID at startup and printed its URL. Keep
+    // that flow by ensuring one session exists before the listener
+    // binds. New session_ids that hit `/sessions/{id}/*` later get
+    // lazy-spawned by the middleware below.
     let session_id = SessionId(Uuid::new_v4());
-
-    // When the KB is configured, plant the org/user/agent_def chain
-    // session_entries.session_id needs to FK against, then build a
-    // PG-backed session tree so flush_to_pg actually persists. The
-    // spine extractor downstream relies on entries existing in
-    // Postgres before its background extraction tasks fire.
-    if let Some(kb) = kb_stores.as_ref() {
-        if let Err(e) = ensure_literature_session(&kb.pg, session_id.0).await {
-            tracing::warn!(error = %e, "failed to seed literature session — entries will not persist");
-        }
+    manager.ensure(session_id).await;
+    if kb_stores.is_some() {
+        tracing::info!("spine extractor attached per-session via SessionDeps");
     }
-
-    let (tap_tx, mut tap_rx) = mpsc::unbounded_channel::<LoopEvent>();
-    let (loop_tx, loop_rx) = mpsc::unbounded_channel::<LoopEvent>();
-    adapter.register_session(session_id, tap_tx.clone()).await;
-
-    let adapter_for_tap = adapter.clone();
-    tokio::spawn(async move {
-        while let Some(ev) = tap_rx.recv().await {
-            adapter_for_tap.dispatch(session_id, &ev).await;
-            if loop_tx.send(ev).is_err() {
-                break;
-            }
-        }
-    });
-
-    let ask_handle = new_ask_handle();
-    let conv_bridge = ConversationBridge::with_plugin_router(
-        tap_tx.clone(),
-        ask_handle,
-        None,
-        Some(plugin_router),
-    );
-
-    let external_fns = vec![
-        "FINAL".into(),
-        "emit_widget".into(),
-        "supersede_widget".into(),
-        "resolve_widget".into(),
-        "pin_to_canvas".into(),
-        "pin_below_canvas".into(),
-        "highlight_button".into(),
-        "arxiv_search".into(),
-        "embed_papers".into(),
-        "project_2d".into(),
-        "get_paper".into(),
-        "nearest_neighbors".into(),
-        "cluster_papers".into(),
-        "fetch_paper_text".into(),
-        "kb_paper_count".into(),
-        "entity_extraction_status".into(),
-    ];
-    let mut repl = ReplAgent::new(external_fns, Box::new(conv_bridge));
-    repl.set_variable("gw_session_id", Object::String(session_id.0.to_string()))
-        .ok();
-
-    let config = LoopConfig {
-        system_prompt: SYSTEM_PROMPT.to_string(),
-        recency_window: 30,
-        max_iterations: 4,
-        include_code_output: true,
-        repl_output_max_chars: 4000,
-        strip_think_tags: true,
-        answer_validator: None,
-        iteration_callback: None,
-        snapshot_policy: SnapshotPolicy {
-            every_n_turns: 0,
-            before_compaction: false,
-        },
-        compaction_keep_count: 0,
-        auto_compact_after_turns: None,
-    };
-    // Build a PG-backed tree when KB is wired up, so flush_to_pg
-    // persists entries (the spine extractor depends on this). Falls
-    // back to the in-memory tree when the KB isn't configured —
-    // demo runs without Postgres still work, just without spine
-    // rows accumulating.
-    let tree = if let Some(kb) = kb_stores.as_ref() {
-        let pg_store = PgSessionStore::new(kb.pg.clone());
-        SessionTree::with_pg(session_id, pg_store)
-    } else {
-        SessionTree::new(session_id)
-    };
-    let mut conv_loop =
-        ConversationLoop::with_tree(tree, repl, loop_llm, config, tap_tx);
-    if let Some(kb) = kb_stores.as_ref() {
-        let extractor = Arc::new(SpineExtractor::new(kb.clone()));
-        conv_loop = conv_loop.with_spine_extractor(extractor);
-        tracing::info!("spine extractor attached — entries → entities + segments");
-    }
-
-    std::thread::Builder::new()
-        .name("gw-loop".into())
-        .spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .worker_threads(2)
-                .build()
-                .expect("failed to build loop runtime");
-            rt.block_on(async move {
-                if let Err(e) = conv_loop.run(loop_rx).await {
-                    tracing::error!(error = %e, "conversation loop exited");
-                }
-            });
-        })?;
 
     // Spine sidebar's segment-detail endpoint. Mounted only when the
     // KB is wired up (it joins across kb_entities and the spine
@@ -2304,12 +2975,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "/sessions/{session_id}/workspace",
                 axum::routing::get(handle_workspace),
             )
-            .with_state(pool);
-        app_base.merge(spine_router)
+            .route(
+                "/sessions/{session_id}/transcript",
+                axum::routing::get(handle_transcript),
+            )
+            .with_state(pool.clone());
+        // Sessions sidebar API — orthogonal to spine, but gated on
+        // the same KB-configured branch since it also needs PG.
+        let sessions_router = sessions_api::router(
+            pool,
+            SessionsApiConfig {
+                default_org_id: LIT_ORG_ID,
+                default_agent_id: LIT_AGENT_ID,
+            },
+        );
+        app_base.merge(spine_router).merge(sessions_router)
     } else {
         app_base
     };
+    // Lazy-spawn middleware: any request to `/sessions/{uuid}/...`
+    // ensures the matching ConversationLoop is live before the route
+    // handler runs. New URL-pasted session ids get spawned on first
+    // /stream connect; known ones are no-ops.
     let app = app_with_spine
+        .layer(axum::middleware::from_fn_with_state(
+            manager.clone(),
+            ensure_session_middleware,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive());
     let listener = TcpListener::bind("127.0.0.1:8787").await?;
