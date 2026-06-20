@@ -12,7 +12,7 @@ use axum::{
 };
 use clap::Parser;
 use gw_engine::GreatWheelEngine;
-use gw_llm::{Message, OllamaClient};
+use gw_llm::{LlmBackend, Message, OllamaClient};
 use gw_loop::{LoopConfig, OllamaLlmClient, SessionManager};
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -118,6 +118,16 @@ struct LlmConfig {
     ollama_url: String,
     default_model: String,
     embedding_model: String,
+    /// "ollama" (default), "sglang" (OpenAI-compatible), or "openai".
+    /// Selects the request/response shape for both chat (proxy_url) and
+    /// embeddings (ollama_url).
+    #[serde(default)]
+    backend: Option<String>,
+    /// Bearer token for protected chat/embedding endpoints (e.g. a Modal
+    /// sglang deployment). Prefer the GW_LLM_API_KEY env var so the secret
+    /// stays out of the config file; the env var overrides this field.
+    #[serde(default)]
+    api_key: Option<String>,
 }
 
 #[derive(Clone)]
@@ -301,12 +311,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("Database connected");
     }
 
-    let llm = OllamaClient::new(
+    let backend = config
+        .llm
+        .backend
+        .as_deref()
+        .map(|s| s.parse::<LlmBackend>())
+        .transpose()
+        .expect("invalid llm.backend")
+        .unwrap_or(LlmBackend::Ollama);
+    let mut llm = OllamaClient::with_backend(
         config.llm.proxy_url.clone(),
         config.llm.ollama_url.clone(),
         config.llm.default_model.clone(),
         config.llm.embedding_model.clone(),
+        backend,
     );
+    if let Some(key) = std::env::var("GW_LLM_API_KEY")
+        .ok()
+        .or_else(|| config.llm.api_key.clone())
+    {
+        llm = llm.with_api_key(key);
+    }
 
     let llm = Arc::new(llm);
 
