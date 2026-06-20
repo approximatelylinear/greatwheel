@@ -492,6 +492,56 @@ async fn post_widget_event(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let sid = parse_sid(&session_id)?;
 
+    // `action: "nav_slot"` is the per-slot back/forward chevron click
+    // (see `docs/design-slot-nav.md`). Pure UI op — short-circuits
+    // *before* the resolve block so we don't mark anything Resolved
+    // on the way through. `body.widget_id` is unused (the target is
+    // determined by the slot's cursor); frontend sends the nil UUID.
+    if body.action == "nav_slot" {
+        use crate::surface::{NavDirection, SlotKind};
+        let slot = body.data.get("slot").and_then(|v| v.as_str());
+        let dir = body.data.get("direction").and_then(|v| v.as_str());
+        let parsed = match (slot, dir) {
+            (Some("canvas"), Some("back")) => Some((SlotKind::Canvas, NavDirection::Back)),
+            (Some("canvas"), Some("forward")) => Some((SlotKind::Canvas, NavDirection::Forward)),
+            (Some("aux"), Some("back")) => Some((SlotKind::Aux, NavDirection::Back)),
+            (Some("aux"), Some("forward")) => Some((SlotKind::Aux, NavDirection::Forward)),
+            (Some("wiki"), Some("back")) => Some((SlotKind::Wiki, NavDirection::Back)),
+            (Some("wiki"), Some("forward")) => Some((SlotKind::Wiki, NavDirection::Forward)),
+            _ => None,
+        };
+        match parsed {
+            Some((s, d)) => {
+                if let Err(e) = state.store.nav_slot(sid, s, d).await {
+                    warn!(error = %e, slot = ?s, direction = ?d, "ag-ui nav_slot failed");
+                }
+            }
+            None => {
+                warn!(data = ?body.data, "ag-ui nav_slot: missing/invalid slot or direction");
+            }
+        }
+        return Ok(StatusCode::ACCEPTED);
+    }
+
+    // `action: "restore_widget"` is a pure UI op fired by the widget
+    // history drawer: re-pin a previously emitted widget into its
+    // appropriate slot (canvas / aux / wiki), routed by payload kind.
+    // No agent involvement, no lifecycle transition on the target —
+    // the canonical `Widget` state stays whatever it was (typically
+    // `Superseded`). Short-circuits *before* the resolve block below
+    // so we don't accidentally mark the target widget Resolved on a
+    // non-multi_use payload. `body.widget_id` carries the target.
+    if body.action == "restore_widget" {
+        if let Err(e) = state.store.restore_widget(sid, body.widget_id).await {
+            warn!(
+                widget_id = ?body.widget_id,
+                error = %e,
+                "ag-ui restore_widget failed"
+            );
+        }
+        return Ok(StatusCode::ACCEPTED);
+    }
+
     // Resolve the widget in the store first — unless it's `multi_use`,
     // in which case clicks are pure events and the widget stays
     // `Active` for further interaction. Best-effort: a widget that is
@@ -552,6 +602,17 @@ async fn post_widget_event(
         return Ok(StatusCode::ACCEPTED);
     }
 
+    // `action: "close_wiki"` is the same kind of pure UI op — fired
+    // by the wiki drawer's close button. Clear `wiki_slot` directly
+    // in the surface store; the resulting WikiUnpinned notification
+    // becomes a `replace /wikiSlot null` STATE_DELTA. No agent involved.
+    if body.action == "close_wiki" {
+        if let Err(e) = state.store.clear_wiki_slot(sid).await {
+            warn!(error = %e, "ag-ui close_wiki: clear_wiki_slot failed");
+        }
+        return Ok(StatusCode::ACCEPTED);
+    }
+
     let inbound = state.inbound.lock().await;
     let tx = inbound.get(&sid).ok_or_else(|| {
         (
@@ -607,13 +668,7 @@ fn empty_snapshot(session_id: SessionId) -> UiSurfaceSnapshot {
     use crate::surface::UiSurface;
     use gw_core::UiSurfaceId;
     UiSurfaceSnapshot {
-        surface: UiSurface {
-            id: UiSurfaceId::new(),
-            session_id,
-            widget_order: Vec::new(),
-            canvas_slot: None,
-            canvas_aux_slot: None,
-        },
+        surface: UiSurface::new(UiSurfaceId::new(), session_id),
         widgets: Vec::new(),
     }
 }
@@ -731,6 +786,128 @@ mod tests {
             }
             other => panic!("expected STATE_DELTA, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn restore_widget_action_short_circuits_and_repins() {
+        let store = Arc::new(UiSurfaceStore::new());
+        let adapter = AgUiAdapter::new(&store);
+
+        let sid = SessionId(Uuid::new_v4());
+        let surface_id = UiSurfaceId::new();
+        let (loop_tx, mut loop_rx) = mpsc::unbounded_channel();
+        adapter.register_session(sid, loop_tx).await;
+
+        let old = Widget {
+            payload: WidgetPayload::Inline(json!({"type": "EntityCloud"})),
+            ..active_widget(sid, surface_id)
+        };
+        let old_id = old.id;
+        store.emit(old).await.unwrap();
+        let new = Widget {
+            payload: WidgetPayload::Inline(json!({"type": "EntityCloud"})),
+            ..active_widget(sid, surface_id)
+        };
+        let new_id = new.id;
+        store.supersede(old_id, new).await.unwrap();
+        store.pin_to_canvas(new_id).await.unwrap();
+        assert_eq!(
+            store.snapshot(sid).await.unwrap().surface.canvas_slot,
+            Some(new_id)
+        );
+
+        let status = post_widget_event(
+            Path(sid.0.to_string()),
+            State(adapter.state.clone()),
+            Json(WidgetEvent {
+                widget_id: old_id,
+                surface_id,
+                action: "restore_widget".into(),
+                data: json!({}),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        assert_eq!(
+            store.snapshot(sid).await.unwrap().surface.canvas_slot,
+            Some(old_id)
+        );
+        // Lifecycle state of the superseded widget is untouched.
+        assert_eq!(
+            store.get_widget(old_id).await.unwrap().state,
+            WidgetState::Superseded
+        );
+        // No LoopEvent forwarded — restore is a pure UI op.
+        assert!(matches!(
+            loop_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn nav_slot_action_short_circuits_and_walks_history() {
+        let store = Arc::new(UiSurfaceStore::new());
+        let adapter = AgUiAdapter::new(&store);
+
+        let sid = SessionId(Uuid::new_v4());
+        let surface_id = UiSurfaceId::new();
+        let (loop_tx, mut loop_rx) = mpsc::unbounded_channel();
+        adapter.register_session(sid, loop_tx).await;
+
+        let w1 = active_widget(sid, surface_id);
+        let w2 = active_widget(sid, surface_id);
+        let (id1, id2) = (w1.id, w2.id);
+        store.emit(w1).await.unwrap();
+        store.emit(w2).await.unwrap();
+        store.pin_to_canvas(id1).await.unwrap();
+        store.pin_to_canvas(id2).await.unwrap();
+
+        let status = post_widget_event(
+            Path(sid.0.to_string()),
+            State(adapter.state.clone()),
+            Json(WidgetEvent {
+                widget_id: WidgetId(Uuid::nil()),
+                surface_id,
+                action: "nav_slot".into(),
+                data: json!({"slot": "canvas", "direction": "back"}),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        let snap = store.snapshot(sid).await.unwrap();
+        assert_eq!(snap.surface.canvas_slot, Some(id1));
+        assert_eq!(snap.surface.canvas_cursor, Some(0));
+        // History is intact — back does not truncate.
+        assert_eq!(snap.surface.canvas_history, vec![id1, id2]);
+
+        // No LoopEvent forwarded.
+        assert!(matches!(
+            loop_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        // Bad payload → still ACCEPTED, but no slot change.
+        let status = post_widget_event(
+            Path(sid.0.to_string()),
+            State(adapter.state.clone()),
+            Json(WidgetEvent {
+                widget_id: WidgetId(Uuid::nil()),
+                surface_id,
+                action: "nav_slot".into(),
+                data: json!({"slot": "wat"}),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            store.snapshot(sid).await.unwrap().surface.canvas_slot,
+            Some(id1)
+        );
     }
 
     #[tokio::test]

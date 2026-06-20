@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use crate::ag_ui::adapter::Branding;
-use crate::surface::{UiNotification, UiSurfaceSnapshot, UiSurfaceStore};
+use crate::surface::{SlotKind, SlotNavState, UiNotification, UiSurfaceSnapshot, UiSurfaceStore};
 
 /// Serialize a surface snapshot into the canonical state shape
 /// described in the migration design doc §3. Emitted as the body of
@@ -47,6 +47,9 @@ pub fn canonical_state(
     if let Some(id) = snap.surface.canvas_aux_slot {
         pinned.insert(id.0.to_string(), Value::Bool(true));
     }
+    if let Some(id) = snap.surface.wiki_slot {
+        pinned.insert(id.0.to_string(), Value::Bool(true));
+    }
     let order: Vec<Value> = snap
         .surface
         .widget_order
@@ -74,11 +77,23 @@ pub fn canonical_state(
         })
     });
 
+    let canvas_nav =
+        SlotNavState::from_history(&snap.surface.canvas_history, snap.surface.canvas_cursor);
+    let canvas_aux_nav = SlotNavState::from_history(
+        &snap.surface.canvas_aux_history,
+        snap.surface.canvas_aux_cursor,
+    );
+    let wiki_nav = SlotNavState::from_history(&snap.surface.wiki_history, snap.surface.wiki_cursor);
+
     json!({
         "widgets": Value::Object(widgets),
         "widgetOrder": Value::Array(order),
         "canvasSlot": snap.surface.canvas_slot.map(|id| id.0.to_string()),
         "canvasAuxSlot": snap.surface.canvas_aux_slot.map(|id| id.0.to_string()),
+        "wikiSlot": snap.surface.wiki_slot.map(|id| id.0.to_string()),
+        "canvasNav": canvas_nav,
+        "canvasAuxNav": canvas_aux_nav,
+        "wikiNav": wiki_nav,
         "pinnedIds": Value::Object(pinned),
         "pressed": {},
         "focusedScope": Value::Object(focus_map),
@@ -114,14 +129,43 @@ pub async fn notification_to_patches(
         UiNotification::Expired { id } => Some(vec![
             json!({"op": "replace", "path": format!("/widgets/{}/state", id.0), "value": "Expired"}),
         ]),
-        UiNotification::Pinned { id } => Some(vec![
-            json!({"op": "replace", "path": "/canvasSlot", "value": id.0.to_string()}),
-            json!({"op": "add", "path": format!("/pinnedIds/{}", id.0), "value": true}),
-        ]),
-        UiNotification::AuxPinned { id } => Some(vec![
-            json!({"op": "replace", "path": "/canvasAuxSlot", "value": id.0.to_string()}),
-            json!({"op": "add", "path": format!("/pinnedIds/{}", id.0), "value": true}),
-        ]),
+        UiNotification::Pinned { id } => {
+            let session = store.get_widget(*id).await?.session_id;
+            let nav = store.slot_nav_state(session, SlotKind::Canvas).await;
+            Some(vec![
+                json!({"op": "replace", "path": "/canvasSlot", "value": id.0.to_string()}),
+                json!({"op": "add", "path": format!("/pinnedIds/{}", id.0), "value": true}),
+                json!({"op": "replace", "path": "/canvasNav", "value": nav}),
+            ])
+        }
+        UiNotification::AuxPinned { id } => {
+            let session = store.get_widget(*id).await?.session_id;
+            let nav = store.slot_nav_state(session, SlotKind::Aux).await;
+            Some(vec![
+                json!({"op": "replace", "path": "/canvasAuxSlot", "value": id.0.to_string()}),
+                json!({"op": "add", "path": format!("/pinnedIds/{}", id.0), "value": true}),
+                json!({"op": "replace", "path": "/canvasAuxNav", "value": nav}),
+            ])
+        }
+        UiNotification::WikiPinned { id } => {
+            let session = store.get_widget(*id).await?.session_id;
+            let nav = store.slot_nav_state(session, SlotKind::Wiki).await;
+            Some(vec![
+                json!({"op": "replace", "path": "/wikiSlot", "value": id.0.to_string()}),
+                json!({"op": "add", "path": format!("/pinnedIds/{}", id.0), "value": true}),
+                json!({"op": "replace", "path": "/wikiNav", "value": nav}),
+            ])
+        }
+        UiNotification::WikiUnpinned { session_id, .. } => {
+            // close-keeps-history: emit fresh nav state alongside the
+            // cleared slot pointer so back/forward chevrons stay enabled
+            // and clickable into the previous wiki.
+            let nav = store.slot_nav_state(*session_id, SlotKind::Wiki).await;
+            Some(vec![
+                json!({"op": "replace", "path": "/wikiSlot", "value": Value::Null}),
+                json!({"op": "replace", "path": "/wikiNav", "value": nav}),
+            ])
+        }
         UiNotification::ButtonHighlighted {
             widget_id,
             button_id,
@@ -157,7 +201,9 @@ pub async fn notification_session(
         UiNotification::Resolved { id, .. }
         | UiNotification::Expired { id }
         | UiNotification::Pinned { id }
-        | UiNotification::AuxPinned { id } => store.get_widget(*id).await.map(|w| w.session_id),
+        | UiNotification::AuxPinned { id }
+        | UiNotification::WikiPinned { id } => store.get_widget(*id).await.map(|w| w.session_id),
+        UiNotification::WikiUnpinned { session_id, .. } => Some(*session_id),
         UiNotification::ButtonHighlighted { widget_id, .. } => {
             store.get_widget(*widget_id).await.map(|w| w.session_id)
         }
@@ -176,10 +222,12 @@ pub async fn notification_surface(
         UiNotification::Resolved { id, .. }
         | UiNotification::Expired { id }
         | UiNotification::Pinned { id }
-        | UiNotification::AuxPinned { id } => store
+        | UiNotification::AuxPinned { id }
+        | UiNotification::WikiPinned { id } => store
             .get_widget(*id)
             .await
             .map(|w| w.surface_id.0.to_string()),
+        UiNotification::WikiUnpinned { surface_id, .. } => Some(surface_id.0.to_string()),
         UiNotification::ButtonHighlighted { widget_id, .. } => store
             .get_widget(*widget_id)
             .await
@@ -224,11 +272,9 @@ mod tests {
         let w = sample_widget(sid, surf);
         let snap = UiSurfaceSnapshot {
             surface: UiSurface {
-                id: surf,
-                session_id: sid,
-                widget_order: vec![w.id],
                 canvas_slot: Some(w.id),
-                canvas_aux_slot: None,
+                widget_order: vec![w.id],
+                ..UiSurface::new(surf, sid)
             },
             widgets: vec![w.clone()],
         };
@@ -247,13 +293,7 @@ mod tests {
         let sid = SessionId(Uuid::new_v4());
         let surf = UiSurfaceId::new();
         let snap = UiSurfaceSnapshot {
-            surface: UiSurface {
-                id: surf,
-                session_id: sid,
-                widget_order: vec![],
-                canvas_slot: None,
-                canvas_aux_slot: None,
-            },
+            surface: UiSurface::new(surf, sid),
             widgets: vec![],
         };
         let mut focus = HashMap::new();
