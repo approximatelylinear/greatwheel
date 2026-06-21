@@ -1,5 +1,11 @@
 FROM rust:1.91-bookworm AS builder
 
+# `protoc` is required by lance-encoding's build script (and other crates that
+# pull in prost-build). Install once so the layer caches.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
 COPY crates/ crates/
