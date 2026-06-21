@@ -1,10 +1,14 @@
 FROM rust:1.91-bookworm AS builder
 
 # `protoc` is required by lance-encoding's build script (and other crates that
-# pull in prost-build). Install once so the layer caches.
+# pull in prost-build). `libprotobuf-dev` ships the well-known proto files
+# (google/protobuf/empty.proto etc.) that protobuf-compiler alone does not
+# include. PROTOC_INCLUDE tells prost-build where to find them.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
+    libprotobuf-dev \
     && rm -rf /var/lib/apt/lists/*
+ENV PROTOC_INCLUDE=/usr/include
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
