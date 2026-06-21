@@ -2,7 +2,10 @@ name: deploy
 
 on:
   push:
-    branches: [main]
+    # `feat/deploy` is here temporarily so the rollout branch can verify CI
+    # before merging to main. Remove it once the first push-to-main has
+    # successfully built and pushed an image.
+    branches: [main, feat/deploy]
     tags: ['v*']
   workflow_dispatch:
 
