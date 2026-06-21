@@ -315,8 +315,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     gw_trace::init_tracing(&config.tracing, trace_pool).expect("Failed to initialize tracing");
 
-    if pg_pool.is_some() {
+    if let Some(pool) = pg_pool.as_ref() {
         tracing::info!("Database connected");
+        // Apply schema migrations before serving traffic. Single-instance
+        // deployment, so no concurrent-migration race to worry about.
+        sqlx::migrate!("../../migrations")
+            .run(pool)
+            .await
+            .expect("Failed to run database migrations");
+        tracing::info!("Database migrations applied");
     }
 
     let backend = config

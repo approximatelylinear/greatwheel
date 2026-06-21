@@ -30,9 +30,11 @@ services:
       - greatwheel
 
   greatwheel:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
+    # Pull the pre-built image from ghcr.io instead of compiling on the VM.
+    # GW_VERSION (set in .env) pins a release; defaults to `latest`, which
+    # the build workflow tags only on `v*` git tags. Use `:main` to track
+    # the main branch instead.
+    image: ${GW_IMAGE:-ghcr.io/approximatelylinear/greatwheel}:${GW_VERSION:-latest}
     restart: unless-stopped
     command: ["--config", "/etc/greatwheel/greatwheel.prod.toml"]
     environment:
